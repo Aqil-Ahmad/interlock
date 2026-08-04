@@ -2,6 +2,22 @@ packages:
   - 'packages/*'
   # Excluded until it declares its react/vite dependencies.
   - '!packages/dashboard'
+# Build scripts are blocked by default. esbuild's postinstall resolves its
+# platform-native binary, which vitest needs to run at all.
+allowBuilds:
+  esbuild: true
+minimumReleaseAgeExclude:
+  - '@typescript-eslint/eslint-plugin@8.66.0'
+  - '@typescript-eslint/parser@8.66.0'
+  - '@typescript-eslint/project-service@8.66.0'
+  - '@typescript-eslint/scope-manager@8.66.0'
+  - '@typescript-eslint/tsconfig-utils@8.66.0'
+  - '@typescript-eslint/type-utils@8.66.0'
+  - '@typescript-eslint/types@8.66.0'
+  - '@typescript-eslint/typescript-estree@8.66.0'
+  - '@typescript-eslint/utils@8.66.0'
+  - '@typescript-eslint/visitor-keys@8.66.0'
+  - typescript-eslint@8.66.0
 
 # `eval/` is deliberately not a workspace package: it is evaluation code rather
 # than product code, and keeping it out makes that boundary structural.

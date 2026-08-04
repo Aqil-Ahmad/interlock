@@ -24,5 +24,8 @@
     "build": "tsc --build",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^26.1.2"
+  }
 }
