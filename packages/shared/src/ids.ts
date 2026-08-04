@@ -46,20 +46,34 @@ function encodeTime(time: number): string {
   return out;
 }
 
-function encodeRandom(bytes: Uint8Array): string {
+/**
+ * Random component as base-32 digits, one per output character.
+ *
+ * Stored pre-reduced rather than as raw bytes: `bumpRandom` has to carry in the
+ * same base the encoding uses, or incrementing past a digit boundary moves the
+ * id backwards lexicographically. 256 is a multiple of 32, so reducing here is
+ * uniform.
+ */
+function randomDigits(): Uint8Array {
+  const digits = randomFillSync(new Uint8Array(RANDOM_LEN));
+  for (let i = 0; i < digits.length; i++) digits[i] = digits[i]! % 32;
+  return digits;
+}
+
+function encodeRandom(digits: Uint8Array): string {
   let out = '';
-  for (const byte of bytes) out += ENCODING[byte % 32]!;
+  for (const digit of digits) out += ENCODING[digit]!;
   return out;
 }
 
 /** Increment the random component in place so ids from the same ms still sort. */
-function bumpRandom(bytes: Uint8Array): void {
-  for (let i = bytes.length - 1; i >= 0; i--) {
-    if (bytes[i]! < 255) {
-      bytes[i] = bytes[i]! + 1;
+function bumpRandom(digits: Uint8Array): void {
+  for (let i = digits.length - 1; i >= 0; i--) {
+    if (digits[i]! < 31) {
+      digits[i] = digits[i]! + 1;
       return;
     }
-    bytes[i] = 0;
+    digits[i] = 0;
   }
 }
 
@@ -75,7 +89,7 @@ export function ulid<T extends Ulid<string> = Ulid<string>>(now: number = Date.n
     bumpRandom(lastRandom);
   } else {
     lastTime = now;
-    lastRandom = randomFillSync(new Uint8Array(RANDOM_LEN));
+    lastRandom = randomDigits();
   }
   return (encodeTime(now) + encodeRandom(lastRandom)) as T;
 }
