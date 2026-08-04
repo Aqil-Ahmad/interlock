@@ -1,6 +1,7 @@
 import { notImplemented } from '@interlock/shared';
 import type { MergeOutcome } from '@interlock/shared';
-import type { ShadowRepo, ShadowWorktree } from '../git/shadow.js';
+import type { ShadowRepo } from '../git/repo-handle.js';
+import type { ShadowWorktree } from '../git/shadow.js';
 
 /**
  * Pairwise speculative merge.
