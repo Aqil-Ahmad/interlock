@@ -1,14 +1,14 @@
 # INTERLOCK — Project Plan
 
 **Title:** Interlock: Early Conflict Detection and Integration Intelligence for Parallel AI Coding Agents
-**Team:** [names]  |  **Supervisor:** [name]  |  **Duration:** ~2 semesters (36–40 weeks)
+**Team:** [names] | **Supervisor:** [name] | **Duration:** ~2 semesters (36–40 weeks)
 **Status of this document:** Living plan. Update the STATUS section and milestone checklists as work progresses. This file is the source of truth for scope and direction; CLAUDE.md should point here.
 
 ---
 
 ## 1. One-Paragraph Summary (context for any new session)
 
-Developers increasingly run multiple AI coding agents (Claude Code, Codex CLI, Cursor) in parallel, each in an isolated git worktree/branch. Conflicts between these parallel streams — both textual merge conflicts and *semantic* conflicts (changes that merge cleanly but break the build, types, or tests when combined) — are discovered only at merge time, after hours of agent work and tokens are already wasted (~28% of AI-agent PRs hit merge conflicts per the AgenticFlict dataset). Interlock is a local background service that watches all in-flight branches/worktrees, continuously performs speculative merges between them in hidden shadow worktrees, detects textual and semantic conflicts early, feeds warnings back into the agents themselves via MCP, and recommends a merge order that minimizes conflict cascades.
+Developers increasingly run multiple AI coding agents (Claude Code, Codex CLI, Cursor) in parallel, each in an isolated git worktree/branch. Conflicts between these parallel streams — both textual merge conflicts and _semantic_ conflicts (changes that merge cleanly but break the build, types, or tests when combined) — are discovered only at merge time, after hours of agent work and tokens are already wasted (~28% of AI-agent PRs hit merge conflicts per the AgenticFlict dataset). Interlock is a local background service that watches all in-flight branches/worktrees, continuously performs speculative merges between them in hidden shadow worktrees, detects textual and semantic conflicts early, feeds warnings back into the agents themselves via MCP, and recommends a merge order that minimizes conflict cascades.
 
 ## 2. Goals
 
@@ -20,7 +20,7 @@ Developers increasingly run multiple AI coding agents (Claude Code, Codex CLI, C
 
 ## 3. Non-Goals for v1 (scope guardrails — do not drift)
 
-- No automatic conflict *resolution* that writes to user branches. v1 only detects, explains, and suggests. (LLM-drafted resolution patches are a stretch goal, always behind explicit user approval, applied only in shadow worktrees for preview.)
+- No automatic conflict _resolution_ that writes to user branches. v1 only detects, explains, and suggests. (LLM-drafted resolution patches are a stretch goal, always behind explicit user approval, applied only in shadow worktrees for preview.)
 - No team/server/cloud mode. v1 is single-developer, single-machine, local-first.
 - No GitHub App / CI integration in v1 (design for it, don't build it).
 - AST semantic analysis targets TypeScript/JavaScript only in v1. Python is a stretch goal. Build/typecheck/test-based semantic detection is language-agnostic by design and is the fallback for other languages.
@@ -122,74 +122,92 @@ Conventions: ids are ULIDs; all models JSON-serializable; schema migrations from
 Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risks to watch. Do not start milestone N+1 before N's exit criteria pass, except documentation/eval work which runs continuously. Weeks are approximate; re-baseline in STATUS if needed.
 
 ### M0 — Foundation & Research Spike (Weeks 1–3)
+
 **Goal:** Working skeleton + shared understanding of the problem.
+
 - Monorepo scaffold (pnpm workspaces, strict TS, ESLint/Prettier, Vitest, CI running lint+typecheck+tests on every PR).
 - `packages/shared` with first-pass models and event definitions.
 - ADR-0001 (monorepo), ADR-0002 (license), ADR-0003 (SQLite), ADR-0004 (security posture: shadow-only writes, sandboxed execution).
 - Research spike (throwaway code allowed, keep notes in docs/): manually reproduce (a) a textual conflict and (b) one semantic conflict (rename + stale call site) between two worktrees; write the walkthrough in docs/demo/00-manual-conflict.md.
 - Obtain AgenticFlict dataset; document its schema in eval/agenticflict/README.md.
-**Exit criteria:** `pnpm build && pnpm test` green in CI; the two manual conflict walkthroughs are reproducible by any teammate from the doc.
-**Risks:** over-engineering scaffold; cap M0 at 3 weeks hard.
+  **Exit criteria:** `pnpm build && pnpm test` green in CI; the two manual conflict walkthroughs are reproducible by any teammate from the doc.
+  **Risks:** over-engineering scaffold; cap M0 at 3 weeks hard.
 
 ### M1 — Watcher & Git Core (Weeks 4–7)
-**Goal:** Interlock can *see* everything in flight, without touching it.
+
+**Goal:** Interlock can _see_ everything in flight, without touching it.
+
 - Repo/branch/worktree discovery; uncommitted-change snapshots; merge-base computation; ChangeSet extraction.
 - Filesystem + git-ref watching with debouncing; typed event bus; SQLite store with migrations; daemon skeleton with localhost HTTP API; `interlock status` CLI.
 - Claude Code hook script that registers session ↔ branch mapping with the daemon (best-effort detection when hooks absent).
-**Exit criteria:** with 3 worktrees under active edit, `interlock status` shows live branches, their dirty state, and touched files, updating within seconds; zero writes to user repos (verified by test that hashes user worktree state before/after).
-**Risks:** watcher performance on large repos — measure now, budget: <2% steady-state CPU.
+  **Exit criteria:** with 3 worktrees under active edit, `interlock status` shows live branches, their dirty state, and touched files, updating within seconds; zero writes to user repos (verified by test that hashes user worktree state before/after).
+  **Risks:** watcher performance on large repos — measure now, budget: <2% steady-state CPU.
 
 ### M2 — Speculative Merge Engine + Textual Detection (Weeks 8–12) ★ first real demo
+
 **Goal:** Early warning for textual conflicts.
+
 - Shadow worktree lifecycle under Interlock data dir; temporary commits of dirty state (shadow only); pairwise speculative merges; textual conflict classification into Findings with file/hunk evidence; staleness handling when branches move.
 - Scheduler v1: re-merge only dirty pairs, debounce, prioritize pairs with overlapping touched files.
 - CLI `interlock check A B`; findings visible via API.
-**Exit criteria:** scripted demo — two live Claude Code sessions edit the same function; Interlock raises a textual-conflict Finding in <60s while both sessions are still running; suite of fixture-repo tests for merge/conflict cases passes.
-**Risks:** disk usage of shadow worktrees (use worktrees off a single shadow clone, share object store); correctness of dirty-state snapshotting.
+  **Exit criteria:** scripted demo — two live Claude Code sessions edit the same function; Interlock raises a textual-conflict Finding in <60s while both sessions are still running; suite of fixture-repo tests for merge/conflict cases passes.
+  **Risks:** disk usage of shadow worktrees (use worktrees off a single shadow clone, share object store); correctness of dirty-state snapshotting.
 
 ### M3 — Semantic Detection v1: Build & Typecheck (Weeks 13–17)
+
 **Goal:** Catch "merges cleanly but breaks" — the headline capability.
+
 - Docker sandbox runner: no network, CPU/mem/time limits, mounts merged shadow tree read-only + writable overlay; project toolchain detection (tsconfig/package.json) with per-repo config override.
 - typecheck/build analyzers producing Findings with compiler-output evidence mapped back to the originating branches (which side introduced which half of the breakage).
 - Result caching keyed by (snapshotA, snapshotB, analyzer, toolchain).
-**Exit criteria:** demo — branch A renames an exported function, branch B adds a call to the old name; both branches build green alone; Interlock flags the pair with a typecheck Finding and correct dual-branch attribution in <3 min; false-positive rate on non-conflicting fixture pairs = 0.
-**Risks:** toolchain diversity — support pnpm/npm/yarn TS projects first, document limits honestly.
+  **Exit criteria:** demo — branch A renames an exported function, branch B adds a call to the old name; both branches build green alone; Interlock flags the pair with a typecheck Finding and correct dual-branch attribution in <3 min; false-positive rate on non-conflicting fixture pairs = 0.
+  **Risks:** toolchain diversity — support pnpm/npm/yarn TS projects first, document limits honestly.
 
 ### M4 — Semantic Detection v2: AST Cross-Branch Analysis + Targeted Tests (Weeks 18–21)
+
 **Goal:** Faster, cheaper semantic signals + deeper explanations.
+
 - tree-sitter symbol extraction for TS/JS; cross-branch matchers: rename vs call-site, signature-arity change vs callers, deleted/moved export vs import, same-symbol dual-edit, duplicate implementation detection.
 - Test-impact selection: run only tests touching files/symbols in the union diff, inside the sandbox; flaky-test quarantine list.
 - Finding ranking (severity × confidence) in `core/advisor`.
-**Exit criteria:** AST analyzer flags the M3 demo case in <10s without invoking the compiler; measured on the fixture golden set: AST-layer precision ≥0.9, and combined analyzers' recall reported (target ≥0.8) with every false positive triaged into an issue.
-**Risks:** AST matcher precision — prefer high-precision/lower-recall rules; the sandbox analyzers remain the safety net.
+  **Exit criteria:** AST analyzer flags the M3 demo case in <10s without invoking the compiler; measured on the fixture golden set: AST-layer precision ≥0.9, and combined analyzers' recall reported (target ≥0.8) with every false positive triaged into an issue.
+  **Risks:** AST matcher precision — prefer high-precision/lower-recall rules; the sandbox analyzers remain the safety net.
 
 ### M5 — Closing the Loop: MCP Server & Agent Feedback (Weeks 22–25)
+
 **Goal:** Agents adapt mid-task instead of colliding blindly.
+
 - MCP server (localhost, token-auth) with tools such as: `get_conflicts_for_my_branch`, `check_file_overlap(paths)`, `get_pending_changes(path)` (peer-branch diff summaries), `propose_merge_order`.
 - Claude Code integration recipe: hooks + CLAUDE.md snippet so sessions consult Interlock before large edits and receive warning injections when a Finding involves their branch.
 - Advisory payloads designed for LLM consumption (short, evidence-linked, action-oriented).
-**Exit criteria:** recorded A/B demo — same two-agent collision scenario run with and without Interlock MCP enabled; with Interlock, at least one agent visibly adjusts (acknowledges peer change / edits different location / coordinates), and the session transcripts are archived as evaluation artifacts.
-**Risks:** prompt-injection surface and noise — see SECURITY; warnings must be rare, high-precision, and rate-limited or agents/users will ignore them.
+  **Exit criteria:** recorded A/B demo — same two-agent collision scenario run with and without Interlock MCP enabled; with Interlock, at least one agent visibly adjusts (acknowledges peer change / edits different location / coordinates), and the session transcripts are archived as evaluation artifacts.
+  **Risks:** prompt-injection surface and noise — see SECURITY; warnings must be rare, high-precision, and rate-limited or agents/users will ignore them.
 
 ### M6 — Dashboard & CLI Polish (Weeks 26–29)
+
 **Goal:** The thing people can see — for demos, supervisor, and the defense.
+
 - React dashboard: live branch map, pairwise conflict heatmap, Finding detail view (evidence, both diffs, analyzer output), event timeline, recommended order view; websocket updates.
 - CLI parity for all read paths; `interlock daemon` UX (install, autostart, logs).
 - Onboarding: `interlock init` sets up a repo in <2 minutes, including hook installation.
-**Exit criteria:** a stranger (supervisor) follows README quickstart on a fresh machine and reaches the live heatmap in ≤10 minutes; UI updates <1s after a Finding.
-**Risks:** UI scope creep — dashboard is secondary to the daemon; timebox hard.
+  **Exit criteria:** a stranger (supervisor) follows README quickstart on a fresh machine and reaches the live heatmap in ≤10 minutes; UI updates <1s after a Finding.
+  **Risks:** UI scope creep — dashboard is secondary to the daemon; timebox hard.
 
 ### M7 — Integration Advisor (Weeks 30–33, stretch-but-planned)
+
 **Goal:** From detection to guidance.
+
 - Merge-order recommendation: model pairwise conflict graph, propose landing order minimizing expected conflicts/rework; auto-rebase simulation in shadow (never on user branches) to validate the proposed order; optional LLM-generated human-readable explanation per Finding and, behind approval, a draft resolution patch previewed in shadow.
-**Exit criteria:** on replayed 3–5-branch scenarios, following Interlock's recommended order yields measurably fewer conflict-hunks/failed merges than naive FIFO order (report the numbers); any LLM feature is off by default and clearly labeled.
-**Risks:** this is research-flavored — if behind schedule, ship order-recommendation only and move LLM resolution to Future Work.
+  **Exit criteria:** on replayed 3–5-branch scenarios, following Interlock's recommended order yields measurably fewer conflict-hunks/failed merges than naive FIFO order (report the numbers); any LLM feature is off by default and clearly labeled.
+  **Risks:** this is research-flavored — if behind schedule, ship order-recommendation only and move LLM resolution to Future Work.
 
 ### M8 — Evaluation, Hardening & Thesis (Weeks 34–40)
+
 **Goal:** Numbers that survive a defense.
+
 - Execute EVALUATION.md protocols (below): golden fixture set, replayed OSS histories, AgenticFlict-derived cases; overhead benchmarks; ablations (textual-only vs +typecheck vs +AST vs full).
 - Bug-fix freeze weeks; docs completeness pass; demo video; thesis writing (architecture, methodology, results, threats to validity, future work).
-**Exit criteria:** all headline metrics reported with methodology; reproducible eval (`pnpm eval` regenerates reports); thesis draft complete.
+  **Exit criteria:** all headline metrics reported with methodology; reproducible eval (`pnpm eval` regenerates reports); thesis draft complete.
 
 ---
 
@@ -238,14 +256,14 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 
 ## 13. Risk Register (review monthly)
 
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| Speculative merge cost explodes with N branches | M | H | pairwise scheduling on touched-file overlap first; caching; budget & bench from M2 |
-| False positives erode trust | M | H | precision-first matchers; sandbox verdicts as ground truth; FP metric tracked weekly |
-| Toolchain diversity (builds fail for env reasons) | H | M | narrow v1 to TS/JS + documented toolchains; per-repo config; classify "infra-fail" separately from Findings |
-| Anthropic/Cursor ship basic same-file warnings | M | M | our moat is semantic layer + cross-tool + order advisor; keep those front and center |
-| Team bandwidth / course load | H | M | milestones sized for ~15 h/wk/person; M7 explicitly droppable |
-| Dataset issues (AgenticFlict access/format) | L | M | fixtures + OSS replay are self-sufficient; dataset is additive |
+| Risk                                              | Likelihood | Impact | Mitigation                                                                                                  |
+| ------------------------------------------------- | ---------- | ------ | ----------------------------------------------------------------------------------------------------------- |
+| Speculative merge cost explodes with N branches   | M          | H      | pairwise scheduling on touched-file overlap first; caching; budget & bench from M2                          |
+| False positives erode trust                       | M          | H      | precision-first matchers; sandbox verdicts as ground truth; FP metric tracked weekly                        |
+| Toolchain diversity (builds fail for env reasons) | H          | M      | narrow v1 to TS/JS + documented toolchains; per-repo config; classify "infra-fail" separately from Findings |
+| Anthropic/Cursor ship basic same-file warnings    | M          | M      | our moat is semantic layer + cross-tool + order advisor; keep those front and center                        |
+| Team bandwidth / course load                      | H          | M      | milestones sized for ~15 h/wk/person; M7 explicitly droppable                                               |
+| Dataset issues (AgenticFlict access/format)       | L          | M      | fixtures + OSS replay are self-sufficient; dataset is additive                                              |
 
 ## 14. STATUS (update weekly)
 

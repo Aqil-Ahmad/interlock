@@ -10,11 +10,11 @@ How detection quality, latency and overhead are measured. Metric definitions are
 
 ## Datasets
 
-| Dataset | What it is | Labels | Used for |
-|---|---|---|---|
-| **Golden fixtures** (`eval/fixtures/`) | small synthetic repos with planted conflicts | exact, by construction | precision/recall per analyzer and per matcher; regression suite |
-| **OSS replay** (`eval/replay/`) | concurrent branch histories replayed from real TypeScript repos | whether the real merge or CI broke | realism; false-positive rate on genuinely independent work |
-| **AgenticFlict** (`eval/agenticflict/`) | published dataset of conflicts in AI-agent PRs | dataset-provided | external validity |
+| Dataset                                 | What it is                                                      | Labels                             | Used for                                                        |
+| --------------------------------------- | --------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------- |
+| **Golden fixtures** (`eval/fixtures/`)  | small synthetic repos with planted conflicts                    | exact, by construction             | precision/recall per analyzer and per matcher; regression suite |
+| **OSS replay** (`eval/replay/`)         | concurrent branch histories replayed from real TypeScript repos | whether the real merge or CI broke | realism; false-positive rate on genuinely independent work      |
+| **AgenticFlict** (`eval/agenticflict/`) | published dataset of conflicts in AI-agent PRs                  | dataset-provided                   | external validity                                               |
 
 Fixtures cover at minimum: textual overlap; adjacent additions; rename vs call site; signature change vs caller; moved export vs import; same-symbol dual edit; duplicate implementation; and near-miss negatives — pairs that look conflicting but are independent. Precision is only interesting against hard negatives.
 
@@ -26,7 +26,7 @@ Per analyzer, per matcher, and combined:
 
 - **Precision** = TP / (TP + FP)
 - **Recall** = TP / (TP + FN)
-- A **true positive** names the right pair *and* the right location. Naming the pair for the wrong reason is not a hit.
+- A **true positive** names the right pair _and_ the right location. Naming the pair for the wrong reason is not a hit.
 
 Targets: AST-layer precision ≥ 0.9; combined recall ≥ 0.8, reported honestly whatever it is.
 

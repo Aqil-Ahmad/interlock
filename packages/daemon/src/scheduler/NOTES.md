@@ -41,13 +41,13 @@ A Finding whose pair is stale is shown, marked stale, rather than hidden. Hiding
 
 ## Budgets (tracked in `pnpm bench`)
 
-| Metric | Budget |
-|---|---|
-| Steady-state CPU, no edits | <2% |
-| Scheduling decision latency | <10ms per event |
-| Time from edit to textual Finding | <60s |
-| Time from edit to typecheck Finding | <3min |
-| Queue depth at N=8 branches | bounded; drop lowest-priority pairs rather than growing |
+| Metric                              | Budget                                                  |
+| ----------------------------------- | ------------------------------------------------------- |
+| Steady-state CPU, no edits          | <2%                                                     |
+| Scheduling decision latency         | <10ms per event                                         |
+| Time from edit to textual Finding   | <60s                                                    |
+| Time from edit to typecheck Finding | <3min                                                   |
+| Queue depth at N=8 branches         | bounded; drop lowest-priority pairs rather than growing |
 
 ## Open questions
 

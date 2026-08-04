@@ -51,11 +51,7 @@ export interface Attribution {
   readonly rationale: string;
 }
 
-export type Evidence =
-  | SpanEvidence
-  | ProcessOutputEvidence
-  | SymbolTrailEvidence
-  | TestEvidence;
+export type Evidence = SpanEvidence | ProcessOutputEvidence | SymbolTrailEvidence | TestEvidence;
 
 /** A file/line span on one of the two branches. */
 export interface SpanEvidence {
@@ -106,7 +102,15 @@ export interface SourceLocation {
   readonly column: number | null;
 }
 
-/** Ranking key: severity × confidence. */
+/** Relative severity, ascending. The ordering ranking sorts on. */
+export const SEVERITY_RANK: Record<Severity, number> = { info: 0, low: 1, medium: 2, high: 3 };
+
+/**
+ * Noise-budget score: severity × confidence.
+ *
+ * Used to decide whether a finding is worth delivering at all, not what order
+ * findings appear in — that is severity-dominant, see `rankFindings`.
+ */
 export function findingWeight(finding: Finding): number {
   const severityWeight: Record<Severity, number> = { info: 0.1, low: 0.3, medium: 0.6, high: 1 };
   return severityWeight[finding.severity] * finding.confidence;

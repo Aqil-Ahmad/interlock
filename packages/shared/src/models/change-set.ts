@@ -41,14 +41,7 @@ export interface Hunk {
 }
 
 export type SymbolKind =
-  | 'function'
-  | 'method'
-  | 'class'
-  | 'interface'
-  | 'type'
-  | 'variable'
-  | 'enum'
-  | 'module';
+  'function' | 'method' | 'class' | 'interface' | 'type' | 'variable' | 'enum' | 'module';
 
 /**
  * A named program symbol, addressed well enough to compare across branches.

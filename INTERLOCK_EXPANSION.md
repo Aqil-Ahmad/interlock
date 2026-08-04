@@ -1,8 +1,8 @@
 # INTERLOCK — Expansion & Fallback Roadmap (Plans B, C, D…)
 
-**Purpose:** Interlock's core bet (early conflict detection for parallel agents) could be threatened by (a) incumbents shipping basic conflict warnings, (b) multi-agent workflows growing slower than expected, or (c) the parallel pattern being absorbed into platforms. This document lists expansion features that reuse the same engine so the product survives — and can be *sold* — even if the core wedge weakens. These are not new projects; each is a feature that becomes a headline product under a different market scenario.
+**Purpose:** Interlock's core bet (early conflict detection for parallel agents) could be threatened by (a) incumbents shipping basic conflict warnings, (b) multi-agent workflows growing slower than expected, or (c) the parallel pattern being absorbed into platforms. This document lists expansion features that reuse the same engine so the product survives — and can be _sold_ — even if the core wedge weakens. These are not new projects; each is a feature that becomes a headline product under a different market scenario.
 
-**Strategy in one line:** we are not building "a conflict detector" — we are building a **continuously-verifying integration engine** (watch everything in flight → speculatively combine → execute safely → analyze semantically → attribute → advise). Conflict detection is only the *first* product that engine powers.
+**Strategy in one line:** we are not building "a conflict detector" — we are building a **continuously-verifying integration engine** (watch everything in flight → speculatively combine → execute safely → analyze semantically → attribute → advise). Conflict detection is only the _first_ product that engine powers.
 
 ---
 
@@ -10,27 +10,27 @@
 
 Everything below reuses assets the core plan (INTERLOCK_PLAN.md) already builds:
 
-| Asset | Built in | Reused by |
-|---|---|---|
-| Watcher: live map of branches/worktrees/sessions | M1 | F3, F4, F6 |
-| Session ↔ branch ↔ change attribution + event log | M1 | F3, F6 |
-| Shadow worktrees + speculative merge engine | M2 | F1, F2, F4 |
-| Docker sandbox (build/typecheck/targeted tests) | M3 | F1, F2 |
-| AST/symbol graph + cross-branch matchers | M4 | F1, F4, F5 |
-| MCP server + agent feedback channel | M5 | F1, F2, F5 |
-| Advisor (ranking, merge-order) + auto-rebase-in-shadow | M7 | F2 |
+| Asset                                                  | Built in | Reused by  |
+| ------------------------------------------------------ | -------- | ---------- |
+| Watcher: live map of branches/worktrees/sessions       | M1       | F3, F4, F6 |
+| Session ↔ branch ↔ change attribution + event log      | M1       | F3, F6     |
+| Shadow worktrees + speculative merge engine            | M2       | F1, F2, F4 |
+| Docker sandbox (build/typecheck/targeted tests)        | M3       | F1, F2     |
+| AST/symbol graph + cross-branch matchers               | M4       | F1, F4, F5 |
+| MCP server + agent feedback channel                    | M5       | F1, F2, F5 |
+| Advisor (ranking, merge-order) + auto-rebase-in-shadow | M7       | F2         |
 
 Rule of thumb: a feature belongs in this file only if ≥60% of it is already built by the core milestones. Anything else is a new project and doesn't belong here.
 
 ---
 
-## F1 — Pre-Merge Verification Reports ("Evidence Packs")  → PLAN B (primary fallback)
+## F1 — Pre-Merge Verification Reports ("Evidence Packs") → PLAN B (primary fallback)
 
 **What:** For every in-flight branch (even with only ONE agent running), Interlock produces a continuously-updated verification report before a PR exists: what changed at the symbol level, whether it builds/typechecks against latest main, which impacted tests pass/fail, diff coverage, risky patterns (test weakening, hardcoded values, swallowed errors), and a risk score. Attached automatically to the PR when opened ("Verified by Interlock" check + human-readable report).
 
 **Why workflows are heading here:** the industry's #1 bottleneck is verification capacity — humans can't review the volume agents produce. Review is shifting from "read all the code" to "audit the evidence." Every agent user has this problem from the first session; it does not require the parallel workflow at all.
 
-**Scenario where it becomes the headline:** multi-agent adoption stalls, but single-agent usage keeps growing (near-certain). TAM is *every* agent user, not just fleet users.
+**Scenario where it becomes the headline:** multi-agent adoption stalls, but single-agent usage keeps growing (near-certain). TAM is _every_ agent user, not just fleet users.
 
 **Reuses:** sandbox analyzers (M3), AST semantic diff (M4), scheduler — pointed at (branch × main) instead of (branch × branch). New work: report generator, PR integration, risky-pattern detectors.
 
@@ -38,13 +38,13 @@ Rule of thumb: a feature belongs in this file only if ≥60% of it is already bu
 
 ---
 
-## F2 — Agent-Native Merge Queue ("Landing Orchestrator")  → PLAN C
+## F2 — Agent-Native Merge Queue ("Landing Orchestrator") → PLAN C
 
-**What:** Graduate the M7 advisor from *suggesting* order to *executing* it: a local/team merge queue that lands agent branches one by one — auto-rebase in shadow, re-verify (build/typecheck/impacted tests) against the exact post-rebase state, land if green, notify the owning agent to fix if red. Batching and reordering to minimize total verification time.
+**What:** Graduate the M7 advisor from _suggesting_ order to _executing_ it: a local/team merge queue that lands agent branches one by one — auto-rebase in shadow, re-verify (build/typecheck/impacted tests) against the exact post-rebase state, land if green, notify the owning agent to fix if red. Batching and reordering to minimize total verification time.
 
-**Why workflows are heading here:** when agents produce 10–50 branches/day per team, landing becomes the choke point regardless of whether branches *conflict* — ordering, freshness, and re-verification are eternal coordination problems (GitHub merge queue exists for exactly this reason, but is textual, CI-bound, server-side, and agent-blind).
+**Why workflows are heading here:** when agents produce 10–50 branches/day per team, landing becomes the choke point regardless of whether branches _conflict_ — ordering, freshness, and re-verification are eternal coordination problems (GitHub merge queue exists for exactly this reason, but is textual, CI-bound, server-side, and agent-blind).
 
-**Scenario where it becomes the headline:** conflicts turn out to be rarer than expected (good task decomposition), but branch *volume* is still high. Coordination revenue survives even in a low-conflict world.
+**Scenario where it becomes the headline:** conflicts turn out to be rarer than expected (good task decomposition), but branch _volume_ is still high. Coordination revenue survives even in a low-conflict world.
 
 **Reuses:** advisor + auto-rebase + full analyzer pipeline + MCP notify channel. New work: queue state machine, landing policies, failure handoff protocol.
 
@@ -52,11 +52,11 @@ Rule of thumb: a feature belongs in this file only if ≥60% of it is already bu
 
 ---
 
-## F3 — Provenance & Audit Trail ("Who did what, and why")  → PLAN D
+## F3 — Provenance & Audit Trail ("Who did what, and why") → PLAN D
 
 **What:** Interlock already knows which session (which tool, model, prompt-context window of time) produced which change on which branch. Productize it: a queryable timeline linking every landed line of code to its originating agent session; "AI-blame" alongside git-blame; incident forensics ("this bug landed in commit X — show me the session, what the agent was told, and what it claimed"); exportable audit reports for compliance (AI-governance policies, EU AI Act-era customer questionnaires, SOC2 evidence).
 
-**Why workflows are heading here:** as AI-written code approaches the majority of changes, organizations are being asked — by regulators, security teams, and their own customers — to answer "which code did AI write, under whose supervision, and how was it reviewed?" Almost nobody can answer today; the event log Interlock keeps *is* the answer.
+**Why workflows are heading here:** as AI-written code approaches the majority of changes, organizations are being asked — by regulators, security teams, and their own customers — to answer "which code did AI write, under whose supervision, and how was it reviewed?" Almost nobody can answer today; the event log Interlock keeps _is_ the answer.
 
 **Scenario where it becomes the headline:** enterprises adopt agents but compliance/insurance pressure spikes; detection features commoditize while attribution becomes mandatory. Compliance budgets are the most durable budgets in software.
 
@@ -66,11 +66,11 @@ Rule of thumb: a feature belongs in this file only if ≥60% of it is already bu
 
 ---
 
-## F4 — Team Activity Radar ("Semantic presence for codebases")  → PLAN E
+## F4 — Team Activity Radar ("Semantic presence for codebases") → PLAN E
 
-**What:** Generalize the live branch map beyond agents: a real-time radar of *everything* in flight across a team — humans and agents alike. Who/what is touching which files and symbols right now, hot-zone heatmaps, "heads-up: Sara's branch is mid-refactor of the module you're about to edit" warnings for humans, and daily digest of overlapping work. Google-Docs-style presence, but at the semantic level of a codebase.
+**What:** Generalize the live branch map beyond agents: a real-time radar of _everything_ in flight across a team — humans and agents alike. Who/what is touching which files and symbols right now, hot-zone heatmaps, "heads-up: Sara's branch is mid-refactor of the module you're about to edit" warnings for humans, and daily digest of overlapping work. Google-Docs-style presence, but at the semantic level of a codebase.
 
-**Why workflows are heading here:** hybrid teams (humans + agents) multiply concurrent activity far beyond what standups and Slack can coordinate. Multi-*human* concurrent work is eternal — it existed before agents and survives any agent trend. Research on proactive conflict awareness (Palantír, "crystal ball" studies) validated the value years ago; the volume problem finally makes it commercial.
+**Why workflows are heading here:** hybrid teams (humans + agents) multiply concurrent activity far beyond what standups and Slack can coordinate. Multi-_human_ concurrent work is eternal — it existed before agents and survives any agent trend. Research on proactive conflict awareness (Palantír, "crystal ball" studies) validated the value years ago; the volume problem finally makes it commercial.
 
 **Scenario where it becomes the headline:** the multi-agent trend itself fades (the user's stated fear). If agents vanish tomorrow, every multi-developer team still collides — same engine, human-only market.
 
@@ -80,9 +80,9 @@ Rule of thumb: a feature belongs in this file only if ≥60% of it is already bu
 
 ---
 
-## F5 — Change Intelligence: Breaking-Change & Blast-Radius Detection  → PLAN F
+## F5 — Change Intelligence: Breaking-Change & Blast-Radius Detection → PLAN F
 
-**What:** Point the symbol graph at a *single* change instead of a pair of branches: for any diff, compute its blast radius — which internal/external APIs changed shape, which downstream callers/repos/services are affected, is this change breaking (semver advice for libraries), who owns the affected surface (reviewer routing), and auto-drafted release notes from semantic diffs. Exposed to agents via MCP ("before you change this signature, 14 call sites in 3 packages depend on it") and to humans as a PR annotation.
+**What:** Point the symbol graph at a _single_ change instead of a pair of branches: for any diff, compute its blast radius — which internal/external APIs changed shape, which downstream callers/repos/services are affected, is this change breaking (semver advice for libraries), who owns the affected surface (reviewer routing), and auto-drafted release notes from semantic diffs. Exposed to agents via MCP ("before you change this signature, 14 call sites in 3 packages depend on it") and to humans as a PR annotation.
 
 **Why workflows are heading here:** agents make sweeping changes casually; the expensive failures are downstream breakages nobody predicted. Impact analysis is a decades-old enterprise need (monorepo "affected targets", API-diff tools) that becomes acute when change volume is agent-scale.
 
@@ -94,11 +94,11 @@ Rule of thumb: a feature belongs in this file only if ≥60% of it is already bu
 
 ---
 
-## F6 — Fleet Analytics: Rework, Waste & ROI Attribution  → PLAN G
+## F6 — Fleet Analytics: Rework, Waste & ROI Attribution → PLAN G
 
 **What:** The event log already records the full lifecycle of every branch: created → conflicted → reworked → verified → landed/abandoned. Aggregate it into the dashboard engineering leaders are currently begging for: rework rate per model/tool/config, tokens & hours lost to integration failures, conflict cost per module, landed-vs-abandoned ratio per agent setup, and trend lines proving (or disproving) that the AI spend is working.
 
-**Why workflows are heading here:** 2026's budget pressure is brutal — companies blowing AI budgets with no measurable productivity gain, leadership demanding ROI evidence. Nobody can currently attribute *waste* (duplicated/conflicting/abandoned agent work) because nobody records the integration lifecycle. Interlock does, as a side effect of its core job.
+**Why workflows are heading here:** 2026's budget pressure is brutal — companies blowing AI budgets with no measurable productivity gain, leadership demanding ROI evidence. Nobody can currently attribute _waste_ (duplicated/conflicting/abandoned agent work) because nobody records the integration lifecycle. Interlock does, as a side effect of its core job.
 
 **Scenario where it becomes the headline:** agents are widely used but under CFO scrutiny; measurement outsells prevention. Pairs naturally with F3 (same data, leadership-facing vs compliance-facing).
 
@@ -110,15 +110,15 @@ Rule of thumb: a feature belongs in this file only if ≥60% of it is already bu
 
 ## Scenario → Feature Map (which plan activates when)
 
-| Market scenario (watch quarterly) | Signal to watch | Activate |
-|---|---|---|
-| Incumbent ships same-file conflict warnings | Claude Code / Cursor release notes | Double down on semantic layer + F1, F2 (they won't build these soon) |
-| Multi-agent adoption stalls; single-agent still grows | community surveys, our own telemetry-free user interviews | **F1** becomes the headline product |
-| High branch volume, low conflict rate | our fixture + design-partner data | **F2** (landing orchestration) |
-| Enterprise compliance pressure on AI code | EU AI Act enforcement news, customer questionnaires | **F3** (+ F6) |
-| Agent trend itself declines | usage news, design partners reverting to manual | **F4** (human-only market) |
-| Verification commoditizes, risk insight doesn't | CodeRabbit/Greptile feature creep | **F5** |
-| CFO-driven ROI scrutiny dominates | budget-cut news, "prove it" posts | **F6** |
+| Market scenario (watch quarterly)                     | Signal to watch                                           | Activate                                                             |
+| ----------------------------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------- |
+| Incumbent ships same-file conflict warnings           | Claude Code / Cursor release notes                        | Double down on semantic layer + F1, F2 (they won't build these soon) |
+| Multi-agent adoption stalls; single-agent still grows | community surveys, our own telemetry-free user interviews | **F1** becomes the headline product                                  |
+| High branch volume, low conflict rate                 | our fixture + design-partner data                         | **F2** (landing orchestration)                                       |
+| Enterprise compliance pressure on AI code             | EU AI Act enforcement news, customer questionnaires       | **F3** (+ F6)                                                        |
+| Agent trend itself declines                           | usage news, design partners reverting to manual           | **F4** (human-only market)                                           |
+| Verification commoditizes, risk insight doesn't       | CodeRabbit/Greptile feature creep                         | **F5**                                                               |
+| CFO-driven ROI scrutiny dominates                     | budget-cut news, "prove it" posts                         | **F6**                                                               |
 
 ## Sequencing & Discipline
 

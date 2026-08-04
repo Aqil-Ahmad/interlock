@@ -48,14 +48,14 @@ Two edges carry the security posture (ADR-0004): the dotted edge to user worktre
 
 ## Package map
 
-| Package | Role | Depends on |
-|---|---|---|
-| `@interlock/shared` | models, events, config, errors, logging, ids | nothing |
-| `@interlock/core` | git/shadow ops, speculative merge, analyzers, AST, sandbox, advisor | shared |
-| `@interlock/daemon` | watcher, bus, scheduler, store, API, composition root | shared, core |
-| `@interlock/mcp-server` | agent-facing tools | shared (+ daemon API over HTTP) |
-| `@interlock/cli` | `interlock` command | shared (+ daemon API over HTTP) |
-| `@interlock/dashboard` | React UI | shared (+ daemon API over HTTP) |
+| Package                 | Role                                                                | Depends on                      |
+| ----------------------- | ------------------------------------------------------------------- | ------------------------------- |
+| `@interlock/shared`     | models, events, config, errors, logging, ids                        | nothing                         |
+| `@interlock/core`       | git/shadow ops, speculative merge, analyzers, AST, sandbox, advisor | shared                          |
+| `@interlock/daemon`     | watcher, bus, scheduler, store, API, composition root               | shared, core                    |
+| `@interlock/mcp-server` | agent-facing tools                                                  | shared (+ daemon API over HTTP) |
+| `@interlock/cli`        | `interlock` command                                                 | shared (+ daemon API over HTTP) |
+| `@interlock/dashboard`  | React UI                                                            | shared (+ daemon API over HTTP) |
 
 Dependencies point one way. `shared` imports no sibling; `core` never imports a runtime package. Both are enforced in `eslint.config.js`.
 
@@ -79,14 +79,14 @@ Every step publishes an event with a `causedBy` pointer, so a Finding can be wal
 
 ## Where the hard parts live
 
-| Problem | Lives in | Notes |
-|---|---|---|
-| Not melting the CPU with N² pairs | `daemon/src/scheduler` | `NOTES.md` — debounce, priority, invalidation, budgets |
-| Snapshotting dirty state without touching the user's index | `core/src/git/worktree.ts` | temporary index file; objects only |
-| Disk cost of shadow worktrees | `core/src/git/shadow.ts` | one clone per repo, shared objects, quota + GC |
-| Precision of semantic detection | `core/src/analyzers` | per-matcher confidence caps |
-| Not being ignored by agents | `mcp-server` + `core/src/advisor` | ranking + rate limits |
-| Not being an attack surface | `mcp-server/src/sanitize.ts` | untrusted content wrapped as data |
+| Problem                                                    | Lives in                          | Notes                                                  |
+| ---------------------------------------------------------- | --------------------------------- | ------------------------------------------------------ |
+| Not melting the CPU with N² pairs                          | `daemon/src/scheduler`            | `NOTES.md` — debounce, priority, invalidation, budgets |
+| Snapshotting dirty state without touching the user's index | `core/src/git/worktree.ts`        | temporary index file; objects only                     |
+| Disk cost of shadow worktrees                              | `core/src/git/shadow.ts`          | one clone per repo, shared objects, quota + GC         |
+| Precision of semantic detection                            | `core/src/analyzers`              | per-matcher confidence caps                            |
+| Not being ignored by agents                                | `mcp-server` + `core/src/advisor` | ranking + rate limits                                  |
+| Not being an attack surface                                | `mcp-server/src/sanitize.ts`      | untrusted content wrapped as data                      |
 
 ## Data flow invariants
 

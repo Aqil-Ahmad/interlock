@@ -54,7 +54,7 @@ export class EventBus {
 
   /** Subscribe to every event. Used by the store, the WebSocket bridge and tests. */
   onAny(handler: (event: InterlockEvent) => void | Promise<void>): Subscription {
-    return this.#add('*', handler as AnyHandler);
+    return this.#add('*', handler);
   }
 
   /**

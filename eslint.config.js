@@ -18,6 +18,8 @@ export default tseslint.config(
       '**/coverage/**',
       'eval/reports/**',
       'eval/agenticflict/data/**',
+      // Outside the workspace and the build until it declares react/vite.
+      'packages/dashboard/**',
     ],
   },
 
@@ -28,11 +30,15 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: {
-          // Files outside any package tsconfig (tooling, eval harness) still get
-          // type-aware linting via the default project.
-          allowDefaultProject: ['*.js', '*.ts', 'scripts/*.ts', 'eval/*.ts'],
-        },
+        // Every linted file belongs to a real project: package sources to their
+        // own tsconfig, and tests, scripts and the eval harness to
+        // tsconfig.check.json. Without that last one they fall back to an
+        // inferred project with no `@types/node`, and every `process` reference
+        // lints as an error.
+        project: [
+          './packages/{shared,core,daemon,mcp-server,cli}/tsconfig.json',
+          './tsconfig.check.json',
+        ],
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -80,7 +86,12 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['@interlock/daemon', '@interlock/cli', '@interlock/mcp-server', '@interlock/dashboard'],
+              group: [
+                '@interlock/daemon',
+                '@interlock/cli',
+                '@interlock/mcp-server',
+                '@interlock/dashboard',
+              ],
               message:
                 'packages/core must not depend on runtime packages. Invert the dependency: pass what you need in.',
             },

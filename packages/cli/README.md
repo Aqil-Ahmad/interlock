@@ -4,15 +4,15 @@ The `interlock` command. A thin client over the daemon's localhost API.
 
 ## Commands
 
-| Command | Purpose |
-|---|---|
-| `interlock status` | in-flight branches, dirty state, open findings |
-| `interlock watch` | live findings in the terminal |
-| `interlock check <A> <B>` | force a speculative merge of two branches now |
-| `interlock order` | recommended landing order |
-| `interlock init` | set a repo up, including agent hooks |
+| Command                                      | Purpose                                                              |
+| -------------------------------------------- | -------------------------------------------------------------------- |
+| `interlock status`                           | in-flight branches, dirty state, open findings                       |
+| `interlock watch`                            | live findings in the terminal                                        |
+| `interlock check <A> <B>`                    | force a speculative merge of two branches now                        |
+| `interlock order`                            | recommended landing order                                            |
+| `interlock init`                             | set a repo up, including agent hooks                                 |
 | `interlock daemon start\|stop\|status\|logs` | background service lifecycle (`stop --purge` wipes Interlock's data) |
-| `interlock doctor` | diagnose git, Docker, toolchain and permissions |
+| `interlock doctor`                           | diagnose git, Docker, toolchain and permissions                      |
 
 ## Constraints
 

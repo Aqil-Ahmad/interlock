@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "display": "Interlock typecheck-only",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "incremental": false,
+    "paths": {
+      "@interlock/shared": ["./packages/shared/src/index.ts"],
+      "@interlock/shared/*": ["./packages/shared/src/*"],
+      "@interlock/core": ["./packages/core/src/index.ts"],
+      "@interlock/core/*": ["./packages/core/src/*"],
+      "@interlock/daemon": ["./packages/daemon/src/index.ts"],
+      "@interlock/mcp-server": ["./packages/mcp-server/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*.test.ts",
+    "packages/*/test/**/*.ts",
+    "scripts/**/*.ts",
+    "eval/**/*.ts"
+  ]
+}

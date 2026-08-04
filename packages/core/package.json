@@ -6,13 +6,30 @@
   "description": "Pure domain logic: git/shadow operations, speculative merge, the analyzer pipeline and finding ranking. No long-running processes.",
   "license": "AGPL-3.0-only",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./git": { "types": "./dist/git/index.d.ts", "default": "./dist/git/index.js" },
-    "./merge": { "types": "./dist/merge/index.d.ts", "default": "./dist/merge/index.js" },
-    "./analyzers": { "types": "./dist/analyzers/index.d.ts", "default": "./dist/analyzers/index.js" },
-    "./advisor": { "types": "./dist/advisor/index.d.ts", "default": "./dist/advisor/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./git": {
+      "types": "./dist/git/index.d.ts",
+      "default": "./dist/git/index.js"
+    },
+    "./merge": {
+      "types": "./dist/merge/index.d.ts",
+      "default": "./dist/merge/index.js"
+    },
+    "./analyzers": {
+      "types": "./dist/analyzers/index.d.ts",
+      "default": "./dist/analyzers/index.js"
+    },
+    "./advisor": {
+      "types": "./dist/advisor/index.d.ts",
+      "default": "./dist/advisor/index.js"
+    }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc --build",
     "clean": "rm -rf dist *.tsbuildinfo"

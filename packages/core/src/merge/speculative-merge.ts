@@ -45,6 +45,8 @@ export interface ConflictBlock {
  * A conflict is the result, not an error. This throws only when the merge could
  * not be attempted at all (`MERGE_FAILED`).
  */
-export function speculativeMerge(_request: SpeculativeMergeRequest): Promise<SpeculativeMergeResult> {
+export function speculativeMerge(
+  _request: SpeculativeMergeRequest,
+): Promise<SpeculativeMergeResult> {
   return notImplemented('speculativeMerge', 'M2');
 }

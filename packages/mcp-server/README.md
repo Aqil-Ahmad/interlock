@@ -4,12 +4,12 @@ The agent-facing surface: where detection turns into something an agent can act 
 
 ## Tools
 
-| Tool | Purpose |
-|---|---|
-| `get_conflicts_for_my_branch` | conflicts between the caller's branch and other in-flight work |
-| `check_file_overlap(paths)` | which other branches are touching the paths you are about to edit |
-| `get_pending_changes(path)` | symbol-level summary of peer branches' unlanded changes to a path |
-| `propose_merge_order` | suggested landing order |
+| Tool                          | Purpose                                                           |
+| ----------------------------- | ----------------------------------------------------------------- |
+| `get_conflicts_for_my_branch` | conflicts between the caller's branch and other in-flight work    |
+| `check_file_overlap(paths)`   | which other branches are touching the paths you are about to edit |
+| `get_pending_changes(path)`   | symbol-level summary of peer branches' unlanded changes to a path |
+| `propose_merge_order`         | suggested landing order                                           |
 
 ## Constraints
 

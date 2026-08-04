@@ -12,7 +12,7 @@
   "scripts": {
     "build": "pnpm -r --stream build",
     "clean": "pnpm -r --stream clean && rm -rf node_modules/.cache",
-    "typecheck": "tsc --build --force",
+    "typecheck": "tsc --build --force && tsc -p tsconfig.check.json",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -23,7 +23,7 @@
     "bench": "tsx scripts/bench.ts",
     "eval": "tsx eval/run.ts",
     "adr": "tsx scripts/new-adr.ts",
-    "verify": "pnpm lint && pnpm typecheck && pnpm build && pnpm test"
+    "verify": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm build && pnpm test"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

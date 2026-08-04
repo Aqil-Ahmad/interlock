@@ -34,6 +34,11 @@ export function listBranchRefs(_repo: UserRepo, _options: DiscoveryOptions): Pro
 }
 
 /** Merge-base of two refs; the third point of a three-way speculative merge. */
-export function mergeBase(_repo: UserRepo, _a: string, _b: string, _options: DiscoveryOptions): Promise<string> {
+export function mergeBase(
+  _repo: UserRepo,
+  _a: string,
+  _b: string,
+  _options: DiscoveryOptions,
+): Promise<string> {
   return notImplemented('mergeBase', 'M1');
 }

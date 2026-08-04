@@ -54,7 +54,7 @@ function encodeTime(time: number): string {
  * id backwards lexicographically. 256 is a multiple of 32, so reducing here is
  * uniform.
  */
-function randomDigits(): Uint8Array {
+function randomDigits(): Uint8Array<ArrayBuffer> {
   const digits = randomFillSync(new Uint8Array(RANDOM_LEN));
   for (let i = 0; i < digits.length; i++) digits[i] = digits[i]! % 32;
   return digits;

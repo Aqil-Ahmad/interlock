@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { Finding, FindingId } from '@interlock/shared';
 import { rankFindings } from './ranking.js';
 
-function finding(overrides: Partial<Finding> & { id: string }): Finding {
+// `id` is omitted before intersecting: `Partial<Finding> & { id: string }` would
+// collapse to the branded FindingId and reject the plain literals used below.
+function finding(overrides: Omit<Partial<Finding>, 'id'> & { id: string }): Finding {
   return {
     runId: 'RUN' as Finding['runId'],
     kind: 'typecheck',

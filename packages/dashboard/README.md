@@ -4,13 +4,13 @@ The localhost React dashboard.
 
 ## Views
 
-| View | What it shows |
-|---|---|
-| Branch map | in-flight branches per repo, dirty state, owning agent session |
-| Conflict heatmap | pairwise conflict matrix |
-| Finding detail | evidence first: both diffs, symbol trail, analyzer output |
-| Event timeline | the replay log |
-| Recommended order | advisor output |
+| View              | What it shows                                                  |
+| ----------------- | -------------------------------------------------------------- |
+| Branch map        | in-flight branches per repo, dirty state, owning agent session |
+| Conflict heatmap  | pairwise conflict matrix                                       |
+| Finding detail    | evidence first: both diffs, symbol trail, analyzer output      |
+| Event timeline    | the replay log                                                 |
+| Recommended order | advisor output                                                 |
 
 ## Constraints
 

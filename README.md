@@ -55,7 +55,7 @@ open http://127.0.0.1:47317 # dashboard
 ```
 packages/
   shared/        types, models, events, config, errors, logging   (leaf; depends on nothing)
-  core/          git + shadow ops, speculative merge, analyzers, AST, sandbox, advisor
+  core/          git + shadow ops, speculative merge, analyzers, ranking
   daemon/        watcher, event bus, scheduler, SQLite store, localhost API
   mcp-server/    agent-facing MCP tools
   cli/           the `interlock` command
@@ -67,14 +67,14 @@ scripts/         setup, ADR scaffolding, benchmarks
 
 ## Documentation
 
-| Document | What it is |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, data flow, lifecycle of a Finding |
-| [docs/EVALUATION.md](docs/EVALUATION.md) | metric definitions and experiment protocols |
-| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | assets, trust boundaries, residual risks |
-| [docs/adr/](docs/adr/README.md) | decision records |
-| [INTERLOCK_PLAN.md](INTERLOCK_PLAN.md) | scope, milestones, and everything not yet built |
-| [CLAUDE.md](CLAUDE.md) | working agreement and hard rules for changes |
+| Document                                     | What it is                                      |
+| -------------------------------------------- | ----------------------------------------------- |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, data flow, lifecycle of a Finding   |
+| [docs/EVALUATION.md](docs/EVALUATION.md)     | metric definitions and experiment protocols     |
+| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | assets, trust boundaries, residual risks        |
+| [docs/adr/](docs/adr/README.md)              | decision records                                |
+| [INTERLOCK_PLAN.md](INTERLOCK_PLAN.md)       | scope, milestones, and everything not yet built |
+| [CLAUDE.md](CLAUDE.md)                       | working agreement and hard rules for changes    |
 
 ## Limitations (v1)
 
@@ -86,7 +86,7 @@ scripts/         setup, ADR scaffolding, benchmarks
 
 ## Requirements
 
-Node ≥ 22, pnpm 11, git ≥ 2.30, Docker for the semantic analyzers.
+Node ≥ 24, pnpm 11, git ≥ 2.30, Docker for the semantic analyzers.
 
 ## License
 

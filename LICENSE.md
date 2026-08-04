@@ -3,10 +3,10 @@
 This repository is dual-licensed. The first matching rule below determines the
 license for a given file or region.
 
-| File | Identifier | Scope |
-| --- | --- | --- |
-| [`LICENSE_AGPL`](./LICENSE_AGPL) | `AGPL-3.0-only` | Default. |
-| Not yet published | `LicenseRef-Interlock-Commercial` | Files, directories, or regions marked Commercial. |
+| File                             | Identifier                        | Scope                                             |
+| -------------------------------- | --------------------------------- | ------------------------------------------------- |
+| [`LICENSE_AGPL`](./LICENSE_AGPL) | `AGPL-3.0-only`                   | Default.                                          |
+| Not yet published                | `LicenseRef-Interlock-Commercial` | Files, directories, or regions marked Commercial. |
 
 ## Rules (first match wins)
 

@@ -8,7 +8,9 @@
   "bin": {
     "interlock": "./dist/main.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc --build",
     "dev": "tsx src/main.ts",

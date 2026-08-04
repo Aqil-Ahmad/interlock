@@ -6,12 +6,17 @@
   "description": "Long-running local service: watcher, event bus, scheduler, SQLite store and the localhost HTTP/WS API consumed by the CLI, dashboard and MCP server.",
   "license": "AGPL-3.0-only",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "bin": {
     "interlockd": "./dist/main.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc --build",
     "dev": "tsx watch src/main.ts",

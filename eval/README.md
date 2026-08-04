@@ -13,10 +13,10 @@ except when a report backs a published claim.
 
 Three suites are planned:
 
-| Directory | Contents |
-|---|---|
-| `fixtures/` | small synthetic repos with planted, labelled conflicts |
-| `replay/` | scripts that replay concurrent branch histories from real repos |
+| Directory       | Contents                                                                  |
+| --------------- | ------------------------------------------------------------------------- |
+| `fixtures/`     | small synthetic repos with planted, labelled conflicts                    |
+| `replay/`       | scripts that replay concurrent branch histories from real repos           |
 | `agenticflict/` | adapters for the AgenticFlict dataset (the dataset itself is git-ignored) |
 
 ## Running

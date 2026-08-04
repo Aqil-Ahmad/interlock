@@ -6,9 +6,14 @@
   "description": "MCP server exposing Interlock findings and advice to coding agents. Thin adapter over the daemon API — no analysis logic lives here.",
   "license": "AGPL-3.0-only",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc --build",
     "clean": "rm -rf dist *.tsbuildinfo"

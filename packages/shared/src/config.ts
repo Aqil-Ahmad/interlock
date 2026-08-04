@@ -119,7 +119,7 @@ export function resolveConfig(input: DeepPartial<InterlockConfig> = {}): Interlo
     analyzers: { ...DEFAULT_CONFIG.analyzers, ...input.analyzers },
     sandbox: { ...DEFAULT_CONFIG.sandbox, ...input.sandbox, network: false },
     mcp: { ...DEFAULT_CONFIG.mcp, ...input.mcp },
-  } as InterlockConfig;
+  };
 
   const problems = validateConfig(config);
   if (problems.length > 0) {
@@ -169,5 +169,9 @@ function isPort(value: number): boolean {
 }
 
 export type DeepPartial<T> = {
-  [K in keyof T]?: T[K] extends readonly unknown[] ? T[K] : T[K] extends object ? DeepPartial<T[K]> : T[K];
+  [K in keyof T]?: T[K] extends readonly unknown[]
+    ? T[K]
+    : T[K] extends object
+      ? DeepPartial<T[K]>
+      : T[K];
 };

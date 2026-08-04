@@ -4,13 +4,13 @@ Interlock watches repositories people are actively working in and executes code 
 
 ## Guarantees
 
-| Guarantee | How it is enforced |
-|---|---|
+| Guarantee                                  | How it is enforced                                                                                                                                   |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Interlock never modifies your repositories | `UserRepo`/`ShadowRepo` type split; git runner refuses mutating commands against user repos; test hashing user-repo state before and after full runs |
-| Merged code never executes on your host | all execution goes through Docker: `--network=none`, non-root, read-only mount + tmpfs, cap-drop, CPU/memory/PID/time limits |
-| Nothing leaves your machine | daemon and MCP bind `127.0.0.1` only, bearer-token authenticated; no telemetry |
-| Secrets are not collected | credential files are never read; secret patterns are redacted from logs and stored evidence; the data dir is 0700 |
-| Agent payloads cannot smuggle instructions | repository content is wrapped as delimited data, truncated, with instruction-shaped lines neutralised |
+| Merged code never executes on your host    | all execution goes through Docker: `--network=none`, non-root, read-only mount + tmpfs, cap-drop, CPU/memory/PID/time limits                         |
+| Nothing leaves your machine                | daemon and MCP bind `127.0.0.1` only, bearer-token authenticated; no telemetry                                                                       |
+| Secrets are not collected                  | credential files are never read; secret patterns are redacted from logs and stored evidence; the data dir is 0700                                    |
+| Agent payloads cannot smuggle instructions | repository content is wrapped as delimited data, truncated, with instruction-shaped lines neutralised                                                |
 
 ## Reporting a vulnerability
 

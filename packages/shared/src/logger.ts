@@ -115,4 +115,7 @@ export function createLogger(component: string, options: LoggerOptions = {}): Lo
 }
 
 /** Discards everything. For tests that assert on behaviour, not output. */
-export const silentLogger: Logger = createLogger('silent', { level: 'error', sink: () => {} });
+export const silentLogger: Logger = createLogger('silent', {
+  level: 'error',
+  sink: () => undefined,
+});

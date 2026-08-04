@@ -8,16 +8,16 @@ Interlock detects conflicts — textual and semantic — between parallel in-fli
 
 ## Orientation
 
-| Where | What |
-|---|---|
-| `packages/shared` | models, events, config, errors, logging. Zero dependencies, imports no sibling |
-| `packages/core` | git/shadow ops, speculative merge, analyzers, ranking. Pure logic, no processes |
-| `packages/daemon` | watcher, event bus, scheduler, SQLite store, localhost API |
-| `packages/mcp-server` | agent-facing tool schemas; the prompt-injection boundary |
-| `packages/cli` | user surface; a thin client over the daemon API |
-| `packages/dashboard` | React UI. Outside the workspace and the build until M6 |
-| `eval/` | evaluation harness — do not edit |
-| `docs/` | architecture, evaluation, threat model, ADRs |
+| Where                 | What                                                                            |
+| --------------------- | ------------------------------------------------------------------------------- |
+| `packages/shared`     | models, events, config, errors, logging. Zero dependencies, imports no sibling  |
+| `packages/core`       | git/shadow ops, speculative merge, analyzers, ranking. Pure logic, no processes |
+| `packages/daemon`     | watcher, event bus, scheduler, SQLite store, localhost API                      |
+| `packages/mcp-server` | agent-facing tool schemas; the prompt-injection boundary                        |
+| `packages/cli`        | user surface; a thin client over the daemon API                                 |
+| `packages/dashboard`  | React UI. Outside the workspace and the build until M6                          |
+| `eval/`               | evaluation harness — do not edit                                                |
+| `docs/`               | architecture, evaluation, threat model, ADRs                                    |
 
 Algorithm notes live next to the hard parts: `packages/daemon/src/scheduler/NOTES.md`. Read them before touching that code.
 
