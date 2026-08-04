@@ -9,18 +9,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  NODE_VERSION: '22'
-
 jobs:
   verify:
-    name: lint · typecheck · test (${{ matrix.os }})
+    name: lint · typecheck · test (node ${{ matrix.node }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # Linux and macOS only; Windows is out of scope.
         os: [ubuntu-latest, macos-latest]
+        # 24 is the floor declared in `engines`; 26 is what development runs on.
+        # Testing only the latter would let the floor rot untested.
+        node: ['24', '26']
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +28,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - name: Install
@@ -50,14 +50,14 @@ jobs:
         run: pnpm test
 
   coverage:
-    name: coverage gate (core ≥80%)
+    name: coverage
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:coverage
@@ -70,7 +70,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Advisory for now; make it blocking once the dependency set is stable.

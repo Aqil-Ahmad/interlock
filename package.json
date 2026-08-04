@@ -6,7 +6,7 @@
   "description": "Early conflict detection and integration intelligence for parallel AI coding agents",
   "license": "AGPL-3.0-only",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "packageManager": "pnpm@11.20.0",
   "scripts": {

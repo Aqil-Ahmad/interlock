@@ -12,7 +12,7 @@ By submitting a contribution, you agree to the following.
 
 ## 1. Definitions
 
-**"Entity"** means [LEGAL ENTITY], the maintainer of Interlock.
+**"Entity"** means Aqil Ahmad, the maintainer of Interlock.
 
 **"Contribution"** means any original work of authorship you intentionally submit
 to Interlock — code, documentation, configuration, tests — in any form and by any
@@ -80,4 +80,4 @@ Open a pull request and confirm agreement by commenting on it when prompted. Tha
 comment, together with your GitHub identity and commit authorship, is the record
 of your signature.
 
-Questions: [CONTACT EMAIL]
+Questions: aaqilahmadd@gmail.com

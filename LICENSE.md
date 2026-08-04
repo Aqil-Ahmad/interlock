@@ -14,7 +14,7 @@ license for a given file or region.
 2. **In-file regions** wrapped in REUSE snippet syntax are Commercial; everything else in the file stays AGPL:
    ```
    // SPDX-SnippetBegin
-   // SPDX-SnippetCopyrightText: 2026 [LEGAL ENTITY]
+   // SPDX-SnippetCopyrightText: 2026 Aqil Ahmad
    // SPDX-License-Identifier: LicenseRef-Interlock-Commercial
    <commercial code>
    // SPDX-SnippetEnd
