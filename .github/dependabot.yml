@@ -1,0 +1,22 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        patterns: ['eslint*', 'prettier', 'typescript', 'vitest', '@vitest/*', 'tsx']
+      types:
+        patterns: ['@types/*']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+
+  # A `docker` ecosystem entry belongs here once the sandbox ships its own
+  # image (M3). Pointing it at a directory with no Dockerfile makes Dependabot
+  # fail the run rather than skip it.

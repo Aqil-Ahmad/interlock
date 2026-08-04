@@ -1,0 +1,12 @@
+{
+  "// Solution file": "Builds every package in dependency order: `pnpm typecheck` / `tsc --build`.",
+  "// packages/dashboard": "Deliberately absent. It needs react/vite, which are not installed until M6; referencing it here would fail every build. Re-add with its dependencies.",
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/core" },
+    { "path": "packages/daemon" },
+    { "path": "packages/mcp-server" },
+    { "path": "packages/cli" }
+  ]
+}

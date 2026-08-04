@@ -1,0 +1,28 @@
+{
+  "name": "@interlock/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Types, data models, config schema, event definitions, errors and logging shared by every Interlock package. No business logic.",
+  "license": "AGPL-3.0-only",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./models": {
+      "types": "./dist/models/index.d.ts",
+      "default": "./dist/models/index.js"
+    },
+    "./events": {
+      "types": "./dist/events/index.d.ts",
+      "default": "./dist/events/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {}
+}

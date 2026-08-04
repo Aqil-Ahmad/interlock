@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+pnpm-lock.yaml linguist-generated=true -diff
+*.patch -text
+eval/fixtures/** linguist-vendored=true

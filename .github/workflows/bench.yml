@@ -1,0 +1,27 @@
+name: Benchmarks
+
+# Budgets: <2% steady-state CPU, <60s to a textual finding, <3min to a typecheck finding.
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Mondays, 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm bench
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: eval/reports/bench-*.json
+          if-no-files-found: warn

@@ -1,0 +1,20 @@
+{
+  "name": "@interlock/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The `interlock` command: status, watch, check, order, init, daemon lifecycle. Talks to the daemon API only.",
+  "license": "AGPL-3.0-only",
+  "bin": {
+    "interlock": "./dist/main.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsx src/main.ts",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@interlock/shared": "workspace:*"
+  }
+}

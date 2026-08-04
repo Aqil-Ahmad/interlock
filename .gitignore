@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+*.tsbuildinfo
+packages/dashboard/dist/
+
+# Test / tooling output
+coverage/
+.vitest/
+.eslintcache
+
+# Interlock runtime data (shadow clones, SQLite store, logs) — never committed
+.interlock/
+*.db
+*.db-wal
+*.db-shm
+
+# Evaluation artifacts: code is committed, data and generated reports are not
+eval/agenticflict/data/
+eval/reports/*
+!eval/reports/.gitkeep
+eval/fixtures/.generated/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json

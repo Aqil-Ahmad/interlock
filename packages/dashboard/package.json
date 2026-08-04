@@ -1,0 +1,18 @@
+{
+  "name": "@interlock/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Localhost React dashboard: live branch map, conflict heatmap, finding evidence, recommended merge order.",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "build": "tsc --build && vite build",
+    "dev": "vite",
+    "preview": "vite preview",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@interlock/shared": "workspace:*"
+  },
+  "//deps": "Runtime/dev deps are intentionally not pinned yet — add at first install: react, react-dom, vite, @vitejs/plugin-react, @types/react, @types/react-dom, jsdom, @testing-library/react."
+}

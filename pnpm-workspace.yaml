@@ -1,0 +1,9 @@
+packages:
+  - 'packages/*'
+  # Excluded until M6: it declares react/vite in neither dependencies nor the
+  # lockfile, so including it makes `pnpm install` and `pnpm build` fail for a
+  # package nothing else consumes yet. Re-add together with its dependencies.
+  - '!packages/dashboard'
+
+# `eval/` is deliberately not a workspace package: it is evaluation code rather
+# than product code, and keeping it out makes that boundary structural.

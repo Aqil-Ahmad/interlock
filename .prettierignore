@@ -1,0 +1,9 @@
+dist
+coverage
+node_modules
+pnpm-lock.yaml
+eval/reports
+eval/agenticflict/data
+eval/fixtures/**/*.patch
+CHANGELOG.md
+LICENSE
