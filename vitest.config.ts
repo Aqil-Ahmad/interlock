@@ -7,9 +7,6 @@ import { defineConfig } from 'vitest/config';
  *  - unit        — `*.test.ts` next to the source it covers; pure logic, no I/O
  *  - integration — files under a package's `test/` dir; real git repos in temp dirs
  *  - e2e         — `packages/cli/test/e2e`; daemon + CLI driven together
- *
- * `packages/dashboard` is out of the workspace until M6 and so is not a project
- * here; add it back alongside its jsdom/testing-library dependencies.
  */
 export default defineConfig({
   test: {
@@ -33,10 +30,8 @@ export default defineConfig({
       reporter: ['text', 'lcov'],
       include: ['packages/*/src/**/*.ts'],
       exclude: ['**/*.test.ts', '**/index.ts', '**/*.d.ts'],
-      // No threshold yet: most of `core` is still declared-but-unwritten, so a
-      // gate here would measure how much surface exists rather than how well it
-      // is tested. Turn on `packages/core/src/**` at 80% once the textual
-      // analyzer lands end-to-end (M2), then raise it, never lower it.
+      // No threshold while most of `core` is declared but unwritten: a gate
+      // would measure how much surface exists, not how well it is tested.
     },
   },
 });

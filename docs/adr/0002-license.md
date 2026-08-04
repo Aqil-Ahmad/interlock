@@ -23,8 +23,11 @@ retracted from anything already published.
 
 Dual license:
 
-- **AGPL-3.0-only** by default, full text in `LICENSE`.
+- **AGPL-3.0-only** by default, full text in `LICENSE_AGPL`.
 - **A commercial license** sold to organisations that cannot accept AGPL terms.
+
+`LICENSE.md` is the router: an SPDX header, a REUSE snippet region, or an
+`ee/` path marks code as commercial; everything else is AGPL.
 
 Both packages' `license` fields carry the SPDX identifier `AGPL-3.0-only`.
 `AGPL-3.0` on its own is deprecated in the SPDX list and ambiguous about the
@@ -71,8 +74,10 @@ a tool that reads your code and is licensed AGPL invites exactly that question.
 
 ## Follow-ups
 
-- [x] Add `LICENSE` (full AGPL-3.0 text).
+- [x] Add `LICENSE_AGPL` and the `LICENSE.md` router.
 - [x] Set `license` to `AGPL-3.0-only` in every manifest.
+- [x] Add `CLA.md` and enforce it in `.github/workflows/cla.yml`.
+- [ ] Fill the legal entity and contact blanks in `CLA.md` and `LICENSE.md`; have both reviewed.
+- [ ] Create the signature repository and `CLA_SIGNATURES_TOKEN` secret.
 - [ ] Draft the commercial license terms before the first external user.
-- [ ] Put a CLA in place before accepting any outside contribution.
-- [ ] Decide whether per-file SPDX headers are worth the noise (`SPDX-License-Identifier: AGPL-3.0-only`).
+- [ ] Search the "Interlock" name for existing marks before investing in branding.

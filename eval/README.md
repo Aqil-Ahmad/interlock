@@ -11,14 +11,13 @@ Evaluation code and datasets are not product code: different quality bars, diffe
 `run.ts` is the entry point and `reports/` holds generated output — git-ignored
 except when a report backs a published claim.
 
-Three suites are planned, each created when it has content rather than in
-advance:
+Three suites are planned:
 
-| Directory | Contents | Arrives with |
-|---|---|---|
-| `fixtures/` | small synthetic repos with planted, labelled conflicts | the first textual analyzer (M2) |
-| `replay/` | scripts that replay concurrent branch histories from real repos | M4 |
-| `agenticflict/` | adapters for the AgenticFlict dataset (the dataset itself is git-ignored) | once the dataset is obtained |
+| Directory | Contents |
+|---|---|
+| `fixtures/` | small synthetic repos with planted, labelled conflicts |
+| `replay/` | scripts that replay concurrent branch histories from real repos |
+| `agenticflict/` | adapters for the AgenticFlict dataset (the dataset itself is git-ignored) |
 
 ## Running
 

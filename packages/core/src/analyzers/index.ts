@@ -6,9 +6,7 @@
  * typecheck/build/test verdicts follow and act as ground truth for the
  * heuristic layers.
  *
- * Only the textual analyzer exists today. Later analyzers join by implementing
- * `Analyzer` and being appended here — the contract in `analyzer.ts` is what
- * holds the design, not a file per unwritten stage.
+ * An analyzer joins by implementing `Analyzer` and being appended here.
  */
 export * from './analyzer.js';
 export * from './textual.js';

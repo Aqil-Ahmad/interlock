@@ -11,9 +11,6 @@ The agent-facing surface: where detection turns into something an agent can act 
 | `get_pending_changes(path)` | symbol-level summary of peer branches' unlanded changes to a path |
 | `propose_merge_order` | suggested landing order |
 
-The schemas above and `wrapUntrusted()` exist today; the server lifecycle and the
-`interlock-mcp` binary arrive with M5.
-
 ## Constraints
 
 - Analyses nothing itself; it is a thin adapter over the daemon API.

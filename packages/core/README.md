@@ -11,11 +11,6 @@ Domain logic. Everything here is a function of its inputs; nothing here runs for
 | `src/analyzers/` | the analyzer contract and its implementations |
 | `src/advisor/` | Finding ranking |
 
-Later stages of the pipeline — AST/tree-sitter matching, the Docker sandbox and
-its typecheck/build/test analyzers, merge-order recommendation — are specified in
-`INTERLOCK_PLAN.md` and are not directories here yet. A module appears when it
-has an implementation, not when it has a name.
-
 ## Constraints
 
 - No servers, timers, filesystem watchers or long-lived state — that is `@interlock/daemon`.

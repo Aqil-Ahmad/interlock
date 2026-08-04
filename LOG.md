@@ -6,11 +6,11 @@ Short entries: done, decided, blocked. Newest first.
 
 ## 2026-08-04 (later)
 
-- **Done:** cut the scaffold back to what is built or being built. Removed the M3+ stub modules (`core/src/ast`, `core/src/sandbox`, the typecheck/build/test analyzers, `advisor/merge-order`, the MCP server lifecycle and binary) and the barrel/`exports` entries pointing at them. Took `packages/dashboard` out of the workspace, the solution tsconfig and the Vitest projects until it has react/vite. Dropped the coverage threshold until `core` has an implementation to measure. Removed the Dependabot docker entry aimed at a directory with no Dockerfile. Deferred CONTRIBUTING and the GitHub issue/PR templates.
-- **Decided:** `notImplemented` is for gaps inside a path being built now, not a way to pre-create later milestones — recorded in CLAUDE.md and `core/README.md`. A module appears when it has an implementation.
-- **Decided:** AGPL-3.0-only plus a commercial license (ADR-0002, now accepted). `LICENSE` added, every manifest set to the `AGPL-3.0-only` SPDX id. Consequence to act on before it becomes expensive: selling exceptions requires owning the copyright, so a CLA must be in place before the first outside contribution.
-- **Open:** AST approach (tree-sitter vs the TypeScript compiler API) wants an ADR before M4. SQLite driver: `node:sqlite` is the likely answer and needs ADR-0003 updating.
-- **Next:** `pnpm install`, then get `pnpm verify` green for the first time.
+- **Done:** deleted the M3+ stub modules and the barrel/`exports` entries pointing at them; dashboard out of the workspace, solution tsconfig and Vitest projects until it declares react/vite; coverage threshold off; Dependabot docker entry removed; CONTRIBUTING and the issue/PR templates dropped.
+- **Done:** git repo initialised on `main`. Licensing in place: `LICENSE_AGPL`, `LICENSE.md` router, `CLA.md` and its workflow.
+- **Decided:** AGPL-3.0-only plus commercial terms (ADR-0002, accepted). `notImplemented` is for gaps inside a path being built now, not for pre-creating later milestones.
+- **Open:** `CLA.md` and `LICENSE.md` have unfilled entity/contact blanks and need review; CLA workflow needs a signature repo and `CLA_SIGNATURES_TOKEN`. Node version disagrees three ways — `engines` >=22, `.node-version` 26.4.0, CI 22. tree-sitter vs the TypeScript compiler API wants an ADR before M4. `node:sqlite` likely closes ADR-0003.
+- **Next:** install pnpm, then `pnpm install` and get `pnpm verify` green.
 
 ## 2026-08-04
 

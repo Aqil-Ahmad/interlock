@@ -84,7 +84,7 @@ Every step publishes an event with a `causedBy` pointer, so a Finding can be wal
 | Not melting the CPU with N² pairs | `daemon/src/scheduler` | `NOTES.md` — debounce, priority, invalidation, budgets |
 | Snapshotting dirty state without touching the user's index | `core/src/git/worktree.ts` | temporary index file; objects only |
 | Disk cost of shadow worktrees | `core/src/git/shadow.ts` | one clone per repo, shared objects, quota + GC |
-| Precision of semantic detection | not built yet (M4) | per-matcher confidence caps; see `INTERLOCK_PLAN.md` |
+| Precision of semantic detection | `core/src/analyzers` | per-matcher confidence caps |
 | Not being ignored by agents | `mcp-server` + `core/src/advisor` | ranking + rate limits |
 | Not being an attack surface | `mcp-server/src/sanitize.ts` | untrusted content wrapped as data |
 
