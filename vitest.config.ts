@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 /**
@@ -8,11 +9,30 @@ import { defineConfig } from 'vitest/config';
  *  - integration — files under a package's `test/` dir; real git repos in temp dirs
  *  - e2e         — `packages/cli/test/e2e`; daemon + CLI driven together
  */
+
+const src = (pkg: string): string =>
+  fileURLToPath(new URL(`./packages/${pkg}/src/index.ts`, import.meta.url));
+
+/**
+ * Resolve workspace packages to source rather than `dist`.
+ *
+ * Their `exports` maps point at built output, so without this a test run needs a
+ * prior `pnpm build` and silently measures coverage against stale artifacts.
+ * Mirrors the `paths` in tsconfig.check.json.
+ */
+const alias = {
+  '@interlock/shared': src('shared'),
+  '@interlock/core': src('core'),
+  '@interlock/daemon': src('daemon'),
+  '@interlock/mcp-server': src('mcp-server'),
+};
+
 export default defineConfig({
   test: {
     projects: [
       {
         extends: false,
+        resolve: { alias },
         test: {
           name: 'node',
           environment: 'node',
