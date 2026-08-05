@@ -1,14 +1,11 @@
 # Contributor License Agreement
 
 Interlock is dual-licensed: AGPL-3.0-only by default, and commercial terms for
-organisations that cannot accept the AGPL. Offering that second license requires
-the right to sublicense every line in the repository.
+organisations that cannot accept the AGPL.
 
-This agreement grants that right. It does not take your copyright away. You keep
-ownership of everything you write and remain free to use, sell or relicense your
-own contribution however you like.
-
-By submitting a contribution, you agree to the following.
+You retain copyright in your Contribution and remain free to use, sell or
+relicense it however you like. By submitting a Contribution, you agree to the
+following.
 
 ## 1. Definitions
 
@@ -28,9 +25,6 @@ You grant the Entity a perpetual, worldwide, non-exclusive, royalty-free,
 irrevocable copyright license to reproduce, prepare derivative works of, publicly
 display, publicly perform, sublicense and distribute your Contribution and such
 derivative works.
-
-The right to sublicense is what allows the Entity to distribute your Contribution
-under the AGPL and, separately, under commercial terms.
 
 ## 3. Patent license
 
@@ -80,10 +74,6 @@ The Entity may assign this agreement, and the licenses granted under it, in whol
 or in part, to any successor to the Interlock project — including a company later
 formed or acquired to hold it. Such an assignment requires no further consent or
 signature from you, and the terms above continue to apply unchanged.
-
-Interlock is currently maintained by an individual. This clause is what allows the
-rights you grant today to transfer to that company when it exists, without every
-contributor having to sign again.
 
 ## 9. Signing
 
