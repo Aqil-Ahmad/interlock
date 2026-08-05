@@ -34,6 +34,11 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # Packages resolve each other through their `exports` maps, which point at
+      # built output, so type-aware linting and typechecking both need this first.
+      - name: Build
+        run: pnpm build
+
       - name: Lint
         run: pnpm lint
 
@@ -42,9 +47,6 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
-
-      - name: Build
-        run: pnpm build
 
       - name: Test
         run: pnpm test

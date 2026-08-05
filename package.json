@@ -29,7 +29,7 @@
     "bench": "tsx scripts/bench.ts",
     "eval": "tsx eval/run.ts",
     "adr": "tsx scripts/new-adr.ts",
-    "verify": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm build && pnpm test"
+    "verify": "pnpm build && pnpm lint && pnpm format:check && pnpm typecheck && pnpm test"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
