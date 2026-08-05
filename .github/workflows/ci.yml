@@ -19,7 +19,6 @@ jobs:
         # Linux and macOS only; Windows is out of scope.
         os: [ubuntu-latest, macos-latest]
         # 24 is the floor declared in `engines`; 26 is what development runs on.
-        # Testing only the latter would let the floor rot untested.
         node: ['24', '26']
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +74,7 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Advisory for now; make it blocking once the dependency set is stable.
+      # Reported, not a merge gate: an upstream advisory should not block a
+      # change that has nothing to do with it.
       - run: pnpm audit --audit-level high
         continue-on-error: true

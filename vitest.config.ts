@@ -50,8 +50,6 @@ export default defineConfig({
       reporter: ['text', 'lcov'],
       include: ['packages/*/src/**/*.ts'],
       exclude: ['**/*.test.ts', '**/index.ts', '**/*.d.ts'],
-      // No threshold while most of `core` is declared but unwritten: a gate
-      // would measure how much surface exists, not how well it is tested.
     },
   },
 });

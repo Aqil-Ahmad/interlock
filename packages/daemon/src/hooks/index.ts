@@ -22,10 +22,10 @@ export interface SessionRegistration {
 
 /** Handle a hook callback from an agent tool. */
 export function registerSession(_registration: SessionRegistration): Promise<void> {
-  return notImplemented('registerSession', 'M1');
+  return notImplemented('registerSession');
 }
 
 /** Generate the hook scripts `interlock init` installs into a repo. */
 export function renderHookScripts(_daemonUrl: string, _token: string): Record<string, string> {
-  return notImplemented('renderHookScripts', 'M1');
+  return notImplemented('renderHookScripts');
 }

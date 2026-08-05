@@ -28,5 +28,5 @@ export interface Scheduler {
 }
 
 export function createScheduler(_options: SchedulerOptions): Scheduler {
-  return notImplemented('createScheduler', 'M2');
+  return notImplemented('createScheduler');
 }

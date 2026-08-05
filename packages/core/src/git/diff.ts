@@ -24,7 +24,7 @@ export function extractChangeSet(
   _mergeBaseSha: string,
   _options: DiffOptions,
 ): Promise<ChangeSet> {
-  return notImplemented('extractChangeSet', 'M1');
+  return notImplemented('extractChangeSet');
 }
 
 /** Cheap path-level diff used to prioritise pairs before any merge is attempted. */
@@ -34,5 +34,5 @@ export function touchedPaths(
   _mergeBaseSha: string,
   _options: DiffOptions,
 ): Promise<string[]> {
-  return notImplemented('touchedPaths', 'M1');
+  return notImplemented('touchedPaths');
 }

@@ -24,7 +24,7 @@ It detects, explains and advises. It never resolves conflicts for you or writes 
 
 ## Safety
 
-Enforced by types and tests, not promises ([ADR-0004](docs/adr/0004-security-posture.md)):
+Enforced by types and tests, not promises:
 
 - **Your repositories are never modified.** No writes to your worktrees, branches, index, stash or config — all git writes go to Interlock's own shadow clones.
 - **Merged code never runs on your host.** Speculatively-merged agent code is untrusted; it executes only in Docker with no network, no root and hard resource limits.
@@ -37,7 +37,7 @@ Enforced by types and tests, not promises ([ADR-0004](docs/adr/0004-security-pos
 ```bash
 git clone https://github.com/interlock-ai/interlock.git && cd interlock
 ./scripts/setup.sh          # checks prerequisites, installs, verifies
-pnpm verify                 # lint + typecheck + build + test
+pnpm verify                 # build + lint + format + typecheck + test
 ```
 
 Planned usage:
@@ -93,7 +93,7 @@ Node ≥ 24, pnpm 11, git ≥ 2.30, Docker for the semantic analyzers.
 
 Dual-licensed: [AGPL-3.0-only](LICENSE_AGPL) by default, commercial terms for
 organisations that cannot accept the AGPL. Resolution rules in
-[LICENSE.md](LICENSE.md); reasoning in [ADR-0002](docs/adr/0002-license.md).
+[LICENSE.md](LICENSE.md).
 
 The AGPL covers Interlock's own source. It places no obligation whatsoever on the
 repositories Interlock analyses — your code is read, never linked against or

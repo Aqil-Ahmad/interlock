@@ -15,5 +15,5 @@ export const textualAnalyzer: Analyzer = {
   appliesTo: (context: AnalyzerContext) => !context.merged.clean,
 
   analyze: (_context: AnalyzerContext): Promise<AnalyzerOutcome> =>
-    notImplemented('textualAnalyzer.analyze', 'M2'),
+    notImplemented('textualAnalyzer.analyze'),
 };

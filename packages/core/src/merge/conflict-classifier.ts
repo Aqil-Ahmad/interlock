@@ -30,5 +30,5 @@ export interface ClassifyRequest {
 }
 
 export function classifyTextualConflicts(_request: ClassifyRequest): Finding[] {
-  return notImplemented('classifyTextualConflicts', 'M2');
+  return notImplemented('classifyTextualConflicts');
 }

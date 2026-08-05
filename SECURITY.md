@@ -1,6 +1,6 @@
 # Security
 
-Interlock watches repositories people are actively working in and executes code produced by merging AI-written branches. Both are unusual powers for a developer tool, so the security posture is a design constraint rather than a feature. Full analysis: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and [ADR-0004](docs/adr/0004-security-posture.md).
+Interlock watches repositories people are actively working in and executes code produced by merging AI-written branches. Both are unusual powers for a developer tool, so the security posture is a design constraint rather than a feature. Full analysis: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Guarantees
 

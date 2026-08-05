@@ -48,5 +48,5 @@ export interface ConflictBlock {
 export function speculativeMerge(
   _request: SpeculativeMergeRequest,
 ): Promise<SpeculativeMergeResult> {
-  return notImplemented('speculativeMerge', 'M2');
+  return notImplemented('speculativeMerge');
 }

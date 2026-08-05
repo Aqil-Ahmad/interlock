@@ -18,7 +18,7 @@ export interface Migration {
 
 /** Ordered list of migrations. Append only. */
 export const MIGRATIONS: readonly Migration[] = [
-  // TODO(M1): 001_initial — repos, branch_refs, agent_sessions, change_sets,
+  // TODO(store): 001_initial — repos, branch_refs, agent_sessions, change_sets,
   // merge_pairs, speculative_runs, findings, evidence, advice, events,
   // analyzer_cache. Written as SQL alongside this file.
 ];

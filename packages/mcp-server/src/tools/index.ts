@@ -27,7 +27,7 @@ export interface McpToolResult {
 }
 
 const todo = (name: string): McpTool['invoke'] => {
-  return () => notImplemented(`mcp tool ${name}`, 'M5');
+  return () => notImplemented(`mcp tool ${name}`);
 };
 
 export const TOOLS: readonly McpTool[] = [

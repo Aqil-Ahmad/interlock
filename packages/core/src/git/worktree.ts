@@ -23,7 +23,7 @@ export function captureDirtyState(
   _repo: UserRepo,
   _options: SnapshotOptions,
 ): Promise<DirtyState> {
-  return notImplemented('captureDirtyState', 'M1');
+  return notImplemented('captureDirtyState');
 }
 
 /**
@@ -35,5 +35,5 @@ export function commitSnapshotInShadow(
   _snapshotTreeSha: string,
   _options: SnapshotOptions,
 ): Promise<string> {
-  return notImplemented('commitSnapshotInShadow', 'M2');
+  return notImplemented('commitSnapshotInShadow');
 }

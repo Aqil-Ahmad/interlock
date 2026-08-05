@@ -15,7 +15,7 @@ Interlock detects conflicts — textual and semantic — between parallel in-fli
 | `packages/daemon`     | watcher, event bus, scheduler, SQLite store, localhost API                      |
 | `packages/mcp-server` | agent-facing tool schemas; the prompt-injection boundary                        |
 | `packages/cli`        | user surface; a thin client over the daemon API                                 |
-| `packages/dashboard`  | React UI. Outside the workspace and the build until M6                          |
+| `packages/dashboard`  | React UI. Outside the workspace and the build                                   |
 | `eval/`               | evaluation harness — do not edit                                                |
 | `docs/`               | architecture, evaluation, threat model, ADRs                                    |
 
@@ -28,8 +28,23 @@ The tree holds what is built or being built now. Everything else — the sandbox
 - One session, one scoped task. Keep diffs reviewable.
 - Branch off `dev` and target `dev`. `main` is release-only — never commit to it or open a pull request against it.
 - Done means code + tests + docs together, `pnpm verify` green, and a CHANGELOG entry if the change is user-visible.
-- A function that is declared but not yet written throws `notImplemented(what, milestone)`. Keep it that way — returning an empty result would let a missing implementation look like "no conflicts found". This is for gaps inside a path being built now. A module for a milestone that has not started does not get a stub; it gets a paragraph in `INTERLOCK_PLAN.md`.
-- Match the surrounding style. Comments explain why, not what.
+- A function that is declared but not yet written throws `notImplemented(what)`. Keep it that way — returning an empty result would let a missing implementation look like "no conflicts found". A module for work that has not started does not get a stub; it gets a paragraph in `INTERLOCK_PLAN.md`.
+
+## Code style
+
+Read a neighbouring file before writing a new one and match it.
+
+- **Comments explain why, never what.** A constraint, a protocol quirk, a rejected alternative, a reason a value is what it is. Never a restatement of the line below.
+- **Nothing addressed to a reader.** No "note that", no "you should", no explaining a change back to whoever requested it, no narrating what is unfinished.
+- **No project state in code or public docs.** No milestone tags, roadmap markers, ADR numbers, dates or "not implemented yet" narration. That belongs in `LOG.md`, `INTERLOCK_PLAN.md` or `CHANGELOG.md`, which are working documents and will not survive to release. Public docs are `README.md`, `SECURITY.md`, `CONTRIBUTING.md` and everything under `docs/`.
+- **`TODO(scope):`** is the only accepted marker, scoped to a subsystem rather than a milestone, and only inside a path being built now.
+- **No hacks that hide a symptom.** No hardcoded paths, magic values, sleeps, retries-until-green, broadened types or disabled rules to make something pass. Fix the cause, or leave it failing and say so.
+- **Formatting is Prettier's.** Never hand-format and never add an ignore to get through a check.
+
+If `../archestra-main` is present in the workspace it is a mature reference for
+this style — dense doc comments on exported symbols, why-comments on non-obvious
+constraints, and no project-management noise anywhere in the source. It is a
+read-only reference; never edit it.
 
 ## Hard rules
 
@@ -47,7 +62,7 @@ Architectural changes get proposed and recorded (ADR) before they are implemente
 ## Commands
 
 ```bash
-pnpm verify        # lint + typecheck + build + test
+pnpm verify        # build + lint + format + typecheck + test
 pnpm test:watch
 pnpm lint:fix
 pnpm adr "title"

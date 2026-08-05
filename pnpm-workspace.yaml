@@ -1,6 +1,6 @@
 packages:
   - 'packages/*'
-  # Excluded until it declares its react/vite dependencies.
+  # Excluded: declares no react/vite dependencies.
   - '!packages/dashboard'
 # Build scripts are blocked by default. esbuild's postinstall resolves its
 # platform-native binary, which vitest needs to run at all.

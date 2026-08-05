@@ -11,7 +11,7 @@ import type {
 } from '@interlock/shared';
 
 /**
- * SQLite persistence (ADR-0003).
+ * SQLite persistence.
  *
  * Migrations exist from the first schema onward: the store outlives every
  * refactor, and a corrupt local database costs an afternoon.
@@ -58,7 +58,7 @@ export interface StoreOptions {
 }
 
 export function openStore(_options: StoreOptions): Promise<Store> {
-  return notImplemented('openStore', 'M1');
+  return notImplemented('openStore');
 }
 
 export * from './migrations/index.js';

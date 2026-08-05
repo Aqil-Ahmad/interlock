@@ -22,7 +22,7 @@ git switch -c short-descriptive-name
 ## Before opening a pull request
 
 ```bash
-pnpm verify        # lint + format + typecheck + build + test
+pnpm verify        # build + lint + format + typecheck + test
 ```
 
 CI runs the same checks on Node 24 and 26, on Linux and macOS. A change is done

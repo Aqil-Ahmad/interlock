@@ -63,10 +63,7 @@ export function isInterlockError(value: unknown): value is InterlockError {
   return value instanceof InterlockError;
 }
 
-/** Marks surface that is scheduled for a later milestone. */
-export function notImplemented(what: string, milestone: string): never {
-  throw new InterlockError('NOT_IMPLEMENTED', `${what} is not implemented yet`, {
-    details: { milestone },
-    remedy: `Scheduled for ${milestone}.`,
-  });
+/** Marks surface that is declared but not yet implemented. */
+export function notImplemented(what: string): never {
+  throw new InterlockError('NOT_IMPLEMENTED', `${what} is not implemented yet`);
 }

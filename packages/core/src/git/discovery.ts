@@ -17,12 +17,12 @@ export interface DiscoveryOptions {
 
 /** Resolve a path to the repository root that contains it. */
 export function openUserRepo(_path: string, _options: DiscoveryOptions): Promise<UserRepo> {
-  return notImplemented('openUserRepo', 'M1');
+  return notImplemented('openUserRepo');
 }
 
 /** Read repo-level facts: default branch, shadow location, config override. */
 export function describeRepo(_repo: UserRepo, _options: DiscoveryOptions): Promise<Repo> {
-  return notImplemented('describeRepo', 'M1');
+  return notImplemented('describeRepo');
 }
 
 /**
@@ -30,7 +30,7 @@ export function describeRepo(_repo: UserRepo, _options: DiscoveryOptions): Promi
  * with its head, dirty state and, where known, owning agent session.
  */
 export function listBranchRefs(_repo: UserRepo, _options: DiscoveryOptions): Promise<BranchRef[]> {
-  return notImplemented('listBranchRefs', 'M1');
+  return notImplemented('listBranchRefs');
 }
 
 /** Merge-base of two refs; the third point of a three-way speculative merge. */
@@ -40,5 +40,5 @@ export function mergeBase(
   _b: string,
   _options: DiscoveryOptions,
 ): Promise<string> {
-  return notImplemented('mergeBase', 'M1');
+  return notImplemented('mergeBase');
 }

@@ -24,7 +24,7 @@ export interface ShadowOptions {
  * into it. Fetching *from* the user repo reads it; it never writes to it.
  */
 export function ensureShadow(_repo: UserRepo, _options: ShadowOptions): Promise<ShadowRepo> {
-  return notImplemented('ensureShadow', 'M2');
+  return notImplemented('ensureShadow');
 }
 
 /** A disposable checkout inside the shadow clone, used for one merge attempt. */
@@ -40,10 +40,10 @@ export function createShadowWorktree(
   _atCommit: string,
   _options: ShadowOptions,
 ): Promise<ShadowWorktree> {
-  return notImplemented('createShadowWorktree', 'M2');
+  return notImplemented('createShadowWorktree');
 }
 
 /** Reclaim worktrees and objects beyond the disk quota, oldest-unused first. */
 export function collectGarbage(_shadow: ShadowRepo, _options: ShadowOptions): Promise<number> {
-  return notImplemented('collectGarbage', 'M2');
+  return notImplemented('collectGarbage');
 }

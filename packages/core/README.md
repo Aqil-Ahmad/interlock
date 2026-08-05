@@ -16,12 +16,12 @@ Domain logic. Everything here is a function of its inputs; nothing here runs for
 - No servers, timers, filesystem watchers or long-lived state — that is `@interlock/daemon`.
 - No imports from `@interlock/daemon`, `@interlock/cli`, `@interlock/mcp-server` or `@interlock/dashboard` (enforced by eslint).
 - No writes to a user's repository. Writes take a `ShadowRepo`, and `ensureShadow` is the only way to get one.
-- No execution of repository code on the host; it goes through the sandbox (M3).
+- No execution of repository code on the host; it goes through the sandbox.
 - No new dependencies without an ADR note.
 
 ## Conventions
 
-- Coverage gate: ≥80% lines, switched on at M2 (see `vitest.config.ts`).
+- Coverage gate: ≥80% lines.
 - Matchers and classifiers are fixture-driven — add the fixture before the rule.
-- A function that is declared but not yet written throws `notImplemented(what, milestone)` rather than returning an empty result, so a missing implementation cannot masquerade as "no conflicts found". This is for gaps inside a path being built now — not a way to pre-create modules for later milestones.
+- A function that is declared but not yet written throws `notImplemented(what)` rather than returning an empty result, so a missing implementation cannot masquerade as "no conflicts found".
 - Environmental failures are `infra-failure`, never Findings.

@@ -25,5 +25,5 @@ export interface Daemon {
 }
 
 export function createDaemon(_options: DaemonOptions): Daemon {
-  return notImplemented('createDaemon', 'M1');
+  return notImplemented('createDaemon');
 }

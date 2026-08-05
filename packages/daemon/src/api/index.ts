@@ -36,5 +36,5 @@ export interface ApiOptions {
  *   WS   /ws                              → live event stream for the dashboard
  */
 export function createApiServer(_options: ApiOptions): ApiServer {
-  return notImplemented('createApiServer', 'M1');
+  return notImplemented('createApiServer');
 }

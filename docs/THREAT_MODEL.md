@@ -1,6 +1,6 @@
 # Threat model
 
-Companion to ADR-0004. Reviewed as the sandbox and MCP server evolve.
+Reviewed as the sandbox and MCP server evolve.
 
 ## What Interlock is trusted with
 
@@ -23,7 +23,7 @@ Companion to ADR-0004. Reviewed as the sandbox and MCP server evolve.
 | #   | Threat                                                                 | Impact                                 | Mitigation                                                                                                         | Residual risk                                                                                                                |
 | --- | ---------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | T1  | Interlock writes to a user worktree, index or branch and destroys work | unrecoverable data loss                | typed `UserRepo`/`ShadowRepo` split; git runner refuses mutating argv against user repos; state-hash test          | a git subcommand missing from the mutating list; keep the list under review                                                  |
-| T2  | Merged agent code executes destructive behaviour on the host           | machine compromise                     | Docker: `--network=none`, non-root, read-only mount + tmpfs, cap-drop, pids/CPU/memory/time limits                 | container escape; VM isolation would be stronger — see ADR-0004                                                              |
+| T2  | Merged agent code executes destructive behaviour on the host           | machine compromise                     | Docker: `--network=none`, non-root, read-only mount + tmpfs, cap-drop, pids/CPU/memory/time limits                 | container escape; VM isolation would be stronger                                                                             |
 | T3  | Repository content or secrets exfiltrated during analysis              | data breach                            | no network in the sandbox; no telemetry; credential files never read; evidence stores spans and truncated excerpts | a build script that reads secrets and writes them into output that becomes evidence — hence redaction on stored evidence too |
 | T4  | Prompt injection through peer diffs delivered to an agent              | one agent steers another               | `wrapUntrusted()`: delimiters, truncation, neutralised instruction-shaped lines; minimal payloads; rate limits     | a determined injection that reads as ordinary code                                                                           |
 | T5  | Another local process reaches the daemon API                           | information disclosure                 | loopback-only bind; bearer token generated at first start, stored 0600                                             | any process running as the same user can read the token file; that is the limit of a local-first design                      |

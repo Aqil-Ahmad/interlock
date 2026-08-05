@@ -44,18 +44,18 @@ flowchart TB
     AN -->|execute| BOX[[Docker sandbox]]
 ```
 
-Two edges carry the security posture (ADR-0004): the dotted edge to user worktrees is read-only, and everything executed runs inside the sandbox.
+Two edges carry the security posture: the dotted edge to user worktrees is read-only, and everything executed runs inside the sandbox.
 
 ## Package map
 
-| Package                 | Role                                                                | Depends on                      |
-| ----------------------- | ------------------------------------------------------------------- | ------------------------------- |
-| `@interlock/shared`     | models, events, config, errors, logging, ids                        | nothing                         |
-| `@interlock/core`       | git/shadow ops, speculative merge, analyzers, AST, sandbox, advisor | shared                          |
-| `@interlock/daemon`     | watcher, bus, scheduler, store, API, composition root               | shared, core                    |
-| `@interlock/mcp-server` | agent-facing tools                                                  | shared (+ daemon API over HTTP) |
-| `@interlock/cli`        | `interlock` command                                                 | shared (+ daemon API over HTTP) |
-| `@interlock/dashboard`  | React UI                                                            | shared (+ daemon API over HTTP) |
+| Package                 | Role                                                  | Depends on                      |
+| ----------------------- | ----------------------------------------------------- | ------------------------------- |
+| `@interlock/shared`     | models, events, config, errors, logging, ids          | nothing                         |
+| `@interlock/core`       | git/shadow ops, speculative merge, analyzers, ranking | shared                          |
+| `@interlock/daemon`     | watcher, bus, scheduler, store, API, composition root | shared, core                    |
+| `@interlock/mcp-server` | agent-facing tools                                    | shared (+ daemon API over HTTP) |
+| `@interlock/cli`        | `interlock` command                                   | shared (+ daemon API over HTTP) |
+| `@interlock/dashboard`  | React UI                                              | shared (+ daemon API over HTTP) |
 
 Dependencies point one way. `shared` imports no sibling; `core` never imports a runtime package. Both are enforced in `eslint.config.js`.
 

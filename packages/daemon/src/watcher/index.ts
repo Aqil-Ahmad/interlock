@@ -28,5 +28,5 @@ export interface Watcher {
 }
 
 export function createWatcher(_options: WatcherOptions): Watcher {
-  return notImplemented('createWatcher', 'M1');
+  return notImplemented('createWatcher');
 }
