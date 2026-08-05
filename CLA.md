@@ -74,7 +74,18 @@ If you are contributing on behalf of a company, or your employment agreement
 gives your employer rights to your work, a signatory authorised to bind the
 company must agree to these terms on the company's behalf.
 
-## 8. Signing
+## 8. Assignment
+
+The Entity may assign this agreement, and the licenses granted under it, in whole
+or in part, to any successor to the Interlock project — including a company later
+formed or acquired to hold it. Such an assignment requires no further consent or
+signature from you, and the terms above continue to apply unchanged.
+
+Interlock is currently maintained by an individual. This clause is what allows the
+rights you grant today to transfer to that company when it exists, without every
+contributor having to sign again.
+
+## 9. Signing
 
 Open a pull request and confirm agreement by commenting on it when prompted. That
 comment, together with your GitHub identity and commit authorship, is the record

@@ -54,6 +54,13 @@ sign a CLA or assign copyright before their first merge.** Without that, a singl
 un-assigned contribution makes the commercial half unsellable. This is cheap to
 set up now and effectively unfixable later.
 
+There is no registered company yet, so the CLA names a natural person as the
+Entity. A GitHub organisation is not a legal person and cannot hold the granted
+rights, so naming one would make every signature collected against it worthless.
+`CLA.md` §8 carries an assignment clause instead: the rights transfer to the
+company on incorporation, with no need to re-collect signatures. Swapping the
+Entity is therefore a follow-up, not a blocker.
+
 Also committed to: AGPL applies to Interlock's own source. It says nothing about
 the repositories Interlock analyses — worth stating plainly in the README, since
 a tool that reads your code and is licensed AGPL invites exactly that question.
@@ -78,6 +85,7 @@ a tool that reads your code and is licensed AGPL invites exactly that question.
 - [x] Set `license` to `AGPL-3.0-only` in every manifest.
 - [x] Add `CLA.md` and enforce it in `.github/workflows/cla.yml`.
 - [x] Fill the legal entity and contact blanks in `CLA.md` and `LICENSE.md`; have both reviewed.
-- [ ] Create the signature repository and `CLA_SIGNATURES_TOKEN` secret.
+- [x] Store CLA signatures on the `cla-signatures` branch of this repository — no separate repo or PAT.
+- [ ] On incorporation: assign the rights under `CLA.md` §8 and update the Entity in `CLA.md` and `LICENSE.md`.
 - [ ] Draft the commercial license terms before the first external user.
 - [ ] Search the "Interlock" name for existing marks before investing in branding.

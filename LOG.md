@@ -14,6 +14,8 @@ Short entries: done, decided, blocked. Newest first.
 - **Decided:** findings rank by severity, then confidence, then recency — severity no longer multiplies into confidence. A high-severity finding we are unsure of outranks a low-severity one we are certain of, because agents see only a handful of warnings per hour. `findingWeight` still gates the noise budget via `minWeight`.
 - **Open:** `CLA.md` and `LICENSE.md` have unfilled entity/contact blanks and need review; CLA workflow needs a signature repo and `CLA_SIGNATURES_TOKEN`. tree-sitter vs the TypeScript compiler API wants an ADR before M4. `node:sqlite` likely closes ADR-0003. Coverage threshold is off until M2.
 - **Decided:** `dev` is the integration branch and repository default; `main` is release-only and carries the tags. CI now runs on pushes to both. Recorded in `CONTRIBUTING.md` and `CLAUDE.md`.
+- **Decided:** CLA signatures live on a `cla-signatures` branch of this repo rather than a separate one — outside contributors have no write access, so a maintainer merge is still the only way to change the record. Drops the second repo and the PAT.
+- **Decided:** no company exists yet, so the CLA Entity is a natural person. `CLA.md` §8 assigns the granted rights to a successor entity, so incorporating later does not mean re-collecting signatures.
 - **Next:** create the GitHub repo, push, set `dev` as default, add rulesets for both branches, then reproduce a textual and a semantic conflict by hand for `docs/demo/00-manual-conflict.md`.
 
 ## 2026-08-04
