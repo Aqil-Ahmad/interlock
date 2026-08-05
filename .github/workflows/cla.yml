@@ -19,7 +19,7 @@ on:
 
 permissions:
   actions: write
-  contents: read
+  contents: write
   pull-requests: write
   statuses: write
 
@@ -32,14 +32,12 @@ jobs:
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
         with:
           path-to-document: https://github.com/${{ github.repository }}/blob/main/CLA.md
-          branch: main
-          # Signatures live outside this repo so a contributor cannot alter the
-          # record of who agreed to what in the same PR that adds their code.
-          remote-organization-name: ${{ github.repository_owner }}
-          remote-repository-name: interlock-cla
+          # Signatures are committed to a branch of this repository. A pull
+          # request cannot forge one: outside contributors have no write access,
+          # so only a maintainer merge can change the record.
+          branch: cla-signatures
           path-to-signatures: signatures/v1.json
           allowlist: dependabot[bot],renovate[bot]
           custom-notsigned-prcomment: >
