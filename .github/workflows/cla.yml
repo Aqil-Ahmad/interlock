@@ -39,7 +39,9 @@ jobs:
           # so only a maintainer merge can change the record.
           branch: cla-signatures
           path-to-signatures: signatures/v1.json
-          allowlist: dependabot[bot],renovate[bot]
+          # The Entity named in CLA.md holds the copyright already and has
+          # nothing to grant itself.
+          allowlist: Aqil-Ahmad,dependabot[bot],renovate[bot]
           custom-notsigned-prcomment: >
             Thanks for the contribution. Interlock is dual-licensed (AGPL-3.0-only
             plus commercial terms), so before this can be merged we need your
