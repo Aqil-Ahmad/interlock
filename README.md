@@ -74,6 +74,7 @@ scripts/         setup, ADR scaffolding, benchmarks
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | assets, trust boundaries, residual risks        |
 | [docs/adr/](docs/adr/README.md)              | decision records                                |
 | [INTERLOCK_PLAN.md](INTERLOCK_PLAN.md)       | scope, milestones, and everything not yet built |
+| [CONTRIBUTING.md](CONTRIBUTING.md)           | branch model, checks, CLA                       |
 | [CLAUDE.md](CLAUDE.md)                       | working agreement and hard rules for changes    |
 
 ## Limitations (v1)

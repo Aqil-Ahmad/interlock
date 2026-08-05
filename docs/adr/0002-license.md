@@ -77,7 +77,7 @@ a tool that reads your code and is licensed AGPL invites exactly that question.
 - [x] Add `LICENSE_AGPL` and the `LICENSE.md` router.
 - [x] Set `license` to `AGPL-3.0-only` in every manifest.
 - [x] Add `CLA.md` and enforce it in `.github/workflows/cla.yml`.
-- [ ] Fill the legal entity and contact blanks in `CLA.md` and `LICENSE.md`; have both reviewed.
+- [x] Fill the legal entity and contact blanks in `CLA.md` and `LICENSE.md`; have both reviewed.
 - [ ] Create the signature repository and `CLA_SIGNATURES_TOKEN` secret.
 - [ ] Draft the commercial license terms before the first external user.
 - [ ] Search the "Interlock" name for existing marks before investing in branding.

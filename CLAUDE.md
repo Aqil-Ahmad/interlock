@@ -26,6 +26,7 @@ The tree holds what is built or being built now. Everything else — the sandbox
 ## How to work here
 
 - One session, one scoped task. Keep diffs reviewable.
+- Branch off `dev` and target `dev`. `main` is release-only — never commit to it or open a pull request against it.
 - Done means code + tests + docs together, `pnpm verify` green, and a CHANGELOG entry if the change is user-visible.
 - A function that is declared but not yet written throws `notImplemented(what, milestone)`. Keep it that way — returning an empty result would let a missing implementation look like "no conflicts found". This is for gaps inside a path being built now. A module for a milestone that has not started does not get a stub; it gets a paragraph in `INTERLOCK_PLAN.md`.
 - Match the surrounding style. Comments explain why, not what.
