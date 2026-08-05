@@ -4,6 +4,12 @@ name: CLA
 # the repository, so a contribution merged without that grant cannot be included
 # in it. A DCO check is not a substitute: it certifies the right to submit and
 # grants no sublicensing right.
+#
+# `pull_request_target` runs with this repository's token and secrets even for
+# pull requests from forks, which is what lets the check write its verdict back.
+# It is safe only because nothing here checks out the pull request's code. Adding
+# a checkout step would let any fork run arbitrary code with write access to this
+# repository.
 
 on:
   issue_comment:

@@ -35,7 +35,7 @@ Enforced by types and tests, not promises ([ADR-0004](docs/adr/0004-security-pos
 > Not runnable yet — the scaffold has no implementations.
 
 ```bash
-git clone <repo> && cd interlock
+git clone https://github.com/interlock-ai/interlock.git && cd interlock
 ./scripts/setup.sh          # checks prerequisites, installs, verifies
 pnpm verify                 # lint + typecheck + build + test
 ```

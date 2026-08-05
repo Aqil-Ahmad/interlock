@@ -5,6 +5,12 @@
   "type": "module",
   "description": "Early conflict detection and integration intelligence for parallel AI coding agents",
   "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/interlock-ai/interlock.git"
+  },
+  "homepage": "https://github.com/interlock-ai/interlock#readme",
+  "bugs": "https://github.com/interlock-ai/interlock/issues",
   "engines": {
     "node": ">=24"
   },
