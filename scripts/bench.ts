@@ -3,7 +3,7 @@
  * Performance budgets.
  *
  * The daemon runs on a developer's machine all day, so these are product
- * requirements rather than curiosities: a tool that costs 10% CPU at idle gets
+ * requirements rather than curiosities: a tool that costs 12% CPU at idle gets
  * uninstalled regardless of how good its findings are.
  *
  * Results go to `eval/reports/bench-<timestamp>.json` so trends are visible
