@@ -6,6 +6,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # TypeScript 7 ships a `tsc` binary but no programmatic compiler API until
+      # 7.1, and typescript-eslint loads the compiler as a library.
+      - dependency-name: 'typescript'
+        update-types: ['version-update:semver-major']
     groups:
       dev-tooling:
         patterns: ['eslint*', 'prettier', 'typescript', 'vitest', '@vitest/*', 'tsx']
