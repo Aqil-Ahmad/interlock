@@ -61,21 +61,18 @@ packages/
   cli/           the `interlock` command
   dashboard/     React UI (branch map, conflict heatmap, evidence)
 eval/            evaluation harness, outside the workspace
-docs/            architecture, evaluation protocols, threat model, ADRs, demos
-scripts/         setup, ADR scaffolding, benchmarks
+docs/            architecture and threat model
+scripts/         setup, benchmarks
 ```
 
 ## Documentation
 
-| Document                                     | What it is                                      |
-| -------------------------------------------- | ----------------------------------------------- |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, data flow, lifecycle of a Finding   |
-| [docs/EVALUATION.md](docs/EVALUATION.md)     | metric definitions and experiment protocols     |
-| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | assets, trust boundaries, residual risks        |
-| [docs/adr/](docs/adr/README.md)              | decision records                                |
-| [INTERLOCK_PLAN.md](INTERLOCK_PLAN.md)       | scope, milestones, and everything not yet built |
-| [CONTRIBUTING.md](CONTRIBUTING.md)           | branch model, checks, CLA                       |
-| [CLAUDE.md](CLAUDE.md)                       | working agreement and hard rules for changes    |
+| Document                                     | What it is                                    |
+| -------------------------------------------- | --------------------------------------------- |
+| [docs/architecture.md](docs/architecture.md) | components, data flow, lifecycle of a Finding |
+| [docs/threat-model.md](docs/threat-model.md) | assets, trust boundaries, residual risks      |
+| [CONTRIBUTING.md](CONTRIBUTING.md)           | branch model, checks, CLA                     |
+| [CLAUDE.md](CLAUDE.md)                       | working agreement and hard rules for changes  |
 
 ## Limitations (v1)
 

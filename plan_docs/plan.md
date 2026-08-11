@@ -68,7 +68,7 @@ Component responsibilities:
 ```
 interlock/
 ├── CLAUDE.md                  # agent entrypoint: points to this plan + conventions
-├── INTERLOCK_PLAN.md          # this file
+├── plan_docs/                # this file, the log, and per-milestone tasks
 ├── README.md
 ├── SECURITY.md
 ├── CONTRIBUTING.md
@@ -93,9 +93,9 @@ interlock/
 │   ├── agenticflict/          # dataset adapters (dataset itself git-ignored / DVC)
 │   └── reports/
 ├── docs/
-│   ├── ARCHITECTURE.md        # kept in sync with reality; diagrams as mermaid
-│   ├── EVALUATION.md          # metrics definitions, experiment protocols
-│   ├── THREAT_MODEL.md
+│   ├── architecture.md        # kept in sync with reality; diagrams as mermaid
+│   ├── evaluation.md          # metrics definitions, experiment protocols
+│   ├── threat-model.md
 │   ├── adr/                   # 0001-monorepo.md, 0002-license.md, 0003-sqlite.md, ...
 │   └── demo/                  # scripted demo walkthroughs per milestone
 └── scripts/                   # dev setup, fixture generation, release
@@ -205,13 +205,13 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 
 **Goal:** Numbers that survive a defense.
 
-- Execute EVALUATION.md protocols (below): golden fixture set, replayed OSS histories, AgenticFlict-derived cases; overhead benchmarks; ablations (textual-only vs +typecheck vs +AST vs full).
+- Execute evaluation.md protocols (below): golden fixture set, replayed OSS histories, AgenticFlict-derived cases; overhead benchmarks; ablations (textual-only vs +typecheck vs +AST vs full).
 - Bug-fix freeze weeks; docs completeness pass; demo video; thesis writing (architecture, methodology, results, threats to validity, future work).
   **Exit criteria:** all headline metrics reported with methodology; reproducible eval (`pnpm eval` regenerates reports); thesis draft complete.
 
 ---
 
-## 8. Evaluation Plan (summary — full protocols live in docs/EVALUATION.md)
+## 8. Evaluation Plan (summary — full protocols live in docs/evaluation.md)
 
 **Datasets:** (1) synthetic fixture repos with planted conflicts (golden labels), (2) replayed concurrent branch histories from 3–5 real OSS TypeScript repos (label by whether real merge/CI broke), (3) AgenticFlict conflict regions adapted into replayable pairs.
 **Primary metrics:** detection precision & recall per analyzer and combined; **lead time** (minutes between conflict introduction and Finding vs merge-time discovery baseline); false-positive rate per day of normal non-conflicting work (target: <1/day); daemon overhead (CPU %, RAM, disk) and time-to-verdict per pair.
@@ -221,12 +221,12 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 ## 9. Documentation Requirements (maintained continuously, checked at each milestone)
 
 - **README.md** — what/why, 10-minute quickstart, architecture diagram, demo GIF, honest limitations.
-- **docs/ARCHITECTURE.md** — components, data flow, lifecycle of a Finding; update in the same PR as any structural change.
+- **docs/architecture.md** — components, data flow, lifecycle of a Finding; update in the same PR as any structural change.
 - **docs/adr/** — every irreversible decision (repo strategy, license, storage, sandbox tech, MCP design, metric definitions). Short template: Context / Decision / Consequences.
-- **docs/EVALUATION.md**, **docs/THREAT_MODEL.md**, **SECURITY.md**, **CONTRIBUTING.md** (setup, conventions, review rules), **CHANGELOG.md** (keep-a-changelog style).
-- **Code documentation:** TSDoc on all exported APIs of `shared` and `core`; each package has a README stating its responsibility and what it must NOT do; complex logic (scheduler, matchers) gets a `NOTES.md` explaining the algorithm in prose.
+- **docs/evaluation.md**, **docs/threat-model.md**, **SECURITY.md**, **CONTRIBUTING.md** (setup, conventions, review rules), **CHANGElog.md** (keep-a-changelog style).
+- **Code documentation:** TSDoc on all exported APIs of `shared` and `core`; each package has a README stating its responsibility and what it must NOT do; complex logic (scheduler, matchers) gets a `notes.md` explaining the algorithm in prose.
 - **docs/demo/** — one scripted, reproducible demo per milestone (these become the defense).
-- **Weekly LOG.md** — 5 lines/week: done, decided, blocked. This is thesis gold and supervisor-meeting fuel.
+- **Weekly log.md** — 5 lines/week: done, decided, blocked. This is thesis gold and supervisor-meeting fuel.
 
 ## 10. Security & Safety Practices (non-negotiable; enforce via tests and review)
 
@@ -234,7 +234,7 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 2. **Sandboxed execution.** Speculatively-merged code is untrusted (agents write it). All builds/typechecks/tests run in Docker: no network, non-root, CPU/mem/time limits, read-only mounts + tmpfs overlay. Never execute merged code on the host.
 3. **Secrets hygiene.** Never read/store .env or credential files; redact obvious secret patterns from stored evidence and logs; SQLite lives under the user data dir with 0700 perms.
 4. **Local-only services.** Daemon HTTP/WS and MCP server bind 127.0.0.1 only, with a generated bearer token; no telemetry; document any future opt-in analytics in an ADR first.
-5. **Prompt-injection awareness.** Content flowing to agents (peer diffs, advice) is data, not instructions: wrap in clearly-delimited blocks, strip/escape instruction-like patterns, keep payloads minimal; document residual risk in THREAT_MODEL.md. Same caution for any LLM-explanation feature reading repo content.
+5. **Prompt-injection awareness.** Content flowing to agents (peer diffs, advice) is data, not instructions: wrap in clearly-delimited blocks, strip/escape instruction-like patterns, keep payloads minimal; document residual risk in threat-model.md. Same caution for any LLM-explanation feature reading repo content.
 6. **Supply chain.** pnpm lockfile committed; dependabot/audit in CI; pin Docker base images; minimal dependency policy for `core` (prefer zero-dep).
 7. **Resource safety.** Disk quota + GC policy for shadow worktrees and caches; kill-switch (`interlock daemon stop --purge`).
 

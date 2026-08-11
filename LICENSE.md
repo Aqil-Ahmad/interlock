@@ -25,5 +25,3 @@ license for a given file or region.
 
 Contributions are accepted under the [CLA](./CLA.md), which grants the right to
 sublicense and is what makes rule 1 through 3 possible.
-
-Reasoning: [ADR-0002](./docs/adr/0002-license.md).

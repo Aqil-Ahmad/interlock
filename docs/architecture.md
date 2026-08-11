@@ -81,7 +81,7 @@ Every step publishes an event with a `causedBy` pointer, so a Finding can be wal
 
 | Problem                                                    | Lives in                          | Notes                                                  |
 | ---------------------------------------------------------- | --------------------------------- | ------------------------------------------------------ |
-| Not melting the CPU with N² pairs                          | `daemon/src/scheduler`            | `NOTES.md` — debounce, priority, invalidation, budgets |
+| Not melting the CPU with N² pairs                          | `daemon/src/scheduler`            | `notes.md` — debounce, priority, invalidation, budgets |
 | Snapshotting dirty state without touching the user's index | `core/src/git/worktree.ts`        | temporary index file; objects only                     |
 | Disk cost of shadow worktrees                              | `core/src/git/shadow.ts`          | one clone per repo, shared objects, quota + GC         |
 | Precision of semantic detection                            | `core/src/analyzers`              | per-matcher confidence caps                            |

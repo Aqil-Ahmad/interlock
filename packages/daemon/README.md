@@ -8,7 +8,7 @@ The long-running local service. Composes `@interlock/core` into a system that ru
 | ---------------- | -------------------------------------------------------------------- |
 | `src/bus/`       | typed pub/sub; the only channel components use to talk to each other |
 | `src/watcher/`   | repo/branch/worktree/session discovery and change detection          |
-| `src/scheduler/` | which pairs to analyse, and when — see `src/scheduler/NOTES.md`      |
+| `src/scheduler/` | which pairs to analyse, and when — see `src/scheduler/notes.md`      |
 | `src/store/`     | SQLite persistence, migrations, analyzer cache, event log            |
 | `src/api/`       | localhost HTTP + WebSocket API                                       |
 | `src/hooks/`     | agent session registration                                           |

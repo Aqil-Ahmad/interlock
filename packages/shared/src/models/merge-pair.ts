@@ -15,7 +15,7 @@ export interface MergePair {
   /** Stable identity of the pair, independent of argument order. */
   readonly key: MergePairKey;
   readonly mergeBaseSha: string;
-  /** Scheduling priority; higher runs first (see scheduler NOTES.md). */
+  /** Scheduling priority; higher runs first (see scheduler notes.md). */
   readonly priority: number;
   readonly lastRunAt: string | null;
   /** True when either side moved since the last completed run. */

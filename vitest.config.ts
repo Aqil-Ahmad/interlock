@@ -31,7 +31,6 @@ export default defineConfig({
   test: {
     projects: [
       {
-        extends: false,
         resolve: { alias },
         test: {
           name: 'node',

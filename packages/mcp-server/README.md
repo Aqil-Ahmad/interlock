@@ -20,4 +20,4 @@ The agent-facing surface: where detection turns into something an agent can act 
 
 ## Injection boundary
 
-Content forwarded to an agent is written by other agents, which makes this package the prompt-injection boundary. Peer diffs, compiler output and symbol names are quoted as data inside delimiters, truncated, with instruction-shaped lines neutralised. Residual risk is documented in `docs/THREAT_MODEL.md`.
+Content forwarded to an agent is written by other agents, which makes this package the prompt-injection boundary. Peer diffs, compiler output and symbol names are quoted as data inside delimiters, truncated, with instruction-shaped lines neutralised. Residual risk is documented in `docs/threat-model.md`.

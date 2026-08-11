@@ -3,7 +3,7 @@
  * Evaluation entry point: `pnpm eval`.
  *
  * Every reported number is regenerable by this command. Suites and metric
- * definitions are documented in docs/EVALUATION.md.
+ * definitions are documented in plan_docs/evaluation.md.
  *
  *   fixtures     — golden synthetic repos with planted conflicts
  *   replay       — concurrent branch histories from OSS repos
@@ -32,7 +32,7 @@ function parseSuites(argv: readonly string[]): Suite[] {
 function main(): void {
   const suites = parseSuites(process.argv.slice(2));
   console.log(`Interlock evaluation — suites: ${suites.join(', ')}\n`);
-  console.log('Not implemented yet. Protocols: docs/EVALUATION.md');
+  console.log('Not implemented yet. Protocols: plan_docs/evaluation.md');
 }
 
 main();

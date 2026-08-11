@@ -8,7 +8,7 @@
 
 ## 0. Shared Asset Inventory (why these pivots are cheap)
 
-Everything below reuses assets the core plan (INTERLOCK_PLAN.md) already builds:
+Everything below reuses assets the core plan (PLAN.md) already builds:
 
 | Asset                                                  | Built in | Reused by  |
 | ------------------------------------------------------ | -------- | ---------- |
@@ -102,7 +102,7 @@ Rule of thumb: a feature belongs in this file only if ≥60% of it is already bu
 
 **Scenario where it becomes the headline:** agents are widely used but under CFO scrutiny; measurement outsells prevention. Pairs naturally with F3 (same data, leadership-facing vs compliance-facing).
 
-**Reuses:** event log + session attribution (M1) + Findings history. New work: metrics definitions (reuse docs/EVALUATION.md rigor), aggregation jobs, exec dashboard/exports.
+**Reuses:** event log + session attribution (M1) + Findings history. New work: metrics definitions (reuse docs/evaluation.md rigor), aggregation jobs, exec dashboard/exports.
 
 **Buyer & pricing:** engineering leadership; team/org tier. Sales line: "the first dashboard that shows what your agent fleet wastes, not just what it costs."
 
@@ -125,5 +125,5 @@ Rule of thumb: a feature belongs in this file only if ≥60% of it is already bu
 1. Core (M0–M8) ships first. No expansion feature starts before M5 is done — the shared assets must exist.
 2. First expansion pick should be **F1**: largest market, highest asset reuse, and it de-risks the "multi-agent stalls" scenario, which is the most likely threat.
 3. One expansion feature at a time, chosen by the Scenario Map + design-partner pull, recorded as an ADR ("why F_x now").
-4. Each feature must pass the same bar as the core: a measurable claim, an eval protocol in docs/EVALUATION.md, and a scripted demo in docs/demo/.
+4. Each feature must pass the same bar as the core: a measurable claim, an eval protocol in docs/evaluation.md, and a scripted demo in docs/demo/.
 5. Revisit this file at every milestone review; delete or demote features whose scenario has expired. A fallback list that never changes is a fallback list nobody is reading.

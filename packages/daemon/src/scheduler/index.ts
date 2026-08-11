@@ -7,7 +7,7 @@ import type { EventBus } from '../bus/index.js';
  * prioritising pairs whose changes overlap, invalidating incrementally when a
  * branch moves, and superseding runs that no longer describe current state.
  *
- * This is where the daemon's performance is won or lost. Read NOTES.md before
+ * This is where the daemon's performance is won or lost. Read notes.md before
  * changing anything here.
  */
 

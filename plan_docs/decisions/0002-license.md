@@ -15,7 +15,7 @@ daemon that watches their repositories; a permissive license hands a funded
 competitor a finished product.
 
 Interlock runs locally today, but the plan already anticipates a team/server mode
-(`INTERLOCK_PLAN.md` §3 lists it as a v1 non-goal, not a never). Whatever license
+(the plan lists it as a v1 non-goal, not a never). Whatever license
 is chosen now applies to code written long before that mode exists, and cannot be
 retracted from anything already published.
 

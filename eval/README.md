@@ -1,6 +1,6 @@
 # Evaluation harness
 
-Measures detection quality, lead time and overhead. Protocols: `docs/EVALUATION.md`.
+Measures detection quality, lead time and overhead. Protocols: `plan_docs/evaluation.md`.
 
 ## Why this lives outside `packages/`
 

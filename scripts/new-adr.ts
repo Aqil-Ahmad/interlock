@@ -3,7 +3,7 @@
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const ADR_DIR = join(import.meta.dirname, '..', 'docs', 'adr');
+const ADR_DIR = join(import.meta.dirname, '..', 'plan_docs', 'decisions');
 
 function slugify(title: string): string {
   return title
@@ -34,7 +34,7 @@ async function main(): Promise<void> {
 
   await writeFile(path, content, { flag: 'wx' });
   console.log(`Created ${path}`);
-  console.log('Remember to add it to docs/adr/README.md.');
+  console.log('Remember to add it to plan_docs/decisions/README.md.');
 }
 
 await main();

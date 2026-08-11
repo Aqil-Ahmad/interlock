@@ -21,6 +21,7 @@
     "packages/*/src/**/*.test.ts",
     "packages/*/test/**/*.ts",
     "scripts/**/*.ts",
-    "eval/**/*.ts"
+    "eval/**/*.ts",
+    "*.config.ts"
   ]
 }

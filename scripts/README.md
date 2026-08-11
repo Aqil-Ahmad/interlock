@@ -8,4 +8,4 @@ Developer tooling. Nothing here ships to users.
 | `new-adr.ts` | scaffold the next ADR (`pnpm adr "title"`)                         |
 | `bench.ts`   | performance budgets (`pnpm bench`)                                 |
 
-Planned: `gen-fixture.ts` to build a golden fixture repo in a temp dir, and `demo/*.sh` for the scripted walkthroughs in `docs/demo/`.
+Planned: `gen-fixture.ts` to build a golden fixture repo in a temp dir, and `demo/*.sh` for the scripted walkthroughs in `plan_docs/demo/`.
