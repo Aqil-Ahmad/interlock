@@ -78,7 +78,7 @@ scripts/         setup, benchmarks
 
 - Single developer, single machine. No team or cloud mode.
 - Linux and macOS only.
-- AST semantic analysis covers TypeScript/JavaScript. Other languages fall back to build/typecheck/test detection, which is language-agnostic but slower.
+- Semantic detection covers TypeScript and JavaScript. Other languages get textual conflict detection only.
 - Semantic detection requires Docker.
 - Detects and explains; never resolves.
 

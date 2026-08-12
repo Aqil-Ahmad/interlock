@@ -8,7 +8,7 @@
 
 ## 0. Shared Asset Inventory (why these pivots are cheap)
 
-Everything below reuses assets the core plan (PLAN.md) already builds:
+Everything below reuses assets the core plan (plan.md) already builds:
 
 | Asset                                                  | Built in | Reused by  |
 | ------------------------------------------------------ | -------- | ---------- |
@@ -105,6 +105,22 @@ Rule of thumb: a feature belongs in this file only if ≥60% of it is already bu
 **Reuses:** event log + session attribution (M1) + Findings history. New work: metrics definitions (reuse docs/evaluation.md rigor), aggregation jobs, exec dashboard/exports.
 
 **Buyer & pricing:** engineering leadership; team/org tier. Sales line: "the first dashboard that shows what your agent fleet wastes, not just what it costs."
+
+---
+
+## F7 — Beyond TypeScript: per-language toolchain adapters
+
+**What:** Semantic detection for Python, Go, Rust or Java. The pipeline already works on any language for textual conflicts; what is missing per language is a toolchain adapter (how to install dependencies, typecheck, build and test) and a diagnostic parser (turn that tool's error output into a Finding with a span).
+
+**Why workflows are heading here:** agents are not a TypeScript phenomenon, and the first serious enterprise conversation will be about a language Interlock does not support.
+
+**Scenario where it becomes the headline:** demand arrives from a language you do not cover, or a competitor ships multi-language first.
+
+**Reuses:** the sandbox (M3), the scheduler and its overlap pre-filter (M2, M4) — tree-sitter grammars already cover dozens of languages — plus the baseline differ, which is language-neutral since it only compares diagnostic sets. New work: one adapter and one diagnostic parser per language; attribution needs per-language symbol resolution, which is the expensive part.
+
+**Buyer & pricing:** unchanged; this removes an objection rather than opening a tier.
+
+**Design consequence today:** keeping tree-sitter as the pre-filter, rather than using the TypeScript compiler for that job too, is what keeps this cheap later.
 
 ---
 

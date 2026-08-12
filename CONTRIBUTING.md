@@ -26,7 +26,7 @@ pnpm verify        # build + lint + format + typecheck + test
 ```
 
 CI runs the same checks on Node 24 and 26, on Linux and macOS. A change is done
-when code, tests and docs land together, with a `CHANGElog.md` entry if it is
+when code, tests and docs land together, with a `CHANGELOG.md` entry if it is
 user-visible.
 
 ## Licensing

@@ -11,7 +11,7 @@ Nothing here is imported, built or shipped. Nothing in `packages/`, `README.md`,
 
 | File              | What it is                                                   |
 | ----------------- | ------------------------------------------------------------ |
-| `PLAN.md`         | The master plan: scope, non-goals, architecture, data models |
+| `plan.md`         | The master plan: scope, non-goals, architecture, data models |
 | `expansion.md`    | Product directions past v1. Not scheduled work               |
 | `evaluation.md`   | How detection quality, latency and overhead get measured     |
 | `log.md`          | Running record: done, decided, blocked. Newest first         |
@@ -33,17 +33,17 @@ and everything in it is public and true today.
 Update the row when a milestone's exit criteria pass — not when its last task
 is ticked. A milestone is done when it demos, not when the code compiles.
 
-| Milestone                                                                                  | State       |
-| ------------------------------------------------------------------------------------------ | ----------- |
-| [M0 — Foundation](milestones/m0-foundation.md)                                             | in progress |
-| [M1 — Watcher and git core](milestones/m1-watcher-and-git-core.md)                         | not started |
-| [M2 — Speculative merge and textual detection](milestones/m2-speculative-merge-textual.md) | not started |
-| [M3 — Sandbox, typecheck and build](milestones/m3-sandbox-typecheck-build.md)              | not started |
-| [M4 — AST analysis and targeted tests](milestones/m4-ast-and-targeted-tests.md)            | not started |
-| [M5 — MCP server and agent feedback](milestones/m5-mcp-agent-feedback.md)                  | not started |
-| [M6 — Dashboard and CLI](milestones/m6-dashboard-and-cli.md)                               | not started |
-| [M7 — Integration advisor](milestones/m7-integration-advisor.md)                           | not started |
-| [M8 — Evaluation and hardening](milestones/m8-evaluation-and-hardening.md)                 | not started |
+| Milestone                                                                                   | State       |
+| ------------------------------------------------------------------------------------------- | ----------- |
+| [M0 — Foundation](milestones/m0-foundation.md)                                              | in progress |
+| [M1 — Watcher and git core](milestones/m1-watcher-and-git-core.md)                          | not started |
+| [M2 — Speculative merge and textual detection](milestones/m2-speculative-merge-textual.md)  | not started |
+| [M3 — Sandbox, typecheck and build](milestones/m3-sandbox-typecheck-build.md)               | not started |
+| [M4 — Overlap pre-filter and targeted tests](milestones/m4-prefilter-and-targeted-tests.md) | not started |
+| [M5 — MCP server and agent feedback](milestones/m5-mcp-agent-feedback.md)                   | not started |
+| [M6 — Dashboard and CLI](milestones/m6-dashboard-and-cli.md)                                | not started |
+| [M7 — Integration advisor](milestones/m7-integration-advisor.md)                            | not started |
+| [M8 — Evaluation and hardening](milestones/m8-evaluation-and-hardening.md)                  | not started |
 
 Milestones run in order. Do not start one before the previous milestone's exit
 criteria pass. Documentation and evaluation work are the exception and run
@@ -120,7 +120,15 @@ is stricter, that wins.
 - Non-obvious algorithms get a `notes.md` beside the code, updated in the same
   change.
 - The package `README.md` still describes reality afterwards.
-- `CHANGElog.md` entry if a user could notice the change.
+- `CHANGELOG.md` entry if a user could notice the change.
+
+**Silence beats coverage**
+
+- When a check is unsure, it says nothing. A tool that catches 60% of conflicts
+  and never lies is a product; one that catches 95% and cries wolf twice a day
+  is uninstalled inside a week.
+- Every false positive is a bug with an issue, not a tuning parameter. From M2
+  the false-positive rate is a tracked metric, not an impression.
 
 **Verification**
 

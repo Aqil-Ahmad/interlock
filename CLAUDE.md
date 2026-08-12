@@ -111,4 +111,6 @@ pnpm eval
 - The event log is append-only and carries `causedBy`, so every Finding is traceable to what produced it. Side channels that bypass the bus break replay.
 - Findings must carry machine-checkable evidence: spans, tool output or a symbol trail.
 - Environmental failures (Docker down, unknown toolchain) are `infra-failure`, never Findings.
-- In the AST layer, precision beats recall: a rule that is unsure stays silent. The sandbox analyzers are the safety net.
+- The compiler is the semantic detector, not a hand-built matcher. The engineering is telling merge-induced errors from pre-existing ones, and naming which branch caused which half.
+- The AST layer is a pre-filter, not a detector, and its bias is the opposite of a rule's: when it cannot tell, the pair escalates rather than being dropped. A filtered-out conflict is never looked for again.
+- When a check is unsure, it says nothing. Every false positive is a bug with an issue, not a tuning parameter.

@@ -44,8 +44,8 @@ walkthroughs reproducible by someone else from the doc alone.
 
 - [ ] **Measure what a single pair actually costs**
       **Files:** `plan_docs/log.md`
-      **What:** on a real mid-size TypeScript repo, time `git merge-tree --write-tree` against a worktree checkout plus merge, and time an incremental `tsc` on the merged tree.
-      **Done when:** four numbers are in `log.md`. This decides whether the scheduler in M2 is a small problem or the whole project — ten pairs at 90 seconds does not fit any laptop CPU budget.
+      **What:** on a real mid-size TypeScript repo, time `git merge-tree --write-tree`, materialising the merged tree into a scratch directory, and an incremental `tsc` over it. Measure a pair that merges **cleanly** — that is the case that costs money, since a conflicted merge stops at the textual finding.
+      **Done when:** the median of ten runs for each step is in `log.md`. The typecheck number is the one that matters: it sets how aggressive the M2 scheduler has to be, and whether continuous checking is affordable at all.
 
 - [ ] **Obtain the AgenticFlict dataset**
       **Files:** `eval/README.md`

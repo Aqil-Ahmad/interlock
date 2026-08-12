@@ -23,7 +23,7 @@ Developers increasingly run multiple AI coding agents (Claude Code, Codex CLI, C
 - No automatic conflict _resolution_ that writes to user branches. v1 only detects, explains, and suggests. (LLM-drafted resolution patches are a stretch goal, always behind explicit user approval, applied only in shadow worktrees for preview.)
 - No team/server/cloud mode. v1 is single-developer, single-machine, local-first.
 - No GitHub App / CI integration in v1 (design for it, don't build it).
-- AST semantic analysis targets TypeScript/JavaScript only in v1. Python is a stretch goal. Build/typecheck/test-based semantic detection is language-agnostic by design and is the fallback for other languages.
+- Semantic detection targets TypeScript/JavaScript only in v1; the detector is the TypeScript compiler. Other languages get textual conflict detection, which is language-agnostic because git does not parse anything. The sandbox and scheduler are built so a per-language toolchain adapter can be added later, but none is implemented in v1 and no milestone schedules one — see `expansion.md` F7.
 - No Windows support in v1. Linux and macOS only.
 - Never modify the user's real worktrees, branches, index, or config. All Interlock git operations happen in shadow clones/worktrees under Interlock's own data directory.
 
@@ -49,12 +49,12 @@ Component responsibilities:
 - **Watcher:** discovers repos, branches, worktrees, and agent sessions; detects changes (filesystem events + git refs + uncommitted diffs). Read-only with respect to user state.
 - **Event Bus:** internal typed pub/sub; every component communicates via events (enables replay/debugging and clean tests).
 - **Scheduler:** decides which (branch × branch) pairs need re-analysis, with debouncing, prioritization, and incremental invalidation. This is where performance lives.
-- **Merge Engine:** creates/updates shadow worktrees; performs speculative pairwise merges (including uncommitted changes via temporary commits in shadow only); classifies textual conflicts.
+- **Merge Engine:** performs speculative pairwise merges with `git merge-tree --write-tree` inside a shadow clone's object database — no checkout per pair (including uncommitted changes via temporary commits in shadow only); classifies textual conflicts. Merged trees are materialised into a single reusable scratch worktree only when a semantic check is warranted.
 - **Analyzers (pluggable pipeline):**
   - `textual` — git merge conflict classification.
   - `typecheck` / `build` — run in Docker sandbox against merged shadow tree.
   - `test-targeted` — select and run tests impacted by the union of both diffs.
-  - `ast-semantic` — tree-sitter cross-branch symbol analysis (renames vs call sites, signature changes vs callers, deleted/moved exports vs imports, duplicate additions).
+  - `prefilter` — tree-sitter overlap test deciding whether a clean merge is worth the compiler at all. Not a detector: it has no symbol table and cannot resolve names across files.
 - **Store:** SQLite persistence of all entities + event log.
 - **MCP Server:** exposes tools/resources so agents can ask "is my current work colliding?" and receive injected warnings; also receives session metadata from Claude Code hooks.
 - **CLI:** `interlock status | watch | check <branchA> <branchB> | order | daemon start/stop`.
@@ -80,7 +80,7 @@ interlock/
 │   │   ├── git/               #   repo discovery, worktree mgmt, shadow ops, diff extraction
 │   │   ├── merge/             #   speculative merge engine + textual conflict classifier
 │   │   ├── analyzers/         #   analyzer interface + typecheck/build/test/ast implementations
-│   │   ├── ast/               #   tree-sitter wrappers, symbol tables, cross-branch matching
+│   │   ├── ast/               #   tree-sitter overlap pre-filter for the scheduler
 │   │   ├── sandbox/           #   Docker sandbox runner (no-network, resource-limited)
 │   │   └── advisor/           #   merge-order recommendation, finding ranking
 │   ├── daemon/                # long-running service: watcher, event bus, scheduler, store (SQLite), localhost HTTP API for CLI/dashboard
@@ -167,7 +167,7 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 
 **Goal:** Faster, cheaper semantic signals + deeper explanations.
 
-- tree-sitter symbol extraction for TS/JS; cross-branch matchers: rename vs call-site, signature-arity change vs callers, deleted/moved export vs import, same-symbol dual-edit, duplicate implementation detection.
+- tree-sitter overlap pre-filter: did either branch touch an exported declaration, and do the touched symbols intersect? Used by the scheduler to skip typechecks, never to raise a Finding.
 - Test-impact selection: run only tests touching files/symbols in the union diff, inside the sandbox; flaky-test quarantine list.
 - Finding ranking (severity × confidence) in `core/advisor`.
   **Exit criteria:** AST analyzer flags the M3 demo case in <10s without invoking the compiler; measured on the fixture golden set: AST-layer precision ≥0.9, and combined analyzers' recall reported (target ≥0.8) with every false positive triaged into an issue.
@@ -223,7 +223,7 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 - **README.md** — what/why, 10-minute quickstart, architecture diagram, demo GIF, honest limitations.
 - **docs/architecture.md** — components, data flow, lifecycle of a Finding; update in the same PR as any structural change.
 - **docs/adr/** — every irreversible decision (repo strategy, license, storage, sandbox tech, MCP design, metric definitions). Short template: Context / Decision / Consequences.
-- **docs/evaluation.md**, **docs/threat-model.md**, **SECURITY.md**, **CONTRIBUTING.md** (setup, conventions, review rules), **CHANGElog.md** (keep-a-changelog style).
+- **docs/evaluation.md**, **docs/threat-model.md**, **SECURITY.md**, **CONTRIBUTING.md** (setup, conventions, review rules), **CHANGELOG.md** (keep-a-changelog style).
 - **Code documentation:** TSDoc on all exported APIs of `shared` and `core`; each package has a README stating its responsibility and what it must NOT do; complex logic (scheduler, matchers) gets a `notes.md` explaining the algorithm in prose.
 - **docs/demo/** — one scripted, reproducible demo per milestone (these become the defense).
 - **Weekly log.md** — 5 lines/week: done, decided, blocked. This is thesis gold and supervisor-meeting fuel.

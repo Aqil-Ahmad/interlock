@@ -4,6 +4,14 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-08-05
+
+- **Decided:** merges use `git merge-tree --write-tree` in the shadow object database, not a worktree per pair. Merged trees materialise into one reusable scratch worktree with `node_modules` symlinked from the user's checkout; a `package.json` or lockfile change routes that pair to a slow install path.
+- **Decided:** `merge-tree` solves merge cost; the scheduler solves typecheck cost, and typecheck cost is the budget that matters. A semantic conflict is a merge that came out clean, so the merge step never filters those out — overlap does.
+- **Decided:** the TypeScript compiler is the semantic detector. M3 gains a baseline differ (report only diagnostics absent from base, A and B alone) and an attribution engine (which branch caused which half). The hand-built rename and signature matchers are dropped.
+- **Decided:** M4 becomes overlap pre-filter plus targeted tests. tree-sitter has no symbol table and cannot resolve names across files, so it pre-filters and never detects. Targeted tests stay — the compiler cannot see behavioural conflicts.
+- **Decided:** false-positive rate is a tracked metric from M2. When unsure, say nothing.
+
 ## 2026-08-04 (later)
 
 - **Done:** deleted the M3+ stub modules and the barrel/`exports` entries pointing at them; dashboard out of the workspace, solution tsconfig and Vitest projects until it declares react/vite; coverage threshold off; Dependabot docker entry removed; CONTRIBUTING and the issue/PR templates dropped.
