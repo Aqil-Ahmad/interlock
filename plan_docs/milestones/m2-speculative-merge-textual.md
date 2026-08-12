@@ -80,6 +80,6 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
       **Constraints:** the fixture lands before the rule it exercises. Once written, `eval/` is read-only to coding sessions.
 
 - [ ] **Turn the coverage gate on**
-      **Files:** `vitest.config.ts`
-      **What:** restore the `packages/core/src/**` threshold at 80% lines and functions.
-      **Done when:** CI enforces it. It was switched off while `core` was mostly declarations; by now it has an implementation to measure.
+      **Files:** `vitest.config.ts`, `.github/workflows/ci.yml`
+      **What:** restore the `packages/core/src/**` threshold at 80% lines and functions, and restore the `coverage` CI job that runs it.
+      **Done when:** CI fails when `core` drops below the threshold. Both were removed while `core` was mostly declarations — the gate measured nothing and the job discarded its own output. By now there is an implementation to measure.
