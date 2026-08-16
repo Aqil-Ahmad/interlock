@@ -4,6 +4,29 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-08-05 (later)
+
+- **Found:** agent-warning test, runs 1–2 of 5. Claude Code (Opus 5) on the archestra codebase, mid-task, given a true warning that a function it calls had been renamed by another session. Both runs **adapted**: verified the claim before acting, fixed import and call site, left the peer's file untouched, then resumed the original task. Run 2 narrated it — "let me verify that rename before changing the call site", then "confirmed, the rename landed in the working tree".
+- **Implication:** the core bet has two positive data points. Agents verify before acting, so a false positive costs a file read rather than broken code; and they treat a peer's change as authoritative rather than reverting it, so Interlock only has to inform, not arbitrate.
+- **Watch:** in run 2 the agent then moved to "check whether other call sites still reference the old name" — widening from its own file to the whole repository. In a real multi-agent setting that means editing files another branch owns. MCP payloads should scope the expected action to the caller's own work.
+- **Caveat:** n=2, one agent, and the rename was visible in the same working tree. Real warnings describe changes in another worktree the agent cannot check. Behaviour on an unverifiable claim is still untested.
+
+- **Measured:** pair cost on archestra (793,784 lines of backend TypeScript, 644 MB of history), git 2.39.3, medians.
+  - `git merge-tree --write-tree` on a clean pair: **12.8 ms** (10 runs, 11.7–16.2). The merge is free at real scale — the Atlassian figure holds.
+  - Materialising the merged tree into a scratch directory via `git archive | tar`: **1.62 s** (5 runs, 276 MB, 6,605 files). This is 127× the merge and is unavoidable before any semantic check.
+  - Typecheck: **not measured on a real repo.** archestra has no `node_modules` installed, so the only available number is interlock itself at 2,781 lines — 1.09 s cold, 0.45 s warm — against a codebase 285× smaller. It says nothing useful about a mid-size project.
+- **Implication:** the cost story is not "merge cheap, typecheck expensive". It is "merge free, *materialisation* significant, typecheck unknown". Extracting the full tree per pair would dominate the budget on its own. M2's scratch worktree should update the previous tree by diff rather than re-extracting from scratch — that turns 1.6 s into roughly the size of the change.
+- **Measured:** typecheck decomposition on interlock (2,781 lines, 1,073 dependency `.d.ts`), medians.
+  - Floor, `tsc --version`: **436 ms**. Process start and compiler load, fixed regardless of project size.
+  - Cold, no build info: **1084 ms** — so 648 ms of actual checking.
+  - Warm, nothing changed: **443 ms**, i.e. the floor. Real work ≈ 0.
+  - Warm, one file changed: **786 ms** — 350 ms of work. This is Interlock's real case.
+- **Implication:** 40% of the small-repo number is fixed startup, which is why extrapolating by line count would have been badly wrong. Cold cost scales with dependency `.d.ts` volume and source size; incremental cost scales with the size of the change and its dependents, not the repository.
+- **Estimate, not measured:** a cold `tsc` on a repo the size of archestra is likely 30 s – 3 min, which rules out cold-checking every pair continuously. A one-file incremental there is plausibly 2–10 s, which does not.
+- **Design consequence:** continuous semantic checking is viable only if incremental state survives between checks. The scratch worktree must persist `.tsbuildinfo`, and the scheduler should prefer re-checking the same pair over rotating pairs, because every rotation throws away incremental state and pays the cold cost again. This contradicts the single shared scratch worktree recorded earlier today — M2 likely needs sticky per-pair scratch state or a small pool. Resolve before building the scheduler.
+
+- **Open:** the number that decides continuous-versus-on-demand is still missing. Getting it needs a full `pnpm install` in archestra, or another mid-size TypeScript repo with dependencies already present.
+
 ## 2026-08-05
 
 - **Decided:** merges use `git merge-tree --write-tree` in the shadow object database, not a worktree per pair. Merged trees materialise into one reusable scratch worktree with `node_modules` symlinked from the user's checkout; a `package.json` or lockfile change routes that pair to a slow install path.
