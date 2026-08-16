@@ -45,17 +45,17 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
       **Done when:** each Finding names both branches, both spans and the merge-base, and a fixture suite covers add/add, edit/edit, edit/delete and rename/edit.
       **Constraints:** evidence is machine-checkable — spans and tool output, never prose alone.
 
-- [ ] **Reusable scratch worktree**
+- [ ] **Per-pair worktree pool**
       **Files:** `packages/core/src/git/shadow.ts`
-      **What:** one scratch directory per repo, reused for every pair that needs a real filesystem. Materialise a merged tree into it on demand, symlink `node_modules` from the user's checkout rather than installing, and reset it between uses.
-      **Done when:** materialising a merged tree is measured and recorded; running two different pairs in sequence reuses the same directory; and the directory is left clean if a run is aborted midway.
-      **Constraints:** one scratch directory, not one per pair — that was the original design and it is what made the cost look impossible. If either branch changed `package.json` or the lockfile, the symlinked `node_modules` is wrong for that pair: detect it and route to a slower path that installs, or skip the semantic check and say why.
+      **What:** an LRU pool of persistent per-pair worktrees under the data dir, default size 4, configurable. A pair enters only after the overlap filter marks it worth watching. Update a slot by delta: `merge-tree --write-tree` → `commit-tree` → `reset --hard` inside that pair's worktree, so only changed files are rewritten. See ADR-0005.
+      **Done when:** a second check of the same pair rewrites only the files that differ and is measurably faster than the first; `.tsbuildinfo` survives between checks of a slot; eviction is logged with its cost; and an aborted run leaves the slot usable rather than half-written.
+      **Constraints:** pool worktrees keep a **detached HEAD** so no branch ref moves. `reset --hard` is a mutating command and is permitted here only because pool worktrees belong to the shadow clone — the runtime `isMutatingCommand` check and `user-repo-untouched.test.ts` both still apply unchanged. If either branch or the merge touches `package.json` or the lockfile, mark the pair `deps-dirty` and route to a slow install path, or skip the semantic check and say why; the symlinked `node_modules` is wrong for that pair and typechecking against it produces confident nonsense.
 
 - [ ] **Scheduler v1**
       **Files:** `packages/daemon/src/scheduler/`
       **What:** decide which pairs get merged, and which clean merges are worth a semantic check. Debounce, mark pairs stale when a branch moves, abort superseded runs, cap concurrency. Rank candidates by file overlap first, then symbol overlap.
-      **Done when:** with 5 branches under continuous edit, work stays inside the CPU budget, no pair is analysed twice for the same snapshot pair, and the proportion of clean merges that get escalated to a typecheck is reported.
-      **Constraints:** this is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason.
+      **Done when:** with 5 branches under continuous edit, work stays inside the CPU budget, no pair is analysed twice for the same snapshot pair, and both the escalation rate and the pool eviction rate are reported.
+      **Constraints:** this is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason. **Prefer re-checking a hot pooled pair over rotating a new one in.** Stickiness is a cost control of the same rank as overlap filtering, because every eviction discards incremental compiler state and the next check of that pair pays the cold cost again — round-robin fairness across pairs is the worst available strategy.
 
 - [ ] **Analyzer result caching**
       **Files:** `packages/daemon/src/store/`

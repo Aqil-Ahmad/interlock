@@ -37,8 +37,9 @@ _which branch caused which half_ of each one.
 
 - [ ] **Typecheck runner**
       **Files:** `packages/core/src/analyzers/typecheck.ts`
-      **What:** run the TypeScript compiler over a tree and return structured diagnostics — code, message, file, span. Use the compiler API with incremental reuse rather than shelling out and parsing text.
-      **Done when:** the same tree checked twice reuses prior state and is measurably faster the second time.
+      **What:** host the TypeScript LanguageService in-process, one instance per hot pooled pair, rooted at that pair's pool slot (ADR-0005). Return structured diagnostics — code, message, file, span. Do not spawn `tsc` per check: the measured process floor is 436 ms, which would dominate an incremental check costing 350 ms of real work.
+      **Done when:** the same slot checked twice reuses the live service and is measurably faster; a service is disposed when its pool slot is evicted; and memory per instance is measured and bounded, because four live compiler instances on a large repository is real RSS.
+      **Constraints:** **strip `plugins` from the resolved tsconfig before constructing the service.** TypeScript language-service plugins are loaded and executed by the host process, and the tsconfig here comes from an agent-written merged tree — an `extends` chain reaching into `node_modules` can introduce one. Loading it would execute repository code in the daemon, breaking hard rule 2 in the one place the sandbox does not cover. If plugins are ever genuinely needed, the service moves to a subprocess, not to the daemon.
 
 - [ ] **Baseline differ**
       **Files:** `packages/core/src/analyzers/`

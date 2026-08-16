@@ -4,12 +4,13 @@ One record per hard-to-reverse decision: repository strategy, license, storage, 
 
 ## Index
 
-| ADR                              | Title                                      | Status   |
-| -------------------------------- | ------------------------------------------ | -------- |
-| [0001](0001-monorepo.md)         | Single monorepo with pnpm workspaces       | accepted |
-| [0002](0002-license.md)          | AGPL-3.0 with a commercial exception       | accepted |
-| [0003](0003-sqlite-store.md)     | SQLite as the local store                  | accepted |
-| [0004](0004-security-posture.md) | Shadow-only writes and sandboxed execution | accepted |
+| ADR                                    | Title                                      | Status   |
+| -------------------------------------- | ------------------------------------------ | -------- |
+| [0001](0001-monorepo.md)               | Single monorepo with pnpm workspaces       | accepted |
+| [0002](0002-license.md)                | AGPL-3.0 with a commercial exception       | accepted |
+| [0003](0003-sqlite-store.md)           | SQLite as the local store                  | accepted |
+| [0004](0004-security-posture.md)       | Shadow-only writes and sandboxed execution | accepted |
+| [0005](0005-per-pair-worktree-pool.md) | Per-pair worktree pool                     | accepted |
 
 ## How to add one
 

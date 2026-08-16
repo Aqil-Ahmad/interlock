@@ -90,13 +90,27 @@ clean — so it walks straight through. Every clean merge is still a typecheck
 candidate. What decides the real cost is the scheduler's overlap test, not the
 merge.
 
-When an analyzer must execute the merged code, materialise the tree into **one
-reusable scratch worktree per repository**, never one per pair:
+When an analyzer must execute the merged code, use the **per-pair worktree pool**
+(ADR-0005) — a small LRU set of persistent worktrees, one per hot pair. Update a
+slot by delta, never by rebuilding it:
 
-- restore the merged tree into the scratch directory — the blobs are already in
-  the object store, so this is a local file write and nothing is fetched;
-- symlink `node_modules` from the user's checkout instead of installing;
-- reset the directory between uses, including on the error path.
+```
+tree=$(git merge-tree --write-tree "$a" "$b")   # 12.8 ms on a 794k-line repo
+commit=$(git commit-tree "$tree" -m speculative)
+git -C "$slot" reset --hard "$commit"           # rewrites only what differs
+```
+
+Extracting the whole tree instead costs 1.62 s on that repo — two orders of
+magnitude more than the merge, and unaffordable per check.
+
+- Pool worktrees keep a **detached HEAD**, so no branch ref moves and the
+  throwaway commits stay unreferenced for `gc`.
+- `reset --hard` is a mutating command, allowed here only because pool
+  worktrees belong to the shadow clone. The runtime check still applies.
+- Symlink `node_modules` from the user's checkout instead of installing.
+- `.tsbuildinfo` stays in the slot between checks. That persistence is the
+  entire reason continuous checking is affordable, so never clear a slot as a
+  "cleanup" step.
 
 The symlink is only valid while dependencies match. If either branch changed
 `package.json` or the lockfile, that pair needs a slower path with a real
