@@ -46,8 +46,3 @@ walkthroughs reproducible by someone else from the doc alone.
       **Files:** `plan_docs/log.md`
       **What:** on a real mid-size TypeScript repo, time `git merge-tree --write-tree`, materialising the merged tree into a scratch directory, and an incremental `tsc` over it. Measure a pair that merges **cleanly** — that is the case that costs money, since a conflicted merge stops at the textual finding.
       **Done when:** the median of ten runs for each step is in `log.md`. The typecheck number is the one that matters: it sets how aggressive the M2 scheduler has to be, and whether continuous checking is affordable at all.
-
-- [ ] **Obtain the AgenticFlict dataset**
-      **Files:** `eval/README.md`
-      **What:** confirm it exists, get it, document its schema and licence.
-      **Done when:** the schema is written down, or the doc states plainly that the dataset could not be obtained and names what is being used instead.

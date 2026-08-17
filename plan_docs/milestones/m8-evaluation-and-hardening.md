@@ -28,10 +28,6 @@
       **What:** replay concurrent branch histories from 3–5 real TypeScript repos, labelled by whether the real merge or CI actually broke.
       **Done when:** the false-positive rate on genuinely independent work is reported. Target is under one per day of normal work — this number decides whether anyone keeps the tool installed.
 
-- [ ] **AgenticFlict**
-      **Files:** `eval/agenticflict/`
-      **What:** adapt the dataset's conflict regions into replayable pairs.
-
 - [ ] **Baselines**
       **What:** compare against git merge at integration time, `git merge --no-commit` at PR time, and the GitHub conflict indicator.
       **Done when:** lead time is reported against a real baseline, not against nothing.

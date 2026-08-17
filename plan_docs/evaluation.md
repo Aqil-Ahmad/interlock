@@ -10,11 +10,10 @@ How detection quality, latency and overhead are measured. Metric definitions are
 
 ## Datasets
 
-| Dataset                                 | What it is                                                      | Labels                             | Used for                                                        |
-| --------------------------------------- | --------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------- |
-| **Golden fixtures** (`eval/fixtures/`)  | small synthetic repos with planted conflicts                    | exact, by construction             | precision/recall per analyzer and per matcher; regression suite |
-| **OSS replay** (`eval/replay/`)         | concurrent branch histories replayed from real TypeScript repos | whether the real merge or CI broke | realism; false-positive rate on genuinely independent work      |
-| **AgenticFlict** (`eval/agenticflict/`) | published dataset of conflicts in AI-agent PRs                  | dataset-provided                   | external validity                                               |
+| Dataset                                | What it is                                                      | Labels                             | Used for                                                        |
+| -------------------------------------- | --------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------- |
+| **Golden fixtures** (`eval/fixtures/`) | small synthetic repos with planted conflicts                    | exact, by construction             | precision/recall per analyzer and per matcher; regression suite |
+| **OSS replay** (`eval/replay/`)        | concurrent branch histories replayed from real TypeScript repos | whether the real merge or CI broke | realism; false-positive rate on genuinely independent work      |
 
 Fixtures cover at minimum: textual overlap; adjacent additions; rename vs call site; signature change vs caller; moved export vs import; same-symbol dual edit; duplicate implementation; and near-miss negatives — pairs that look conflicting but are independent. Precision is only interesting against hard negatives.
 
@@ -65,7 +64,7 @@ Each experiment documents: dataset and version, exact command, environment (OS, 
 
 ## Threats to validity
 
-- Fixtures are authored by the same people who wrote the detectors; OSS replay and AgenticFlict are the external checks.
+- Fixtures are authored by the same people who wrote the detectors; OSS replay is the only external check.
 - Replay reconstructs a timeline that never happened concurrently; the lead-time claim inherits that assumption.
 - Daily-use data is a sample of one team on one codebase.
 - Agent behaviour is non-deterministic; report transcripts and the number of runs, not just outcomes.

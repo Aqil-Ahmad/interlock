@@ -1,11 +1,11 @@
 # ADR-0005: Per-pair worktree pool
 
 - **Status:** accepted
-- **Date:** 2026-08-05
+- **Date:** 2026-08-16
 
 ## Context
 
-Measurements on 2026-08-05, against archestra (793,784 lines of backend
+Measurements on 2026-08-16, against archestra (793,784 lines of backend
 TypeScript, 644 MB of history) and interlock itself:
 
 | Step                                          | Median  | Notes                               |

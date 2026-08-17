@@ -19,7 +19,6 @@ coverage/
 *.db-shm
 
 # Evaluation artifacts: code is committed, data and generated reports are not
-eval/agenticflict/data/
 eval/reports/*
 !eval/reports/.gitkeep
 eval/fixtures/.generated/

@@ -4,7 +4,9 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
-## 2026-08-05 (later)
+## 2026-08-16 — 08-18
+
+- **Decided:** AgenticFlict is dropped. Nothing in the product depends on it, and it carries textual conflict labels only — so it could evaluate the one layer git already handles, not the semantic detection that is the differentiator. Golden fixtures plus OSS replay remain the evaluation, which the plan's own risk register already called self-sufficient. Removed from M0, M8, `evaluation.md`, `eval/README.md` and `.gitignore`.
 
 - **Found:** agent-warning test, runs 1–2 of 5. Claude Code (Opus 5) on the archestra codebase, mid-task, given a true warning that a function it calls had been renamed by another session. Both runs **adapted**: verified the claim before acting, fixed import and call site, left the peer's file untouched, then resumed the original task. Run 2 narrated it — "let me verify that rename before changing the call site", then "confirmed, the rename landed in the working tree".
 - **Implication:** the core bet has two positive data points. Agents verify before acting, so a false positive costs a file read rather than broken code; and they treat a peer's change as authoritative rather than reverting it, so Interlock only has to inform, not arbitrate.
@@ -23,9 +25,9 @@ Short entries: done, decided, blocked. Newest first.
   - Warm, one file changed: **786 ms** — 350 ms of work. This is Interlock's real case.
 - **Implication:** 40% of the small-repo number is fixed startup, which is why extrapolating by line count would have been badly wrong. Cold cost scales with dependency `.d.ts` volume and source size; incremental cost scales with the size of the change and its dependents, not the repository.
 - **Estimate, not measured:** a cold `tsc` on a repo the size of archestra is likely 30 s – 3 min, which rules out cold-checking every pair continuously. A one-file incremental there is plausibly 2–10 s, which does not.
-- **Design consequence:** continuous semantic checking is viable only if incremental state survives between checks. The scratch worktree must persist `.tsbuildinfo`, and the scheduler should prefer re-checking the same pair over rotating pairs, because every rotation throws away incremental state and pays the cold cost again. This contradicts the single shared scratch worktree recorded earlier today — M2 likely needs sticky per-pair scratch state or a small pool. Resolve before building the scheduler.
+- **Design consequence:** continuous semantic checking is viable only if incremental state survives between checks. The scratch worktree must persist `.tsbuildinfo`, and the scheduler should prefer re-checking the same pair over rotating pairs, because every rotation throws away incremental state and pays the cold cost again. This contradicts the single shared scratch worktree recorded on 08-12 — M2 likely needs sticky per-pair scratch state or a small pool. Resolve before building the scheduler.
 
-- **Decided (ADR-0005):** per-pair worktree pool replaces the single shared scratch worktree decided earlier the same day. Small LRU pool, default 4, entered only after the overlap filter. Each check updates a slot by delta — `merge-tree --write-tree` → `commit-tree` → `reset --hard` — instead of extracting the tree, which turns the measured 1.62 s into the size of the change. `.tsbuildinfo` persists per slot; eviction is expensive and the scheduler must prefer hot pairs over rotating new ones.
+- **Decided (ADR-0005):** per-pair worktree pool replaces the single shared scratch worktree decided on 08-12. Small LRU pool, default 4, entered only after the overlap filter. Each check updates a slot by delta — `merge-tree --write-tree` → `commit-tree` → `reset --hard` — instead of extracting the tree, which turns the measured 1.62 s into the size of the change. `.tsbuildinfo` persists per slot; eviction is expensive and the scheduler must prefer hot pairs over rotating new ones.
 - **Decided:** M3 hosts the TypeScript LanguageService in-process, one per hot pair, rooted at its pool slot — justified by the 436 ms spawn floor against 350 ms of real incremental work. **Caveat found while writing it up:** tsconfig `plugins` are loaded and executed by the language-service host, and the tsconfig comes from an agent-written merged tree, so plugins must be stripped from the resolved config or the daemon executes repository code and breaks hard rule 2 in the one place the sandbox does not cover.
 
 - **Verified:** ADR-0005's load-bearing assumption holds. TypeScript keys `.tsbuildinfo` on content, not mtime — rewriting every source file with identical bytes costs 439 ms against 437 ms untouched and 1036 ms cold. A `reset --hard` therefore invalidates only genuinely changed files, which is what makes the pool's delta update worth doing.
@@ -43,7 +45,7 @@ Short entries: done, decided, blocked. Newest first.
 - **Implication:** 12.28 s per check sits comfortably inside the stated 3-minute budget for a typecheck finding, but four hot pooled pairs is roughly 50 s of CPU per round, so pool size and check frequency are now tunable against a real number rather than a guess. Cold is 88.8 s here and would be far worse on a repo the size of archestra, which is the whole argument for the pool.
 - **Design consequence:** the pool slot must persist the **build orchestrator's cache** as well as `.tsbuildinfo` — turbo's `.turbo` directory was 54 MB here, and losing it is the difference between 1.85 s and 88.8 s. Add it to ADR-0005's list of state that eviction destroys, and count it in the disk quota.
 
-## 2026-08-05
+## 2026-08-12
 
 - **Decided:** merges use `git merge-tree --write-tree` in the shadow object database, not a worktree per pair. Merged trees materialise into one reusable scratch worktree with `node_modules` symlinked from the user's checkout; a `package.json` or lockfile change routes that pair to a slow install path.
 - **Decided:** `merge-tree` solves merge cost; the scheduler solves typecheck cost, and typecheck cost is the budget that matters. A semantic conflict is a merge that came out clean, so the merge step never filters those out — overlap does.
@@ -51,7 +53,7 @@ Short entries: done, decided, blocked. Newest first.
 - **Decided:** M4 becomes overlap pre-filter plus targeted tests. tree-sitter has no symbol table and cannot resolve names across files, so it pre-filters and never detects. Targeted tests stay — the compiler cannot see behavioural conflicts.
 - **Decided:** false-positive rate is a tracked metric from M2. When unsure, say nothing.
 
-## 2026-08-04 (later)
+## 2026-08-05
 
 - **Done:** deleted the M3+ stub modules and the barrel/`exports` entries pointing at them; dashboard out of the workspace, solution tsconfig and Vitest projects until it declares react/vite; coverage threshold off; Dependabot docker entry removed; CONTRIBUTING and the issue/PR templates dropped.
 - **Done:** git repo initialised on `main`. Licensing in place: `LICENSE_AGPL`, `LICENSE.md` router, `CLA.md` and its workflow.

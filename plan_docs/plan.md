@@ -16,7 +16,7 @@ Developers increasingly run multiple AI coding agents (Claude Code, Codex CLI, C
 2. Detect semantic conflicts: merged result fails typecheck/build/targeted tests, or AST analysis finds cross-branch breakage (e.g., rename on branch A + new call to old name on branch B).
 3. Close the loop: expose findings to agents via an MCP server and to humans via CLI + dashboard, early enough to change behavior mid-task.
 4. Recommend an integration (merge/landing) order across N branches that minimizes conflicts.
-5. Produce a rigorous evaluation (precision/recall, lead time, overhead) suitable for an FYP thesis, using fixture repos, replayed OSS branch histories, and AgenticFlict.
+5. Produce a rigorous evaluation (precision/recall, lead time, overhead) using fixture repos and replayed OSS branch histories.
 
 ## 3. Non-Goals for v1 (scope guardrails — do not drift)
 
@@ -49,7 +49,7 @@ Component responsibilities:
 - **Watcher:** discovers repos, branches, worktrees, and agent sessions; detects changes (filesystem events + git refs + uncommitted diffs). Read-only with respect to user state.
 - **Event Bus:** internal typed pub/sub; every component communicates via events (enables replay/debugging and clean tests).
 - **Scheduler:** decides which (branch × branch) pairs need re-analysis, with debouncing, prioritization, and incremental invalidation. This is where performance lives.
-- **Merge Engine:** performs speculative pairwise merges with `git merge-tree --write-tree` inside a shadow clone's object database — no checkout per pair (including uncommitted changes via temporary commits in shadow only); classifies textual conflicts. Merged trees are materialised into a single reusable scratch worktree only when a semantic check is warranted.
+- **Merge Engine:** performs speculative pairwise merges with `git merge-tree --write-tree` inside a shadow clone's object database — no checkout per pair (including uncommitted changes via temporary commits in shadow only); classifies textual conflicts. Merged trees are materialised into a per-pair worktree pool slot, by delta rather than extraction, only when a semantic check is warranted — see ADR-0005.
 - **Analyzers (pluggable pipeline):**
   - `textual` — git merge conflict classification.
   - `typecheck` / `build` — run in Docker sandbox against merged shadow tree.
@@ -90,7 +90,6 @@ interlock/
 ├── eval/                      # evaluation harness — kept OUT of packages/ and out of agent edit scope
 │   ├── fixtures/              # small synthetic repos with known planted conflicts (golden set)
 │   ├── replay/                # scripts to replay concurrent branch histories from OSS repos
-│   ├── agenticflict/          # dataset adapters (dataset itself git-ignored / DVC)
 │   └── reports/
 ├── docs/
 │   ├── architecture.md        # kept in sync with reality; diagrams as mermaid
@@ -129,7 +128,6 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 - `packages/shared` with first-pass models and event definitions.
 - ADR-0001 (monorepo), ADR-0002 (license), ADR-0003 (SQLite), ADR-0004 (security posture: shadow-only writes, sandboxed execution).
 - Research spike (throwaway code allowed, keep notes in docs/): manually reproduce (a) a textual conflict and (b) one semantic conflict (rename + stale call site) between two worktrees; write the walkthrough in docs/demo/00-manual-conflict.md.
-- Obtain AgenticFlict dataset; document its schema in eval/agenticflict/README.md.
   **Exit criteria:** `pnpm build && pnpm test` green in CI; the two manual conflict walkthroughs are reproducible by any teammate from the doc.
   **Risks:** over-engineering scaffold; cap M0 at 3 weeks hard.
 
@@ -205,7 +203,7 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 
 **Goal:** Numbers that survive a defense.
 
-- Execute evaluation.md protocols (below): golden fixture set, replayed OSS histories, AgenticFlict-derived cases; overhead benchmarks; ablations (textual-only vs +typecheck vs +AST vs full).
+- Execute evaluation.md protocols (below): golden fixture set, replayed OSS histories; overhead benchmarks; ablations (textual-only vs +typecheck vs +AST vs full).
 - Bug-fix freeze weeks; docs completeness pass; demo video; thesis writing (architecture, methodology, results, threats to validity, future work).
   **Exit criteria:** all headline metrics reported with methodology; reproducible eval (`pnpm eval` regenerates reports); thesis draft complete.
 
@@ -213,7 +211,7 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 
 ## 8. Evaluation Plan (summary — full protocols live in docs/evaluation.md)
 
-**Datasets:** (1) synthetic fixture repos with planted conflicts (golden labels), (2) replayed concurrent branch histories from 3–5 real OSS TypeScript repos (label by whether real merge/CI broke), (3) AgenticFlict conflict regions adapted into replayable pairs.
+**Datasets:** (1) synthetic fixture repos with planted conflicts (golden labels), (2) replayed concurrent branch histories from 3–5 real OSS TypeScript repos (label by whether real merge/CI broke).
 **Primary metrics:** detection precision & recall per analyzer and combined; **lead time** (minutes between conflict introduction and Finding vs merge-time discovery baseline); false-positive rate per day of normal non-conflicting work (target: <1/day); daemon overhead (CPU %, RAM, disk) and time-to-verdict per pair.
 **Baselines:** git merge at integration time (status quo); `git merge --no-commit` dry-run at PR time; optionally GitHub conflict indicator.
 **Discipline:** metrics definitions frozen before M8; eval code and datasets are read-only to coding agents; every reported number regenerable by one command.
@@ -263,7 +261,6 @@ Each milestone lists: Goal, Key Deliverables, Exit Criteria (demoable), and Risk
 | Toolchain diversity (builds fail for env reasons) | H          | M      | narrow v1 to TS/JS + documented toolchains; per-repo config; classify "infra-fail" separately from Findings |
 | Anthropic/Cursor ship basic same-file warnings    | M          | M      | our moat is semantic layer + cross-tool + order advisor; keep those front and center                        |
 | Team bandwidth / course load                      | H          | M      | milestones sized for ~15 h/wk/person; M7 explicitly droppable                                               |
-| Dataset issues (AgenticFlict access/format)       | L          | M      | fixtures + OSS replay are self-sufficient; dataset is additive                                              |
 
 ## 14. STATUS (update weekly)
 
