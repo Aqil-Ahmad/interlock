@@ -28,7 +28,20 @@ Short entries: done, decided, blocked. Newest first.
 - **Decided (ADR-0005):** per-pair worktree pool replaces the single shared scratch worktree decided earlier the same day. Small LRU pool, default 4, entered only after the overlap filter. Each check updates a slot by delta — `merge-tree --write-tree` → `commit-tree` → `reset --hard` — instead of extracting the tree, which turns the measured 1.62 s into the size of the change. `.tsbuildinfo` persists per slot; eviction is expensive and the scheduler must prefer hot pairs over rotating new ones.
 - **Decided:** M3 hosts the TypeScript LanguageService in-process, one per hot pair, rooted at its pool slot — justified by the 436 ms spawn floor against 350 ms of real incremental work. **Caveat found while writing it up:** tsconfig `plugins` are loaded and executed by the language-service host, and the tsconfig comes from an agent-written merged tree, so plugins must be stripped from the resolved config or the daemon executes repository code and breaks hard rule 2 in the one place the sandbox does not cover.
 
-- **Open:** the number that decides continuous-versus-on-demand is still missing. Getting it needs a full `pnpm install` in archestra, or another mid-size TypeScript repo with dependencies already present.
+- **Verified:** ADR-0005's load-bearing assumption holds. TypeScript keys `.tsbuildinfo` on content, not mtime — rewriting every source file with identical bytes costs 439 ms against 437 ms untouched and 1036 ms cold. A `reset --hard` therefore invalidates only genuinely changed files, which is what makes the pool's delta update worth doing.
+
+- **Verified:** symlinked `node_modules` satisfies `tsc` from a tree at a different path — root and per-package links, clean build, correct emit. ADR-0005's other load-bearing assumption holds. Gotcha found doing it: `pnpm exec tsc` fails in the scratch tree because pnpm verifies dependencies first and tries to `pnpm install` there. The pool must invoke `node_modules/.bin/tsc` directly and never shell through a package manager.
+
+- **Measured (the missing number):** typecheck cost on openselfservice — 85,224 lines of TypeScript across a 39-package turbo monorepo, npm workspaces. Medians.
+  - `git merge-tree --write-tree`: **12.1 ms**, against archestra's 12.8 ms on a repo 9× larger. Merge cost is effectively constant — it tracks the diff, not the repository.
+  - Materialise merged tree: **590 ms** (58 MB, 2,131 files), against archestra's 1.62 s (276 MB). Scales with tree size, sub-linearly.
+  - Full cold build: **88.8 s** (38 of 39 packages; the Next.js app failed on skipped native install scripts).
+  - Warm build, nothing changed: **1.85 s** — all cache hits.
+  - **Warm build, one file changed in a mid-graph package: 12.28 s.** This is the realistic per-check cost.
+  - Raw `tsc` once internal dependencies are built: 0.94 s for a 4.3k-line workspace, 2.31 s for an 11.3k-line one.
+- **Found — this changes M3:** in a monorepo you cannot typecheck a merged tree by running `tsc`. Raw `tsc` fails with `TS2307: Cannot find module '@o2s/utils.logger'` because internal workspace packages resolve through their `dist/`, which does not exist until they are built. The semantic check is therefore "build the internal dependency graph, then typecheck" — 12.28 s incrementally, not the 0.94 s the compiler alone suggests. M3's toolchain detection has to discover and run the build orchestrator, not just find the typechecker.
+- **Implication:** 12.28 s per check sits comfortably inside the stated 3-minute budget for a typecheck finding, but four hot pooled pairs is roughly 50 s of CPU per round, so pool size and check frequency are now tunable against a real number rather than a guess. Cold is 88.8 s here and would be far worse on a repo the size of archestra, which is the whole argument for the pool.
+- **Design consequence:** the pool slot must persist the **build orchestrator's cache** as well as `.tsbuildinfo` — turbo's `.turbo` directory was 54 MB here, and losing it is the difference between 1.85 s and 88.8 s. Add it to ADR-0005's list of state that eviction destroys, and count it in the disk quota.
 
 ## 2026-08-05
 

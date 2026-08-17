@@ -46,13 +46,24 @@ Each check updates a slot by delta rather than rebuilding it:
 Pool worktrees keep a **detached HEAD**, so no branch ref moves and the
 throwaway commits stay unreferenced for `git gc` to reclaim.
 
-`node_modules` is symlinked from the user's checkout. If either branch or the
+`node_modules` is symlinked from the user's checkout — verified working: `tsc`
+resolves correctly through the symlink from a tree at a different path, with the
+root and every package's `node_modules` linked. The compiler binary must be
+invoked **directly**, never through `pnpm exec`, which runs a dependency check
+and tries to `pnpm install` inside the scratch directory. If either branch or the
 merge touches `package.json` or the lockfile, the pair is marked `deps-dirty`
 and routed to a slow path with a real install, or skipped with a stated reason —
 typechecking against the wrong dependency tree produces confident nonsense.
 
-`.tsbuildinfo` persists per slot. Eviction discards it and forces a cold entry
+`.tsbuildinfo` **and the build orchestrator's cache** persist per slot — measured
+on openselfservice, turbo's `.turbo` directory was 54 MB and the difference
+between keeping it and losing it is 1.85 s against 88.8 s. Eviction discards it and forces a cold entry
 later, so eviction is expensive and the scheduler must treat it as such.
+
+This works because TypeScript keys incremental state on file content, not mtime.
+Measured on interlock: rewriting every source file with identical bytes costs
+439 ms against 437 ms untouched and 1036 ms cold — so a `reset --hard` that
+changes few files invalidates only those files.
 
 ## Consequences
 
