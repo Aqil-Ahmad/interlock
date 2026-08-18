@@ -14,7 +14,7 @@ every task here and is not repeated per task.
 
 ## Tasks
 
-- [ ] **Git runner**
+- [x] **Git runner**
       **Files:** `packages/core/src/git/repo-handle.ts`, `repo-handle.test.ts`
       **What:** the `GitRunner` implementation behind the existing interface.
 

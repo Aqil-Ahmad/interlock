@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Monorepo scaffold: pnpm workspaces, strict TypeScript with project references, ESLint (flat config, type-aware, with layering rules), Prettier, Vitest, GitHub Actions CI.
 - `@interlock/shared`: data models (Repo, BranchRef, AgentSession, ChangeSet, MergePair, SpeculativeRun, Finding, Advice, EventRecord), event vocabulary, config schema with validation, typed errors, structured logging with secret redaction, ULID generation.
-- `@interlock/core`: `UserRepo`/`ShadowRepo` handles and mutating-command detection, the `Analyzer` contract, finding ranking; contracts for git discovery, dirty-state capture and speculative merge.
+- `@interlock/core`: `UserRepo`/`ShadowRepo` handles, the git runner enforcing them, the `Analyzer` contract, finding ranking; contracts for git discovery, dirty-state capture and speculative merge.
 - `@interlock/daemon`: event bus with causality tracking; contracts for watcher, scheduler, SQLite store, session hooks and the localhost API.
 - `@interlock/mcp-server`: agent tool schemas and `wrapUntrusted()` prompt-injection containment.
 - `@interlock/cli`: command surface.
