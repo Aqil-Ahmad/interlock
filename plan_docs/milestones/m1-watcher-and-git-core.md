@@ -59,11 +59,28 @@ every task here and is not repeated per task.
       **What:** `captureDirtyState` — turn uncommitted work into a tree object
       without touching the user's index.
 
-  Point `GIT_INDEX_FILE` at a temp file outside the repo, `add -A` into that
-  index, then `write-tree`. Objects land in the user's object database, which is
-  additive and safe; the index never is. Untracked files are included, ignored
-  files are not. A clean worktree returns the HEAD tree and does no work. The
-  temp index is removed on the error path as well as the success path.
+  Point `GIT_INDEX_FILE` at a temp file outside the repo, populate it, then
+  `write-tree`. Objects land in the user's object database, which is additive and
+  safe; the index never is. Untracked files are included, ignored files are not.
+  A clean worktree returns the HEAD tree and does no work. The temp index is
+  removed on the error path as well as the success path.
+
+  Two paths, because `add -A` over a whole worktree is not free and sits on the
+  hot path of every debounced event:
+
+  - **Scoped (common):** `read-tree HEAD` to seed the temp index, then
+    `add -A -- <paths the watcher reported>`, then `write-tree`. This turns a
+    whole-tree scan into a change-sized one. **The seeding step is not optional** —
+    a scoped `add` into an empty index produces a tree containing only those
+    paths, which is a silently corrupt snapshot rather than a slow one.
+  - **Whole-tree (fallback):** plain `add -A` on the first snapshot for a
+    worktree, and whenever the watcher has degraded to polling and cannot say
+    which paths changed.
+
+  Objects written this way are unreferenced until something points at them, so a
+  user running `git gc --prune=now` can collect a tree Interlock is still holding.
+  Treat a missing-object error on a stored tree OID as "re-snapshot", not as a
+  crash.
 
   **Done when:** an integration test creates a worktree with staged, unstaged
   and untracked changes plus a `.gitignore`d file, snapshots it, and asserts the
@@ -118,10 +135,28 @@ every task here and is not repeated per task.
   OS watch limit, which must degrade to polling with a warning rather than
   crashing.
 
+  Publish two events at different levels. `worktree.changed` is the raw
+  filesystem signal, kept for replay and debugging. `branch.snapshot`, carrying
+  `{ branchRef, treeOid, changeSet }`, is what downstream actually consumes — it
+  keys off content identity rather than filesystem noise.
+
+  Cache the last tree OID per worktree and drop the event when a debounce
+  produces the same OID. Editors and agents both write files that end up
+  byte-identical, and the saving is not the snapshot itself but everything after
+  it: ChangeSet extraction, scheduling, and every pair that would be marked stale.
+
   **Done when:** an edit produces exactly one debounced event; a `git commit`
-  produces a ref event; and idle CPU with three worktrees on a repo of at least
-  10,000 files is measured and recorded in `log.md`. If it is above 2%, the task
-  is not done.
+  produces a ref event; a rewrite that leaves content unchanged publishes no
+  `branch.snapshot`; and two numbers are in `log.md` —
+
+  - **idle** CPU with three worktrees on a repo of at least 10,000 files, which
+    must stay under 2%;
+  - **active** CPU and per-event latency while a script rewrites files in three
+    worktrees continuously for 60 seconds, reported as p50 and p95 from write to
+    `branch.snapshot` published.
+
+  The active number is the one M2's scheduler budget is built on. Idle only
+  proves the watcher is not spinning.
 
 - [ ] **Daemon skeleton and localhost API**
       **Files:** `packages/daemon/src/daemon.ts`, `packages/daemon/src/api/`
@@ -163,18 +198,45 @@ every task here and is not repeated per task.
   inferred rather than reported, because attribution quality changes what the
   advisor is allowed to claim.
 
+  Reaping needs a stated mechanism, because agent processes exit in ways that
+  never fire a hook: check PID liveness on read, and expire any session whose
+  last heartbeat is older than a configured timeout. Neither alone is enough — a
+  PID can be reused, and a wedged process still holds its PID.
+
   **Done when:** a session registers and `interlock status` shows which agent
   owns which branch; a malformed payload is rejected without crashing the
-  daemon; and a session whose process has died is reaped.
+  daemon; a session whose process was killed is gone within the timeout; and a
+  reused PID does not resurrect a dead session.
+
+- [ ] **Enforce the single git call site**
+      **Files:** `packages/core/test/`
+      **What:** a test that fails if any file outside `packages/core/src/git/repo-handle.ts` imports `node:child_process` or `child_process`.
+
+  A prose rule decays the moment code is being generated across ten files at
+  once. Prefer a test over an ESLint rule here: `eslint.config.js` already uses
+  `no-restricted-imports` for the layering blocks, and flat config resolves that
+  rule last-wins per file, so a new broad block would silently disable the
+  layering checks it overlaps.
+
+  **Done when:** the test passes today, and fails if a `child_process` import is
+  added anywhere else in `packages/`.
 
 - [ ] **User-repo-untouched test**
       **Files:** `packages/core/test/user-repo-untouched.test.ts`
       **What:** fill in the five todo tests already stubbed there.
 
   Hash the full worktree, the index, all refs, the stash and the config before
-  and after a complete watch-snapshot-discover cycle, and diff them. Run it
-  against a repo in every awkward state the other tasks named: dirty, detached
-  HEAD, mid-rebase, with a stash, with submodules.
+  and after a complete watch-snapshot-discover cycle, and diff them. "All refs"
+  means loose refs, `packed-refs`, **reflogs**, `ORIG_HEAD`, `FETCH_HEAD` and
+  `MERGE_HEAD` — a stray reflog entry is still a write to the user's repository.
+  Run it against a repo in every awkward state the other tasks named: dirty,
+  detached HEAD, mid-rebase, with a stash, with submodules.
+
+  If the `.git/index` mtime assertion proves flaky, the honest fix is to assert
+  index _contents_ rather than mtime — some git versions rewrite the index to
+  refresh its stat cache even on reads. Do not weaken the assertion to make it
+  pass. `GIT_OPTIONAL_LOCKS=0` from the git runner task should prevent most of
+  this; if it does not, that is worth knowing.
 
   **Done when:** it fails loudly if any byte of user state changes, and it runs
   in CI on every pull request.
