@@ -60,10 +60,10 @@ is the classic way to corrupt a file list.
 To snapshot uncommitted work, point git at a different index:
 
 ```ts
-// GIT_INDEX_FILE outside the repo; objects are additive and safe, the index is not
-const tmpIndex = join(tmpdir(), `interlock-${ulid()}.index`);
-await runner.run(repo, ['add', '-A'], { env: { GIT_INDEX_FILE: tmpIndex } });
-const tree = await runner.run(repo, ['write-tree'], { env: { GIT_INDEX_FILE: tmpIndex } });
+// An index outside the repo; objects are additive and safe, the index is not
+const tmpIndex = join(mkdtempSync(join(tmpdir(), 'interlock-')), 'index');
+await runner.run(repo, ['add', '-A'], { indexFile: tmpIndex });
+const tree = await runner.run(repo, ['write-tree'], { indexFile: tmpIndex });
 ```
 
 Writing objects into the user's object database is fine — it is append-only and
@@ -72,6 +72,11 @@ stashing or changing config is not, ever.
 
 Always remove the temp index on the error path too. Prefer `try/finally` over
 cleanup at the end of the happy path.
+
+`indexFile` is the runner's only environment capability, deliberately. The
+runner strips inherited `GIT_*` variables so a user's shell cannot redirect a
+command, and an open environment map would hand that redirection straight back
+to any caller.
 
 ## Merging without a worktree
 

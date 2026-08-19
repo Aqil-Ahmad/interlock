@@ -2,9 +2,9 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isInterlockError } from '@interlock/shared';
-import type { InterlockError } from '@interlock/shared';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createLogger, isInterlockError } from '@interlock/shared';
+import type { InterlockError, LogRecord } from '@interlock/shared';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createGitRunner } from '../src/git/repo-handle.js';
 import type { ShadowRepo, UserRepo } from '../src/git/repo-handle.js';
 
@@ -99,53 +99,66 @@ describe('git runner against a real repository', () => {
 
   it('ignores GIT_ variables inherited from the environment', async () => {
     const decoy = mkdtempSync(join(tmpdir(), 'interlock-decoy-'));
-    const previous = process.env.GIT_DIR;
-    process.env.GIT_DIR = decoy;
+    // stubEnv restores on teardown, so a failure here cannot leak into another test.
+    vi.stubEnv('GIT_DIR', decoy);
     try {
       const result = await runner.run(repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
       expect(result.exitCode).toBe(0);
       expect(result.stdout.trim()).toBe('main');
     } finally {
-      if (previous === undefined) delete process.env.GIT_DIR;
-      else process.env.GIT_DIR = previous;
+      vi.unstubAllEnvs();
       rmSync(decoy, { recursive: true, force: true });
     }
   });
 
-  it('redacts secrets from output before returning it', async () => {
+  it('returns output verbatim so callers can parse it', async () => {
     const token = 'ghp_0123456789abcdefghij0123456789';
     writeFileSync(join(dir, 'leak.txt'), `${token}\n`);
     git('add', '-A');
     git('commit', '-qm', 'leak');
 
+    // Rewriting output here would corrupt object ids and paths that happen to
+    // match a secret pattern, and every downstream parser reads this string.
     const result = await runner.run(repo, ['show', 'HEAD:leak.txt']);
-    expect(result.stdout).not.toContain(token);
-    expect(result.stdout).toContain('[redacted]');
+    expect(result.stdout.trim()).toBe(token);
+  });
+
+  it('redacts secrets from what it logs', async () => {
+    const token = 'ghp_0123456789abcdefghij0123456789';
+    const records: LogRecord[] = [];
+    const logging = createGitRunner({
+      logger: createLogger('test', { level: 'trace', sink: (record) => records.push(record) }),
+    });
+
+    await logging.run(repo, ['rev-parse', '--verify', token]);
+
+    expect(records.length).toBeGreaterThan(0);
+    expect(JSON.stringify(records)).not.toContain(token);
   });
 
   it('stages into an overridden index without touching the repository index', async () => {
     const indexBefore = readFileSync(join(dir, '.git', 'index'));
-    const tempIndex = join(dir, '..', `interlock-index-${String(process.pid)}`);
+    const indexDir = mkdtempSync(join(tmpdir(), 'interlock-index-'));
+    const tempIndex = join(indexDir, 'index');
     writeFileSync(join(dir, 'b.txt'), 'staged elsewhere\n');
 
     try {
-      const added = await runner.run(shadow, ['add', '-A'], {
-        env: { GIT_INDEX_FILE: tempIndex },
-      });
+      const added = await runner.run(shadow, ['add', '-A'], { indexFile: tempIndex });
       expect(added.exitCode).toBe(0);
 
-      const tree = await runner.run(shadow, ['write-tree'], { env: { GIT_INDEX_FILE: tempIndex } });
+      const tree = await runner.run(shadow, ['write-tree'], { indexFile: tempIndex });
       expect(tree.exitCode).toBe(0);
       expect(tree.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
 
       expect(readFileSync(join(dir, '.git', 'index'))).toEqual(indexBefore);
     } finally {
-      rmSync(tempIndex, { force: true });
+      rmSync(indexDir, { recursive: true, force: true });
     }
   });
 
   it('kills a command that outlives its timeout', async () => {
-    const fakeGit = join(dir, '..', `interlock-slow-git-${String(process.pid)}`);
+    const scriptDir = mkdtempSync(join(tmpdir(), 'interlock-slow-'));
+    const fakeGit = join(scriptDir, 'git');
     writeFileSync(fakeGit, '#!/bin/sh\nsleep 30\n');
     chmodSync(fakeGit, 0o755);
 
@@ -158,7 +171,7 @@ describe('git runner against a real repository', () => {
       // Proves it was killed rather than waited out.
       expect(Date.now() - startedAt).toBeLessThan(5_000);
     } finally {
-      rmSync(fakeGit, { force: true });
+      rmSync(scriptDir, { recursive: true, force: true });
     }
   });
 
@@ -168,6 +181,15 @@ describe('git runner against a real repository', () => {
     expect(error.code).toBe('GIT_COMMAND_FAILED');
     expect(error.infra).toBe(true);
     expect(error.remedy).toContain('PATH');
+  });
+
+  it('treats an attached global flag as a literal, because git rejects that form', async () => {
+    // `git -C/path` and `git -cfoo=bar` are not valid: a global flag takes its
+    // value as a separate argument. The reserved-flag check therefore matches
+    // whole arguments and does not need to parse attached prefixes.
+    const result = await runner.run(repo, [`-C${dir}`, 'rev-parse', 'HEAD']);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain('unknown option');
   });
 
   it('runs a command that has no subcommand', async () => {

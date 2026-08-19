@@ -29,7 +29,14 @@ export interface ShadowRepo {
 
 export type AnyRepo = UserRepo | ShadowRepo;
 
-/** Result of running a git command. `stdout`/`stderr` are already redacted. */
+/**
+ * Result of running a git command.
+ *
+ * `stdout` and `stderr` are verbatim. Redaction happens where data leaves the
+ * process — logs and stored evidence — because callers parse this output, and
+ * rewriting a path or an object id that happens to match a secret pattern would
+ * corrupt it silently.
+ */
 export interface GitResult {
   readonly stdout: string;
   readonly stderr: string;
@@ -138,11 +145,14 @@ function usesReservedGlobalFlag(args: readonly string[]): boolean {
 /** Per-invocation overrides. */
 export interface GitRunOptions {
   /**
-   * Extra environment for this call only, applied after the sanitised base.
-   * The one supported use is redirecting `GIT_INDEX_FILE` so a snapshot can be
-   * staged without touching the repository's own index.
+   * Stage into this index file rather than the repository's own, so a snapshot
+   * can be built without touching uncommitted work.
+   *
+   * Deliberately a single named capability rather than an environment map: an
+   * open map would let a caller set `GIT_DIR` or `GIT_WORK_TREE` and undo the
+   * sanitisation this runner exists to guarantee.
    */
-  readonly env?: Readonly<Record<string, string>>;
+  readonly indexFile?: string;
   readonly timeoutMs?: number;
 }
 
@@ -174,7 +184,7 @@ const DEFAULT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
  * shell exporting `GIT_DIR` or `GIT_INDEX_FILE` would otherwise silently
  * redirect every command the daemon runs, including the ones that write.
  */
-function buildEnv(overrides: Readonly<Record<string, string>> | undefined): NodeJS.ProcessEnv {
+function buildEnv(indexFile: string | undefined): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!key.startsWith('GIT_')) env[key] = value;
@@ -192,7 +202,9 @@ function buildEnv(overrides: Readonly<Record<string, string>> | undefined): Node
   env.LC_ALL = 'C';
   env.GIT_PAGER = '';
 
-  return overrides === undefined ? env : { ...env, ...overrides };
+  if (indexFile !== undefined) env.GIT_INDEX_FILE = indexFile;
+
+  return env;
 }
 
 function gitFailed(
@@ -265,7 +277,7 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
           gitPath,
           argv,
           {
-            env: buildEnv(runOptions.env),
+            env: buildEnv(runOptions.indexFile),
             timeout: timeoutMs,
             maxBuffer,
             windowsHide: true,
@@ -273,14 +285,10 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
           },
           (error, stdout, stderr) => {
             const durationMs = Date.now() - startedAt;
-            // Redaction happens before anything leaves this function, including
-            // the log line: git output can carry repository content.
-            const out = redact(stdout);
-            const err = redact(stderr);
 
             if (error === null) {
               log.debug('git ok', { args: args.map(redact), exitCode: 0, durationMs });
-              resolve({ stdout: out, stderr: err, exitCode: 0 });
+              resolve({ stdout, stderr, exitCode: 0 });
               return;
             }
 
@@ -331,7 +339,7 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
                 exitCode: failure.code,
                 durationMs,
               });
-              resolve({ stdout: out, stderr: err, exitCode: failure.code });
+              resolve({ stdout, stderr, exitCode: failure.code });
               return;
             }
 

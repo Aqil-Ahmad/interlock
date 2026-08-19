@@ -59,8 +59,8 @@ every task here and is not repeated per task.
       **What:** `captureDirtyState` — turn uncommitted work into a tree object
       without touching the user's index.
 
-  Point `GIT_INDEX_FILE` at a temp file outside the repo, populate it, then
-  `write-tree`. Objects land in the user's object database, which is additive and
+  Pass `indexFile` to the git runner so staging targets a temp index outside the
+  repo, populate it, then `write-tree`. Objects land in the user's object database, which is additive and
   safe; the index never is. Untracked files are included, ignored files are not.
   A clean worktree returns the HEAD tree and does no work. The temp index is
   removed on the error path as well as the success path.
