@@ -1,11 +1,21 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { createLogger } from '@interlock/shared';
 import type { LogRecord } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createGitRunner } from '../src/git/repo-handle.js';
+import { createGitRunner, SAFE_FLAGS } from '../src/git/repo-handle.js';
 import type { UserRepo } from '../src/git/repo-handle.js';
 import { rejection } from './support/rejection.js';
 
@@ -173,6 +183,150 @@ describe('git runner against a real repository', () => {
     expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
   });
 
+  it('refuses an index redirection that resolves back into the repository', async () => {
+    // A symlink is enough: `resolve` normalises a path, it does not follow one.
+    const linkDir = mkdtempSync(join(tmpdir(), 'interlock-link-'));
+    const link = join(linkDir, 'outside');
+    symlinkSync(join(dir, '.git'), link);
+    const before = readFileSync(join(dir, '.git', 'index'));
+    writeFileSync(join(dir, 'c.txt'), 'staged through a symlink\n');
+
+    try {
+      const error = await rejection(
+        runner.run(repo, ['add', '-A'], { indexFile: join(link, 'index') }),
+      );
+      expect(error.message).toContain('resolves inside');
+      expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a redirection reached by a different alias of the repository path', async () => {
+    // `tmpdir()` on macOS returns a path whose real path differs, so a handle
+    // and an indexFile can name the same file and compare as different.
+    const real = realpathSync(dir);
+    const aliased: UserRepo = { kind: 'user', rootPath: real, gitDir: join(real, '.git') };
+    const before = readFileSync(join(real, '.git', 'index'));
+
+    const error = await rejection(
+      runner.run(aliased, ['add', '-A'], { indexFile: join(dir, '.git', 'index') }),
+    );
+    expect(error.message).toContain('resolves inside');
+    expect(readFileSync(join(real, '.git', 'index'))).toEqual(before);
+  });
+
+  it('refuses read-tree -u, which no index redirection protects', async () => {
+    const indexDir = mkdtempSync(join(tmpdir(), 'interlock-index-'));
+    writeFileSync(join(dir, 'a.txt'), 'uncommitted work\n');
+
+    try {
+      const error = await rejection(
+        runner.run(repo, ['read-tree', '-u', '--reset', 'HEAD'], {
+          indexFile: join(indexDir, 'index'),
+        }),
+      );
+      expect(error.message).toContain('mutating');
+      // `-u` writes the working tree, so the index guard never sees the damage.
+      expect(readFileSync(join(dir, 'a.txt'), 'utf8')).toBe('uncommitted work\n');
+    } finally {
+      rmSync(indexDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses read-tree --index-output, which overrides the redirection', async () => {
+    const indexDir = mkdtempSync(join(tmpdir(), 'interlock-index-'));
+    writeFileSync(join(dir, 'staged.txt'), 'staged\n');
+    git('add', 'staged.txt');
+    const before = readFileSync(join(dir, '.git', 'index'));
+
+    try {
+      const error = await rejection(
+        runner.run(repo, ['read-tree', `--index-output=${join(dir, '.git', 'index')}`, 'HEAD'], {
+          indexFile: join(indexDir, 'index'),
+        }),
+      );
+      expect(error.message).toContain('mutating');
+      expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
+    } finally {
+      rmSync(indexDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses symbolic-ref -d, which reads like its one-operand reading form', async () => {
+    git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+
+    const error = await rejection(
+      runner.run(repo, ['symbolic-ref', '-d', 'refs/remotes/origin/HEAD']),
+    );
+    expect(error.message).toContain('mutating');
+
+    const still = await runner.run(repo, ['symbolic-ref', 'refs/remotes/origin/HEAD']);
+    expect(still.stdout.trim()).toBe('refs/remotes/origin/main');
+  });
+
+  it('refuses an abbreviated --index-output, which git resolves and a guard may not', async () => {
+    // Git accepts any unambiguous prefix, so `--i=` is `--index-output=`.
+    writeFileSync(join(dir, 'staged.txt'), 'staged\n');
+    git('add', 'staged.txt');
+    const before = readFileSync(join(dir, '.git', 'index'));
+    const indexDir = mkdtempSync(join(tmpdir(), 'interlock-index-'));
+
+    try {
+      const error = await rejection(
+        runner.run(repo, ['read-tree', `--i=${join(dir, '.git', 'index')}`, 'HEAD'], {
+          indexFile: join(indexDir, 'index'),
+        }),
+      );
+      expect(error.message).toContain('mutating');
+      expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
+    } finally {
+      rmSync(indexDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses update-index --split-index, which writes into the git directory', async () => {
+    // The shared index lands in `$GIT_DIR` whatever `GIT_INDEX_FILE` says.
+    const indexDir = mkdtempSync(join(tmpdir(), 'interlock-index-'));
+
+    try {
+      const error = await rejection(
+        runner.run(repo, ['update-index', '--split-index'], {
+          indexFile: join(indexDir, 'index'),
+        }),
+      );
+      expect(error.message).toContain('mutating');
+      expect(readdirSync(join(dir, '.git')).some((entry) => entry.startsWith('sharedindex'))).toBe(
+        false,
+      );
+    } finally {
+      rmSync(indexDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an index redirected at the git directory a linked worktree shares', async () => {
+    // A linked worktree's handle names neither the main checkout nor its `.git`,
+    // and the index a redirection must not overwrite lives in both.
+    const worktree = join(dir, '..', `${basename(dir)}-wt`);
+    git('branch', 'side');
+    git('worktree', 'add', '-q', worktree, 'side');
+    const gitDir = execFileSync('git', ['-C', worktree, 'rev-parse', '--absolute-git-dir'], {
+      encoding: 'utf8',
+    }).trim();
+    const linked: UserRepo = { kind: 'user', rootPath: realpathSync(worktree), gitDir };
+    const before = readFileSync(join(dir, '.git', 'index'));
+
+    try {
+      const error = await rejection(
+        runner.run(linked, ['add', '-A'], { indexFile: join(dir, '.git', 'index') }),
+      );
+      expect(error.message).toContain('resolves inside');
+      expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
+    } finally {
+      rmSync(worktree, { recursive: true, force: true });
+    }
+  });
+
   it('refuses the plumbing writers that a verb denylist would miss', async () => {
     writeFileSync(join(dir, 'staged.txt'), 'staged\n');
     git('add', 'staged.txt');
@@ -234,5 +388,43 @@ describe('git runner against a real repository', () => {
     expect(error.infra).toBe(true);
     // Otherwise this still passes if the branch regresses into the generic handler.
     expect(error.message).toContain('more output than the runner buffers');
+  });
+});
+
+/**
+ * The flag allowlist is only sound while every name in it is a real flag of its
+ * verb.
+ *
+ * Long flags are matched by prefix, because git resolves any unambiguous
+ * abbreviation. That is safe as long as each listed name exists: git resolves a
+ * prefix only to a flag it prefixes, so a prefix of a listed flag either lands
+ * on that flag or is ambiguous and rejected. Invent a name and the reasoning
+ * inverts — `--update` is not a `read-tree` flag, and listing it would license
+ * `--u` as a prefix of nothing git would accept while looking like protection.
+ *
+ * Reading the flags out of `git -h` also fails loudly if a future git renames
+ * one, which would otherwise widen the allowlist in silence.
+ */
+describe('the flag allowlist against real git', () => {
+  const help = (verb: string): string => {
+    try {
+      return execFileSync('git', [verb, '-h'], { encoding: 'utf8', stdio: 'pipe' });
+    } catch (error) {
+      // `git <verb> -h` exits 129 and may print usage on either stream.
+      const failure = error as { stdout?: string; stderr?: string };
+      return `${failure.stdout ?? ''}${failure.stderr ?? ''}`;
+    }
+  };
+
+  it.each([...SAFE_FLAGS.keys()])('%s declares every flag the guard permits', (verb) => {
+    const usage = help(verb);
+    const policy = SAFE_FLAGS.get(verb)!;
+
+    for (const flag of policy.long) {
+      expect(usage, `${verb} ${flag}`).toMatch(new RegExp(`(^|[\\s,])${flag}($|[\\s,=[])`, 'm'));
+    }
+    for (const char of policy.short) {
+      expect(usage, `${verb} -${char}`).toMatch(new RegExp(`(^|[\\s,])-${char}($|[\\s,])`, 'm'));
+    }
   });
 });

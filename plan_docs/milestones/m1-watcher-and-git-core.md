@@ -28,7 +28,13 @@ every task here and is not repeated per task.
   `.git/config` still applies. Classify commands with an **allowlist** of
   read-only operations, so an unfamiliar verb is refused by default; a denylist
   fails open on `read-tree --reset` and `update-ref`, which rewrite the index
-  and move refs without looking like writes. Return output verbatim and redact
+  and move refs without looking like writes. Allowlist **flags** the same way for
+  the verbs where a flag decides the class: `read-tree -u` writes the working
+  tree, `--index-output` overrides the redirected index, `update-index
+--split-index` writes into `$GIT_DIR`, and `symbolic-ref -d` deletes a ref while
+  taking one operand. Match long flags by prefix, since git resolves any
+  unambiguous abbreviation, and short flags per character, since git bundles
+  them. Return output verbatim and redact
   only what is logged — callers parse this output, and rewriting a path or an
   object id that matches a secret pattern corrupts it silently. Apply a timeout
   and a max buffer; a hung `git` must not wedge the daemon.
@@ -36,9 +42,12 @@ every task here and is not repeated per task.
   **Done when:** a branch literally named `--upload-pack=touch /tmp/pwned`
   cannot execute anything, proven by a test; a table-driven test refuses a
   corpus of writing verbs against a `UserRepo`, including the plumbing writers a
-  denylist misses; an unrecognised verb is refused by default; and a command
-  exceeding its timeout is killed and reported as a timeout rather than as any
-  other signal death.
+  denylist misses; an unrecognised verb is refused by default; a writing flag is
+  refused under both its full spelling and its abbreviation, asserted against the
+  damage rather than the message; every flag in the allowlist is checked against
+  `git <verb> -h` so an invented name cannot widen it; and a command exceeding
+  its timeout is killed and reported as a timeout rather than as any other signal
+  death.
   **Constraints:** hard rule 1. This function is the only place git is invoked,
   so it is the only place the read-only promise can be broken.
 

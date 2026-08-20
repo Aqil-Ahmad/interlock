@@ -6,7 +6,7 @@ import {
   isMutatingCommand,
   READ_ONLY_GIT_COMMANDS,
 } from './repo-handle.js';
-import type { ShadowRepo, UserRepo } from './repo-handle.js';
+import type { CommandKind, ShadowRepo, UserRepo } from './repo-handle.js';
 
 /**
  * Verbs that modify a repository. Not the implementation's list — the guard is
@@ -166,6 +166,73 @@ describe('the allowlist is default-deny', () => {
   });
 });
 
+/**
+ * Forms whose verb is safe but whose flags are not. Each was verified against a
+ * real repo: `read-tree -u` overwrote an uncommitted edit, `--index-output`
+ * rewrote the index a valid `indexFile` was supposed to spare, `update-index
+ * --split-index` left a `sharedindex.*` file in the user's git directory, and
+ * `symbolic-ref -d` deleted a ref.
+ *
+ * The abbreviated spellings matter as much as the full ones. Git resolves any
+ * unambiguous prefix, so `--i=` is `--index-output=` and `--d` is `--delete`,
+ * and a guard matching flags by equality refuses the long form while passing the
+ * short one straight through to the same outcome.
+ */
+const WRITING_FLAG_FORMS: readonly (readonly string[])[] = [
+  ['read-tree', '-u', '--reset', 'HEAD'],
+  ['read-tree', '-um', 'HEAD'],
+  ['read-tree', '--index-output=/elsewhere/index', 'HEAD'],
+  ['read-tree', '--index-out=/elsewhere/index', 'HEAD'],
+  ['read-tree', '--i=/elsewhere/index', 'HEAD'],
+  ['read-tree', '--recurse-submodules', 'HEAD'],
+  ['update-index', '--split-index'],
+  ['update-index', '--untracked-cache'],
+  ['update-index', '--fsmonitor'],
+  ['add', '--interactive'],
+  ['add', '-p'],
+  ['add', '-e'],
+  ['symbolic-ref', '-d', 'HEAD'],
+  ['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'],
+  ['symbolic-ref', '--d', 'HEAD'],
+  ['symbolic-ref', '-qd', 'HEAD'],
+];
+
+/** Forms the snapshot path depends on, which the flag allowlist must not break. */
+const WORKING_FLAG_FORMS: readonly (readonly [readonly string[], CommandKind])[] = [
+  [['read-tree', 'HEAD'], 'index-only'],
+  [['read-tree', '--reset', 'HEAD'], 'index-only'],
+  [['read-tree', '--res', 'HEAD'], 'index-only'],
+  [['read-tree', '--prefix=sub/', 'HEAD'], 'index-only'],
+  [['add', '-A'], 'index-only'],
+  [['add', '-A', '--', 'a b.txt'], 'index-only'],
+  // A pathspec after `--` is a path, even when it is spelled like a flag.
+  [['add', '-A', '--', '-u'], 'index-only'],
+  [['update-index', '-q', '--refresh'], 'index-only'],
+  [['symbolic-ref', 'HEAD'], 'read-only'],
+  [['symbolic-ref', '--short', 'HEAD'], 'read-only'],
+  [['symbolic-ref', '-q', 'HEAD'], 'read-only'],
+];
+
+describe('flags that outrank their verb', () => {
+  const userRepo: UserRepo = { kind: 'user', rootPath: '/repo', gitDir: '/repo/.git' };
+  const runner = createGitRunner({ gitPath: '/nonexistent/git' });
+
+  it.each(WRITING_FLAG_FORMS)('classifies `git %s %s` as mutating', (...args) => {
+    expect(classifyCommand(args)).toBe('mutating');
+  });
+
+  it.each(WRITING_FLAG_FORMS)('refuses `git %s %s` against a user repo', async (...args) => {
+    // An indexFile does not buy these back: none of them writes only the index.
+    const error = await rejection(runner.run(userRepo, args, { indexFile: '/elsewhere/index' }));
+    expect(error.message).toContain('mutating');
+    expect(error.infra).toBe(false);
+  });
+
+  it.each(WORKING_FLAG_FORMS)('leaves `git %s` alone', (args, kind) => {
+    expect(classifyCommand(args)).toBe(kind);
+  });
+});
+
 describe('read-only verbs of mutating subcommands', () => {
   it('allows the reporting forms', () => {
     expect(isMutatingCommand(['worktree', 'list', '--porcelain', '-z'])).toBe(false);
@@ -193,6 +260,11 @@ describe('read-only verbs of mutating subcommands', () => {
   });
 });
 
+/**
+ * Only the cases decided on the path's shape. Where a redirection lands depends
+ * on symlinks and platform aliases, so the rest are integration tests against a
+ * real repository in `test/git-runner.test.ts`.
+ */
 describe('index redirection', () => {
   const userRepo: UserRepo = { kind: 'user', rootPath: '/repo', gitDir: '/repo/.git' };
   const runner = createGitRunner({ gitPath: '/nonexistent/git' });
@@ -202,33 +274,16 @@ describe('index redirection', () => {
     expect(error.message).toContain('no indexFile was given');
   });
 
-  it('refuses an index redirected back into the repository', async () => {
-    // The whole point of the capability is not writing this file.
-    const error = await rejection(
-      runner.run(userRepo, ['add', '-A'], { indexFile: '/repo/.git/index' }),
-    );
-    expect(error.message).toContain('resolves inside');
-  });
-
-  it('refuses an index inside the working tree', async () => {
-    const error = await rejection(
-      runner.run(userRepo, ['add', '-A'], { indexFile: '/repo/sub/index' }),
-    );
-    expect(error.message).toContain('resolves inside');
-  });
-
   it('refuses a relative index path, which resolves against an unknown cwd', async () => {
     const error = await rejection(runner.run(userRepo, ['add', '-A'], { indexFile: 'tmp/index' }));
     expect(error.message).toContain('absolute');
   });
 
-  it('allows an index outside the repository', async () => {
-    // Reaching the spawn is the assertion: it failed on the missing binary,
-    // not on the guard.
+  it('refuses an index whose directory does not exist', async () => {
+    // Unresolvable means unverifiable, and git could not create it either.
     const error = await rejection(
-      runner.run(userRepo, ['add', '-A'], { indexFile: '/elsewhere/index' }),
+      runner.run(userRepo, ['add', '-A'], { indexFile: '/nonexistent/dir/index' }),
     );
-    expect(error.infra).toBe(true);
-    expect(error.details.gitPath).toBe('/nonexistent/git');
+    expect(error.message).toContain('existing directory');
   });
 });

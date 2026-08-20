@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { devNull } from 'node:os';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { InterlockError, redact, silentLogger } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
 
@@ -88,6 +89,13 @@ const GLOBAL_FLAGS: ReadonlyMap<
  * `update-ref` moves a branch, and neither looks like a write from its name.
  * Anything absent here is refused against a {@link UserRepo}, so an unfamiliar
  * git verb is safe by default rather than dangerous by default.
+ *
+ * Classification is by verb, plus {@link SAFE_FLAGS} for the four verbs where a
+ * flag decides the class. It is not a per-flag audit of every allowed verb:
+ * `diff --output=<path>` writes a file and `grep -O <cmd>` runs a program, but
+ * argv here is built by Interlock, never supplied by a repository, so the guard
+ * covers invocations this codebase would plausibly issue rather than every
+ * invocation git accepts.
  */
 export const READ_ONLY_GIT_COMMANDS: ReadonlySet<string> = new Set([
   'blame',
@@ -147,6 +155,117 @@ const READ_ONLY_SUBCOMMANDS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
 const INDEX_WRITING_COMMANDS: ReadonlySet<string> = new Set(['add', 'read-tree', 'update-index']);
 
 /**
+ * The flags each guarded verb may carry.
+ *
+ * An allowlist, for the same reason the verb list is one. A denylist of
+ * dangerous flags fails open on the flag nobody thought of, and every one of
+ * these was found that way: `read-tree -u` writes the working tree, which no
+ * index redirection protects; `read-tree --index-output` overrides
+ * `GIT_INDEX_FILE`, so the path validated here is not the path git writes;
+ * `update-index --split-index` drops a `sharedindex.*` file into the user's git
+ * directory; and `symbolic-ref -d` deletes a ref while taking the single operand
+ * its reading form takes. Only the last of those reads like a write.
+ *
+ * Long flags are matched by prefix because git resolves any unambiguous
+ * abbreviation, so `--index-out=`, `--index=` and `--i=` are all
+ * `--index-output=`. Accepting a prefix cannot let a dangerous flag through:
+ * git resolves an abbreviation only to a flag it prefixes, so a prefix of
+ * something listed here either resolves to that flag or is ambiguous and
+ * rejected by git. This holds only while every name below is a real flag of its
+ * verb — an invented one would license abbreviations of whatever else shares it.
+ *
+ * Short flags are matched per character because git bundles them: `-um` enables
+ * `-u`. Flags taking a value that can begin with `-` are left out rather than
+ * special-cased; `--chmod -x` is the only one, and nothing here needs it.
+ */
+export interface FlagPolicy {
+  /** Permitted short flags, one character each. */
+  readonly short: string;
+  /** Permitted long flags, spelled in full. */
+  readonly long: readonly string[];
+}
+
+export const SAFE_FLAGS: ReadonlyMap<string, FlagPolicy> = new Map([
+  [
+    'add',
+    {
+      short: 'Anuv',
+      long: [
+        '--all',
+        '--dry-run',
+        '--ignore-removal',
+        '--renormalize',
+        '--sparse',
+        '--update',
+        '--verbose',
+      ],
+    },
+  ],
+  [
+    'read-tree',
+    {
+      short: 'imnqv',
+      long: [
+        '--aggressive',
+        '--dry-run',
+        '--empty',
+        '--exclude-per-directory',
+        '--no-sparse-checkout',
+        '--prefix',
+        '--quiet',
+        '--reset',
+        '--trivial',
+        '--verbose',
+      ],
+    },
+  ],
+  [
+    'update-index',
+    {
+      short: 'qz',
+      long: [
+        '--add',
+        '--cacheinfo',
+        '--ignore-missing',
+        '--ignore-submodules',
+        '--index-info',
+        '--really-refresh',
+        '--refresh',
+        '--remove',
+        '--stdin',
+        '--unmerged',
+        '--verbose',
+      ],
+    },
+  ],
+  ['symbolic-ref', { short: 'q', long: ['--quiet', '--short'] }],
+]);
+
+/**
+ * True when a guarded verb carries a flag outside its allowlist.
+ *
+ * Scanning stops at `--`: everything after it is a pathspec, and a file named
+ * `-u` is not a flag.
+ */
+function usesUnsafeFlag(verb: string, operands: readonly string[]): boolean {
+  const policy = SAFE_FLAGS.get(verb);
+  if (policy === undefined) return false;
+
+  for (const operand of operands) {
+    if (operand === '--') return false;
+    if (!operand.startsWith('-') || operand.length < 2) continue;
+
+    if (operand.startsWith('--')) {
+      const name = operand.split('=')[0] ?? operand;
+      if (!policy.long.some((flag) => flag.startsWith(name))) return true;
+      continue;
+    }
+    if ([...operand.slice(1)].some((char) => !policy.short.includes(char))) return true;
+  }
+  return false;
+}
+
+/**
  * Index of the subcommand in a git argv, or `-1` if there is none.
  *
  * Skips global flags and their values so `git -C /repo commit` resolves to
@@ -185,13 +304,16 @@ export function classifyCommand(args: readonly string[]): CommandKind {
   if (index === -1) return 'read-only';
 
   const verb = args[index]!;
+  const operands = args.slice(index + 1);
+
+  if (usesUnsafeFlag(verb, operands)) return 'mutating';
   if (READ_ONLY_GIT_COMMANDS.has(verb)) return 'read-only';
 
-  if (READ_ONLY_SUBCOMMANDS.get(verb)?.has(args[index + 1] ?? '') === true) return 'read-only';
+  if (READ_ONLY_SUBCOMMANDS.get(verb)?.has(operands[0] ?? '') === true) return 'read-only';
 
   // `symbolic-ref <name>` reads; `symbolic-ref <name> <ref>` writes.
   if (verb === 'symbolic-ref') {
-    const positional = args.slice(index + 1).filter((arg) => !arg.startsWith('-'));
+    const positional = operands.filter((operand) => !operand.startsWith('-'));
     return positional.length <= 1 ? 'read-only' : 'mutating';
   }
 
@@ -255,10 +377,6 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * Output is buffered, not streamed, so this bounds a single command's memory.
  * Sized for plumbing output such as a large diff; a command expected to exceed
  * it needs streaming rather than a larger number here.
- *
- * Approximate rather than exact: output is decoded before it is measured, so the
- * limit counts decoded characters and a multi-byte stream trips it later than a
- * byte count would.
  */
 const DEFAULT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 
@@ -316,13 +434,56 @@ function indexRedirectionProblem(repo: UserRepo, indexFile: string | undefined):
   if (indexFile === undefined) return 'it writes the index, and no indexFile was given';
   if (!isAbsolute(indexFile)) return 'indexFile must be an absolute path';
 
-  const target = resolve(indexFile);
-  for (const inside of [repo.rootPath, repo.gitDir]) {
-    if (inside !== '' && isWithin(resolve(inside), target)) {
-      return `indexFile resolves inside ${inside}`;
-    }
+  const target = realTargetOf(indexFile);
+  if (target === null) return 'indexFile is not inside an existing directory';
+
+  for (const inside of protectedDirsOf(repo)) {
+    const real = realPathOf(inside);
+    if (real === null) return `${inside} could not be resolved`;
+    if (isWithin(real, target)) return `indexFile resolves inside ${inside}`;
   }
   return null;
+}
+
+/**
+ * Every directory an index redirection must stay out of.
+ *
+ * A linked worktree's git directory is `<main>/.git/worktrees/<name>`, so its
+ * handle names neither the main checkout nor `<main>/.git` — and the index a
+ * redirection must not overwrite lives in both. Branches under active edit are
+ * routinely checked out in linked worktrees here, so this is the ordinary case
+ * rather than an exotic one.
+ */
+function protectedDirsOf(repo: UserRepo): readonly string[] {
+  const dirs = [repo.rootPath, repo.gitDir].filter((dir) => dir !== '');
+  const parent = dirname(repo.gitDir);
+  if (repo.gitDir !== '' && basename(parent) === 'worktrees') dirs.push(dirname(parent));
+  return dirs;
+}
+
+function realPathOf(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where a write to `indexFile` would actually land.
+ *
+ * Normalising the path is not enough: a symlink and a platform path alias both
+ * make an apparently external path resolve into the repository, and macOS
+ * returns `/var/folders/...` from `tmpdir()` for a directory whose real path is
+ * `/private/var/folders/...`. The file itself does not exist yet — git creates
+ * it — so the directory holding it is what resolves.
+ */
+function realTargetOf(indexFile: string): string | null {
+  const existing = realPathOf(indexFile);
+  if (existing !== null) return existing;
+
+  const parent = realPathOf(dirname(indexFile));
+  return parent === null ? null : join(parent, basename(indexFile));
 }
 
 /** True when `child` is `parent` itself or sits beneath it. */
