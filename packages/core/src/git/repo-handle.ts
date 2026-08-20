@@ -93,9 +93,7 @@ const GLOBAL_FLAGS: ReadonlyMap<
  * Classification is by verb, plus {@link SAFE_FLAGS} for the four verbs where a
  * flag decides the class. It is not a per-flag audit of every allowed verb:
  * `diff --output=<path>` writes a file and `grep -O <cmd>` runs a program, but
- * argv here is built by Interlock, never supplied by a repository, so the guard
- * covers invocations this codebase would plausibly issue rather than every
- * invocation git accepts.
+ * argv here is built by Interlock and never supplied by a repository.
  */
 export const READ_ONLY_GIT_COMMANDS: ReadonlySet<string> = new Set([
   'blame',
@@ -154,37 +152,30 @@ const READ_ONLY_SUBCOMMANDS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
  */
 const INDEX_WRITING_COMMANDS: ReadonlySet<string> = new Set(['add', 'read-tree', 'update-index']);
 
-/**
- * The flags each guarded verb may carry.
- *
- * An allowlist, for the same reason the verb list is one. A denylist of
- * dangerous flags fails open on the flag nobody thought of, and every one of
- * these was found that way: `read-tree -u` writes the working tree, which no
- * index redirection protects; `read-tree --index-output` overrides
- * `GIT_INDEX_FILE`, so the path validated here is not the path git writes;
- * `update-index --split-index` drops a `sharedindex.*` file into the user's git
- * directory; and `symbolic-ref -d` deletes a ref while taking the single operand
- * its reading form takes. Only the last of those reads like a write.
- *
- * Long flags are matched by prefix because git resolves any unambiguous
- * abbreviation, so `--index-out=`, `--index=` and `--i=` are all
- * `--index-output=`. Accepting a prefix cannot let a dangerous flag through:
- * git resolves an abbreviation only to a flag it prefixes, so a prefix of
- * something listed here either resolves to that flag or is ambiguous and
- * rejected by git. This holds only while every name below is a real flag of its
- * verb — an invented one would license abbreviations of whatever else shares it.
- *
- * Short flags are matched per character because git bundles them: `-um` enables
- * `-u`. Flags taking a value that can begin with `-` are left out rather than
- * special-cased; `--chmod -x` is the only one, and nothing here needs it.
- */
-export interface FlagPolicy {
+interface FlagPolicy {
   /** Permitted short flags, one character each. */
   readonly short: string;
   /** Permitted long flags, spelled in full. */
   readonly long: readonly string[];
 }
 
+/**
+ * The flags each guarded verb may carry.
+ *
+ * An allowlist, for the same reason the verb list is one: `read-tree -u` writes
+ * the working tree, `read-tree --index-output` overrides `GIT_INDEX_FILE`, and
+ * `update-index --split-index` writes into `$GIT_DIR`. A redirected index
+ * protects against none of them, and none of them looks like a write.
+ *
+ * Long flags match by prefix, since git resolves any unambiguous abbreviation:
+ * `--i=` is `--index-output=`. That holds only while every name here is a real
+ * flag of its verb, which `test/git-runner.test.ts` asserts against `git -h`.
+ * Short flags match per character, since git bundles them: `-um` enables `-u`.
+ *
+ * Keyed by verb because the same letter differs between them — `add -u` is
+ * `--update`, `read-tree -u` is not. Flags whose value can begin with `-` are
+ * absent rather than special-cased; `--chmod -x` is the only one.
+ */
 export const SAFE_FLAGS: ReadonlyMap<string, FlagPolicy> = new Map([
   [
     'add',
@@ -450,9 +441,7 @@ function indexRedirectionProblem(repo: UserRepo, indexFile: string | undefined):
  *
  * A linked worktree's git directory is `<main>/.git/worktrees/<name>`, so its
  * handle names neither the main checkout nor `<main>/.git` — and the index a
- * redirection must not overwrite lives in both. Branches under active edit are
- * routinely checked out in linked worktrees here, so this is the ordinary case
- * rather than an exotic one.
+ * redirection must not overwrite lives in both.
  */
 function protectedDirsOf(repo: UserRepo): readonly string[] {
   const dirs = [repo.rootPath, repo.gitDir].filter((dir) => dir !== '');

@@ -305,8 +305,8 @@ describe('git runner against a real repository', () => {
   });
 
   it('refuses an index redirected at the git directory a linked worktree shares', async () => {
-    // A linked worktree's handle names neither the main checkout nor its `.git`,
-    // and the index a redirection must not overwrite lives in both.
+    // The handle names the worktree and `.git/worktrees/<name>`, neither of
+    // which contains the index this redirection would overwrite.
     const worktree = join(dir, '..', `${basename(dir)}-wt`);
     git('branch', 'side');
     git('worktree', 'add', '-q', worktree, 'side');
@@ -392,18 +392,10 @@ describe('git runner against a real repository', () => {
 });
 
 /**
- * The flag allowlist is only sound while every name in it is a real flag of its
- * verb.
- *
- * Long flags are matched by prefix, because git resolves any unambiguous
- * abbreviation. That is safe as long as each listed name exists: git resolves a
- * prefix only to a flag it prefixes, so a prefix of a listed flag either lands
- * on that flag or is ambiguous and rejected. Invent a name and the reasoning
- * inverts — `--update` is not a `read-tree` flag, and listing it would license
- * `--u` as a prefix of nothing git would accept while looking like protection.
- *
- * Reading the flags out of `git -h` also fails loudly if a future git renames
- * one, which would otherwise widen the allowlist in silence.
+ * Every name in the allowlist must be a real flag of its verb. Long flags match
+ * by prefix, so an invented name would license abbreviations git resolves to
+ * something else, and a future git renaming one would widen the allowlist in
+ * silence.
  */
 describe('the flag allowlist against real git', () => {
   const help = (verb: string): string => {

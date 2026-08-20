@@ -167,16 +167,13 @@ describe('the allowlist is default-deny', () => {
 });
 
 /**
- * Forms whose verb is safe but whose flags are not. Each was verified against a
- * real repo: `read-tree -u` overwrote an uncommitted edit, `--index-output`
- * rewrote the index a valid `indexFile` was supposed to spare, `update-index
- * --split-index` left a `sharedindex.*` file in the user's git directory, and
- * `symbolic-ref -d` deleted a ref.
+ * Forms whose verb is safe but whose flags are not, in both their full and
+ * abbreviated spellings. Git resolves any unambiguous prefix, so `--i=` is
+ * `--index-output=` and `--d` is `--delete`, and a guard matching by equality
+ * refuses the long form while passing the short one to the same outcome.
  *
- * The abbreviated spellings matter as much as the full ones. Git resolves any
- * unambiguous prefix, so `--i=` is `--index-output=` and `--d` is `--delete`,
- * and a guard matching flags by equality refuses the long form while passing the
- * short one straight through to the same outcome.
+ * Only the classification is under test here. What each does to a real
+ * repository is asserted in `test/git-runner.test.ts`.
  */
 const WRITING_FLAG_FORMS: readonly (readonly string[])[] = [
   ['read-tree', '-u', '--reset', 'HEAD'],

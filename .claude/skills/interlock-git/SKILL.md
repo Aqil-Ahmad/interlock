@@ -79,7 +79,7 @@ command, and an open environment map would hand that redirection straight back
 to any caller.
 
 Redirecting the index protects the index and nothing else. Three flags walk
-straight past it, and each was caught doing real damage:
+straight past it:
 
 - `read-tree -u` updates the **working tree** to match the index it built, so a
   redirected index only means it overwrites uncommitted edits from a different
@@ -96,10 +96,8 @@ match:
 
 - **Any unambiguous prefix resolves.** `--index-out=`, `--index=` and `--i=` are
   all `--index-output=`; `--d` is `--delete`. Match long flags by prefix, and
-  only against names that are really flags of that verb — git resolves a prefix
-  only to a flag it prefixes, so a prefix of a listed flag either lands on it or
-  is ambiguous and rejected. List a name git does not have and that reasoning
-  inverts.
+  only against names git really has — an invented one licenses abbreviations
+  that resolve somewhere else.
 - **Short flags bundle.** `-um` enables `-u`, so match per character.
 
 The same letter means different things to different verbs — `-u` on `add` is
