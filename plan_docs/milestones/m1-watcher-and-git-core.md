@@ -15,7 +15,7 @@ every task here and is not repeated per task.
 ## Tasks
 
 - [x] **Git runner**
-      **Files:** `packages/core/src/git/repo-handle.ts`, `repo-handle.test.ts`
+      **Files:** `packages/core/src/git/repo-handle.ts`, `repo-handle.test.ts`, `packages/core/test/git-runner.test.ts`
       **What:** the `GitRunner` implementation behind the existing interface.
 
   Build it on `execFile` with an argument array — never a shell, never string
@@ -23,17 +23,22 @@ every task here and is not repeated per task.
 <path>` rather than changing process directory, because the daemon watches
   several repos concurrently and `process.chdir` is global. Set
   `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0` and an empty
-  `GIT_CONFIG_GLOBAL` so a user's global config cannot change behaviour.
-  Enforce `isMutatingCommand` at runtime against a `UserRepo`, throwing
-  `GIT_COMMAND_FAILED` — the type split catches mistakes at compile time, this
-  catches them at run time. Redact stdout and stderr before they leave the
-  function. Apply a timeout and a max buffer; a hung `git` must not wedge the
-  daemon.
+  `GIT_CONFIG_GLOBAL` so a user's global config cannot change behaviour — noting
+  that this reaches global and system config only, and repository-local
+  `.git/config` still applies. Classify commands with an **allowlist** of
+  read-only operations, so an unfamiliar verb is refused by default; a denylist
+  fails open on `read-tree --reset` and `update-ref`, which rewrite the index
+  and move refs without looking like writes. Return output verbatim and redact
+  only what is logged — callers parse this output, and rewriting a path or an
+  object id that matches a secret pattern corrupts it silently. Apply a timeout
+  and a max buffer; a hung `git` must not wedge the daemon.
 
   **Done when:** a branch literally named `--upload-pack=touch /tmp/pwned`
-  cannot execute anything, proven by a test; every verb in
-  `MUTATING_GIT_COMMANDS` is refused against a `UserRepo` by a table-driven
-  test; and a command exceeding its timeout is killed and reported.
+  cannot execute anything, proven by a test; a table-driven test refuses a
+  corpus of writing verbs against a `UserRepo`, including the plumbing writers a
+  denylist misses; an unrecognised verb is refused by default; and a command
+  exceeding its timeout is killed and reported as a timeout rather than as any
+  other signal death.
   **Constraints:** hard rule 1. This function is the only place git is invoked,
   so it is the only place the read-only promise can be broken.
 

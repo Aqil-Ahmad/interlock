@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { devNull } from 'node:os';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { InterlockError, redact, silentLogger } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
 
@@ -36,6 +37,11 @@ export type AnyRepo = UserRepo | ShadowRepo;
  * process — logs and stored evidence — because callers parse this output, and
  * rewriting a path or an object id that happens to match a secret pattern would
  * corrupt it silently.
+ *
+ * Both are decoded as UTF-8, so this runner is for text output only. A command
+ * whose output is binary, or whose paths are not valid UTF-8, needs a
+ * buffer-returning path rather than this one; `-z` plumbing formats keep paths
+ * intact but not arbitrary bytes.
  */
 export interface GitResult {
   readonly stdout: string;
@@ -54,90 +60,165 @@ export interface GitRunner {
   run(repo: AnyRepo, args: readonly string[], options?: GitRunOptions): Promise<GitResult>;
 }
 
-/** Commands that are refused against a {@link UserRepo}. Enforced by the runner. */
-export const MUTATING_GIT_COMMANDS: readonly string[] = [
-  'add',
-  'am',
-  'apply',
-  'branch',
-  'checkout',
-  'cherry-pick',
-  'clean',
-  'commit',
-  'config',
-  'fetch',
-  'gc',
-  'merge',
-  'mv',
-  'prune',
-  'pull',
-  'push',
-  'rebase',
-  'reset',
-  'restore',
-  'rm',
-  'stash',
-  'switch',
-  'tag',
-  'worktree',
-];
-
-/** Global git flags that consume the following argument (`git -C <path> status`). */
-const VALUE_TAKING_GLOBAL_FLAGS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace']);
+/**
+ * Global git flags, and whether each consumes the argument after it.
+ *
+ * One table so the two derived uses cannot drift: argv scanning has to skip a
+ * flag's value to find the subcommand, and the runner has to refuse the flags
+ * that redirect it.
+ */
+const GLOBAL_FLAGS: ReadonlyMap<
+  string,
+  { readonly takesValue: boolean; readonly reserved: boolean }
+> = new Map([
+  ['-C', { takesValue: true, reserved: true }],
+  ['-c', { takesValue: true, reserved: true }],
+  ['--git-dir', { takesValue: true, reserved: true }],
+  ['--work-tree', { takesValue: true, reserved: true }],
+  ['--namespace', { takesValue: true, reserved: true }],
+  ['--exec-path', { takesValue: true, reserved: true }],
+  ['--config-env', { takesValue: true, reserved: true }],
+]);
 
 /**
- * The subcommand in a git argv, or `null` if there is none.
+ * Git commands that only read.
+ *
+ * An allowlist, not a denylist. A denylist of writing verbs fails open on every
+ * command it has not heard of — `read-tree --reset` rewrites the index and
+ * `update-ref` moves a branch, and neither looks like a write from its name.
+ * Anything absent here is refused against a {@link UserRepo}, so an unfamiliar
+ * git verb is safe by default rather than dangerous by default.
+ */
+export const READ_ONLY_GIT_COMMANDS: ReadonlySet<string> = new Set([
+  'blame',
+  'cat-file',
+  'check-attr',
+  'check-ignore',
+  'check-ref-format',
+  'describe',
+  'diff',
+  'diff-files',
+  'diff-index',
+  'diff-tree',
+  'for-each-ref',
+  'grep',
+  'log',
+  'ls-files',
+  'ls-tree',
+  'merge-base',
+  'name-rev',
+  'rev-list',
+  'rev-parse',
+  'shortlog',
+  'show',
+  'show-ref',
+  'status',
+  'var',
+  'verify-commit',
+  'verify-tag',
+  // These read the repository and write only objects. Adding objects is
+  // append-only and reclaimed by `git gc`; the plan sanctions it explicitly.
+  'hash-object',
+  'merge-tree',
+  'write-tree',
+]);
+
+/**
+ * Commands whose read-only form is a specific first operand.
+ *
+ * The operand must follow the verb immediately, so a writing flag cannot hide
+ * behind a reading one.
+ */
+const READ_ONLY_SUBCOMMANDS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['worktree', new Set(['list'])],
+  ['stash', new Set(['list', 'show'])],
+  ['notes', new Set(['list', 'show'])],
+  ['remote', new Set(['show', 'get-url'])],
+  ['submodule', new Set(['status'])],
+]);
+
+/**
+ * Commands that write the index and nothing else a user can see.
+ *
+ * Permitted against a {@link UserRepo} only when {@link GitRunOptions.indexFile}
+ * points the index somewhere outside the repository — which is exactly how a
+ * snapshot of uncommitted work is taken without disturbing what is being edited.
+ */
+const INDEX_WRITING_COMMANDS: ReadonlySet<string> = new Set(['add', 'read-tree', 'update-index']);
+
+/**
+ * Index of the subcommand in a git argv, or `-1` if there is none.
  *
  * Skips global flags and their values so `git -C /repo commit` resolves to
  * `commit` rather than to `-C`.
  */
-function subcommandOf(args: readonly string[]): string | null {
+function subcommandIndexOf(args: readonly string[]): number {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
-    if (VALUE_TAKING_GLOBAL_FLAGS.has(arg)) {
+    if (GLOBAL_FLAGS.get(arg)?.takesValue === true) {
       i++;
       continue;
     }
     if (arg.startsWith('-')) continue;
-    return arg;
+    return i;
   }
-  return null;
+  return -1;
 }
 
-/** True when the given git argv would mutate repository state. */
-export function isMutatingCommand(args: readonly string[]): boolean {
-  const subcommand = subcommandOf(args);
-  return subcommand !== null && MUTATING_GIT_COMMANDS.includes(subcommand);
+/** The subcommand in a git argv, or `null` if there is none. */
+function subcommandOf(args: readonly string[]): string | null {
+  const index = subcommandIndexOf(args);
+  return index === -1 ? null : args[index]!;
 }
 
 /**
- * Global git flags a caller may not supply.
+ * How a command may be run against a repository that must not be modified.
  *
- * Each one redirects where git operates or which configuration it loads, so
- * accepting them from a caller would let a `UserRepo` handle act on a different
- * repository, or let `-c core.hooksPath=...` run arbitrary code on the host.
- * The runner supplies `-C` itself; anything else here is a programming error.
+ * `index-only` writes the index and nothing else, so it is allowed once that
+ * index has been redirected elsewhere.
  */
-const RESERVED_GLOBAL_FLAGS = new Set([
-  '-C',
-  '-c',
-  '--git-dir',
-  '--work-tree',
-  '--namespace',
-  '--exec-path',
-  '--config-env',
-]);
+export type CommandKind = 'read-only' | 'index-only' | 'mutating';
+
+/** Classify a git argv. Anything unrecognised is treated as mutating. */
+export function classifyCommand(args: readonly string[]): CommandKind {
+  const index = subcommandIndexOf(args);
+  if (index === -1) return 'read-only';
+
+  const verb = args[index]!;
+  if (READ_ONLY_GIT_COMMANDS.has(verb)) return 'read-only';
+
+  if (READ_ONLY_SUBCOMMANDS.get(verb)?.has(args[index + 1] ?? '') === true) return 'read-only';
+
+  // `symbolic-ref <name>` reads; `symbolic-ref <name> <ref>` writes.
+  if (verb === 'symbolic-ref') {
+    const positional = args.slice(index + 1).filter((arg) => !arg.startsWith('-'));
+    return positional.length <= 1 ? 'read-only' : 'mutating';
+  }
+
+  if (INDEX_WRITING_COMMANDS.has(verb)) return 'index-only';
+
+  return 'mutating';
+}
+
+/** True when the given git argv would modify anything a user can observe. */
+export function isMutatingCommand(args: readonly string[]): boolean {
+  return classifyCommand(args) !== 'read-only';
+}
 
 /**
- * True when `args` carries a reserved global flag, i.e. one appearing before
- * the subcommand. Flags after the subcommand belong to that subcommand — `-c`
- * means "copy detection" to `git log` — and are left alone.
+ * True when `args` carries a global flag the caller may not supply.
+ *
+ * Each reserved flag redirects where git operates or which configuration it
+ * loads, so accepting one would let a `UserRepo` handle act on a different
+ * repository, or let `-c core.hooksPath=...` run code on the host. Flags after
+ * the subcommand belong to that subcommand — `-c` means copy detection to
+ * `git log` — and are left alone.
  */
 function usesReservedGlobalFlag(args: readonly string[]): boolean {
   for (const arg of args) {
     if (!arg.startsWith('-')) return false;
     const name = arg.startsWith('--') ? (arg.split('=')[0] ?? arg) : arg;
-    if (RESERVED_GLOBAL_FLAGS.has(name)) return true;
+    if (GLOBAL_FLAGS.get(name)?.reserved === true) return true;
   }
   return false;
 }
@@ -174,6 +255,10 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * Output is buffered, not streamed, so this bounds a single command's memory.
  * Sized for plumbing output such as a large diff; a command expected to exceed
  * it needs streaming rather than a larger number here.
+ *
+ * Approximate rather than exact: output is decoded before it is measured, so the
+ * limit counts decoded characters and a multi-byte stream trips it later than a
+ * byte count would.
  */
 const DEFAULT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 
@@ -194,7 +279,12 @@ function buildEnv(indexFile: string | undefined): NodeJS.ProcessEnv {
   env.GIT_TERMINAL_PROMPT = '0';
   // Read commands must never take `index.lock`, or they stall the user's own git.
   env.GIT_OPTIONAL_LOCKS = '0';
-  // A user's aliases, hooks or merge drivers must not change what these commands do.
+  // Neutralises *global and system* config only. Repository-local `.git/config`
+  // still applies, and some of its keys run programs — `core.fsmonitor` during
+  // `status`, `diff.<driver>.textconv` during `diff`. The runner disables what it
+  // can by name below; textconv has no single key to clear, so it stays a
+  // residual risk, bounded today because `.git/config` is not cloned and so is
+  // not attacker-controlled.
   env.GIT_CONFIG_GLOBAL = devNull;
   env.GIT_CONFIG_SYSTEM = devNull;
   env.GIT_CONFIG_NOSYSTEM = '1';
@@ -213,6 +303,33 @@ function gitFailed(
   remedy: string,
 ): InterlockError {
   return new InterlockError('GIT_COMMAND_FAILED', message, { details, remedy, infra: true });
+}
+
+/**
+ * Why an index redirection is unacceptable, or `null` when it is fine.
+ *
+ * Without this the capability defeats itself: `indexFile` exists so staging can
+ * avoid the user's index, and pointing it back at `.git/index` would write the
+ * very file the whole design protects.
+ */
+function indexRedirectionProblem(repo: UserRepo, indexFile: string | undefined): string | null {
+  if (indexFile === undefined) return 'it writes the index, and no indexFile was given';
+  if (!isAbsolute(indexFile)) return 'indexFile must be an absolute path';
+
+  const target = resolve(indexFile);
+  for (const inside of [repo.rootPath, repo.gitDir]) {
+    if (inside !== '' && isWithin(resolve(inside), target)) {
+      return `indexFile resolves inside ${inside}`;
+    }
+  }
+  return null;
+}
+
+/** True when `child` is `parent` itself or sits beneath it. */
+function isWithin(parent: string, child: string): boolean {
+  if (child === parent) return true;
+  const rel = relative(parent, child);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
 /**
@@ -241,8 +358,9 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
       runOptions: GitRunOptions = {},
     ): Promise<GitResult> {
       const subcommand = subcommandOf(args);
+      const kind = classifyCommand(args);
 
-      if (repo.kind === 'user' && isMutatingCommand(args)) {
+      if (repo.kind === 'user' && kind === 'mutating') {
         return Promise.reject(
           new InterlockError(
             'GIT_COMMAND_FAILED',
@@ -255,6 +373,23 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
         );
       }
 
+      if (repo.kind === 'user' && kind === 'index-only') {
+        const rejection = indexRedirectionProblem(repo, runOptions.indexFile);
+        if (rejection !== null) {
+          return Promise.reject(
+            new InterlockError(
+              'GIT_COMMAND_FAILED',
+              `Refused \`git ${subcommand ?? ''}\` against a user repository: ${rejection}`,
+              {
+                details: { rootPath: repo.rootPath, command: subcommand },
+                remedy:
+                  'Pass indexFile pointing outside the repository, so staging cannot disturb the index the user is editing.',
+              },
+            ),
+          );
+        }
+      }
+
       if (usesReservedGlobalFlag(args)) {
         return Promise.reject(
           new InterlockError(
@@ -262,14 +397,27 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
             'Refused a git command carrying a reserved global flag',
             {
               details: { rootPath: repo.rootPath },
-              remedy: `The runner supplies the repository itself. Reserved: ${[...RESERVED_GLOBAL_FLAGS].join(', ')}.`,
+              remedy:
+                'The runner supplies the repository itself; do not pass -C, -c, --git-dir, --work-tree, --namespace, --exec-path or --config-env.',
             },
           ),
         );
       }
 
       const timeoutMs = runOptions.timeoutMs ?? defaultTimeoutMs;
-      const argv = ['-C', repo.rootPath, '--no-pager', ...args];
+      // Callers may not pass `-c`, so the runner is free to use it. These clear
+      // the repository-local keys that would otherwise run a program during an
+      // otherwise read-only command.
+      const argv = [
+        '-C',
+        repo.rootPath,
+        '--no-pager',
+        '-c',
+        'core.fsmonitor=',
+        '-c',
+        `core.hooksPath=${devNull}`,
+        ...args,
+      ];
       const startedAt = Date.now();
 
       return new Promise<GitResult>((resolve, reject) => {
@@ -297,13 +445,33 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
               signal?: NodeJS.Signals | null;
             };
 
-            if (failure.killed === true || failure.signal != null) {
+            // execFile kills on timeout with SIGTERM. Any other signal came from
+            // outside — an OOM kill, an operator — and reporting that as a
+            // timeout sends whoever debugs it after an elapsed limit that never
+            // elapsed.
+            if (failure.killed === true && failure.signal === 'SIGTERM') {
               log.warn('git timed out', { args: args.map(redact), timeoutMs, durationMs });
               reject(
                 gitFailed(
                   `git did not finish within ${String(timeoutMs)}ms`,
                   { timeoutMs, durationMs },
                   'Raise the timeout, or narrow the command.',
+                ),
+              );
+              return;
+            }
+
+            if (failure.signal != null) {
+              log.error('git killed by signal', {
+                args: args.map(redact),
+                signal: failure.signal,
+                durationMs,
+              });
+              reject(
+                gitFailed(
+                  `git was killed by ${failure.signal}`,
+                  { signal: failure.signal, durationMs },
+                  'Check for an out-of-memory kill or an external process killer.',
                 ),
               );
               return;

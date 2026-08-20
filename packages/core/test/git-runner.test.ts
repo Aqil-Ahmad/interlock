@@ -2,26 +2,12 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createLogger, isInterlockError } from '@interlock/shared';
-import type { InterlockError, LogRecord } from '@interlock/shared';
+import { createLogger } from '@interlock/shared';
+import type { LogRecord } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createGitRunner } from '../src/git/repo-handle.js';
-import type { ShadowRepo, UserRepo } from '../src/git/repo-handle.js';
-
-/**
- * Await a rejection and narrow it, so assertions run against a typed error
- * rather than an untyped matcher — the error type is part of the contract.
- */
-async function rejection(promise: Promise<unknown>): Promise<InterlockError> {
-  const error: unknown = await promise.then(
-    () => undefined,
-    (reason: unknown) => reason,
-  );
-  if (!isInterlockError(error)) {
-    throw new Error(`expected an InterlockError, got: ${String(error)}`);
-  }
-  return error;
-}
+import type { UserRepo } from '../src/git/repo-handle.js';
+import { rejection } from './support/rejection.js';
 
 /**
  * Exercises the git runner against a real repository.
@@ -33,7 +19,6 @@ async function rejection(promise: Promise<unknown>): Promise<InterlockError> {
 describe('git runner against a real repository', () => {
   let dir: string;
   let repo: UserRepo;
-  let shadow: ShadowRepo;
   const runner = createGitRunner();
 
   const git = (...args: string[]): void => {
@@ -52,7 +37,6 @@ describe('git runner against a real repository', () => {
     git('commit', '-qm', 'initial');
 
     repo = { kind: 'user', rootPath: dir, gitDir: join(dir, '.git') };
-    shadow = { kind: 'shadow', rootPath: dir, gitDir: join(dir, '.git'), originPath: dir };
   });
 
   afterEach(() => {
@@ -136,17 +120,19 @@ describe('git runner against a real repository', () => {
     expect(JSON.stringify(records)).not.toContain(token);
   });
 
-  it('stages into an overridden index without touching the repository index', async () => {
+  it('stages a user repo into an overridden index, leaving its own index alone', async () => {
     const indexBefore = readFileSync(join(dir, '.git', 'index'));
     const indexDir = mkdtempSync(join(tmpdir(), 'interlock-index-'));
     const tempIndex = join(indexDir, 'index');
     writeFileSync(join(dir, 'b.txt'), 'staged elsewhere\n');
 
     try {
-      const added = await runner.run(shadow, ['add', '-A'], { indexFile: tempIndex });
+      // A UserRepo on purpose: staging without disturbing the user's index is
+      // exactly what this capability exists for, and a shadow would not test it.
+      const added = await runner.run(repo, ['add', '-A'], { indexFile: tempIndex });
       expect(added.exitCode).toBe(0);
 
-      const tree = await runner.run(shadow, ['write-tree'], { indexFile: tempIndex });
+      const tree = await runner.run(repo, ['write-tree'], { indexFile: tempIndex });
       expect(tree.exitCode).toBe(0);
       expect(tree.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
 
@@ -168,11 +154,39 @@ describe('git runner against a real repository', () => {
       const error = await rejection(slow.run(repo, ['status']));
       expect(error.code).toBe('GIT_COMMAND_FAILED');
       expect(error.infra).toBe(true);
+      // Every runner failure sets code and infra identically, so pin the branch.
+      expect(error.message).toContain('did not finish within');
+      expect(error.details.timeoutMs).toBe(100);
       // Proves it was killed rather than waited out.
       expect(Date.now() - startedAt).toBeLessThan(5_000);
     } finally {
       rmSync(scriptDir, { recursive: true, force: true });
     }
+  });
+
+  it('refuses to stage a user repo through its own index', async () => {
+    const before = readFileSync(join(dir, '.git', 'index'));
+    const error = await rejection(
+      runner.run(repo, ['add', '-A'], { indexFile: join(dir, '.git', 'index') }),
+    );
+    expect(error.message).toContain('resolves inside');
+    expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
+  });
+
+  it('refuses the plumbing writers that a verb denylist would miss', async () => {
+    writeFileSync(join(dir, 'staged.txt'), 'staged\n');
+    git('add', 'staged.txt');
+    const before = readFileSync(join(dir, '.git', 'index'));
+
+    // Verified against a real repo: this destroys a staged change when allowed.
+    const error = await rejection(runner.run(repo, ['read-tree', '--reset', 'HEAD']));
+    expect(error.message).toContain('no indexFile was given');
+    expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
+
+    const refError = await rejection(runner.run(repo, ['update-ref', 'refs/heads/evil', 'HEAD']));
+    expect(refError.message).toContain('mutating');
+    const branches = await runner.run(repo, ['for-each-ref', '--format=%(refname)', 'refs/heads']);
+    expect(branches.stdout).not.toContain('evil');
   });
 
   it('reports a missing git binary as an infrastructure failure', async () => {
@@ -218,5 +232,7 @@ describe('git runner against a real repository', () => {
     const error = await rejection(tiny.run(repo, ['show', 'HEAD:big.txt']));
     expect(error.code).toBe('GIT_COMMAND_FAILED');
     expect(error.infra).toBe(true);
+    // Otherwise this still passes if the branch regresses into the generic handler.
+    expect(error.message).toContain('more output than the runner buffers');
   });
 });
