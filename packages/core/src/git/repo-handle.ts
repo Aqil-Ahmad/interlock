@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { devNull } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { InterlockError, redact, silentLogger } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
 
@@ -381,7 +381,9 @@ const DEFAULT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 function buildEnv(indexFile: string | undefined): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (!key.startsWith('GIT_')) env[key] = value;
+    // Windows matches variable names case-insensitively, so `git_dir` reaches
+    // git as `GIT_DIR`. Compare that way everywhere rather than per platform.
+    if (!key.toUpperCase().startsWith('GIT_')) env[key] = value;
   }
 
   // Fail instead of blocking on a credential prompt that has no terminal.
@@ -475,11 +477,18 @@ function realTargetOf(indexFile: string): string | null {
   return parent === null ? null : join(parent, basename(indexFile));
 }
 
-/** True when `child` is `parent` itself or sits beneath it. */
+/**
+ * True when `child` is `parent` itself or sits beneath it.
+ *
+ * The escape has to be a whole `..` segment. Testing the `..` prefix alone reads
+ * a sibling named `..foo` as an escape and calls a path inside the repository
+ * outside it.
+ */
 function isWithin(parent: string, child: string): boolean {
   if (child === parent) return true;
   const rel = relative(parent, child);
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  if (rel === '' || isAbsolute(rel)) return false;
+  return rel !== '..' && !rel.startsWith(`..${sep}`);
 }
 
 /**
@@ -513,7 +522,7 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
       if (repo.kind === 'user' && kind === 'mutating') {
         return Promise.reject(
           new InterlockError(
-            'GIT_COMMAND_FAILED',
+            'GIT_COMMAND_REFUSED',
             `Refused a mutating git command against a user repository: ${subcommand ?? '<none>'}`,
             {
               details: { rootPath: repo.rootPath, command: subcommand },
@@ -528,7 +537,7 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
         if (rejection !== null) {
           return Promise.reject(
             new InterlockError(
-              'GIT_COMMAND_FAILED',
+              'GIT_COMMAND_REFUSED',
               `Refused \`git ${subcommand ?? ''}\` against a user repository: ${rejection}`,
               {
                 details: { rootPath: repo.rootPath, command: subcommand },
@@ -543,7 +552,7 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
       if (usesReservedGlobalFlag(args)) {
         return Promise.reject(
           new InterlockError(
-            'GIT_COMMAND_FAILED',
+            'GIT_COMMAND_REFUSED',
             'Refused a git command carrying a reserved global flag',
             {
               details: { rootPath: repo.rootPath },
@@ -571,7 +580,7 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
       const startedAt = Date.now();
 
       return new Promise<GitResult>((resolve, reject) => {
-        execFile(
+        const child = execFile(
           gitPath,
           argv,
           {
@@ -674,6 +683,11 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
             );
           },
         );
+
+        // Nothing writes to the child, so hand it EOF instead of an open pipe.
+        // A command that reads stdin — `hash-object --stdin`, `update-index
+        // --stdin` — otherwise blocks until the timeout kills it.
+        child.stdin?.end();
       });
     },
   };

@@ -164,7 +164,7 @@ describe('git runner against a real repository', () => {
       const error = await rejection(slow.run(repo, ['status']));
       expect(error.code).toBe('GIT_COMMAND_FAILED');
       expect(error.infra).toBe(true);
-      // Every runner failure sets code and infra identically, so pin the branch.
+      // Every infrastructure failure carries this code and flag, so pin the branch.
       expect(error.message).toContain('did not finish within');
       expect(error.details.timeoutMs).toBe(100);
       // Proves it was killed rather than waited out.
@@ -325,6 +325,31 @@ describe('git runner against a real repository', () => {
     } finally {
       rmSync(worktree, { recursive: true, force: true });
     }
+  });
+
+  it('returns promptly from a command that reads stdin', async () => {
+    // Nothing writes to the child. Without an explicit EOF this blocks until the
+    // timeout kills it, so the assertion is the elapsed time as much as the hash.
+    const startedAt = Date.now();
+    const result = await runner.run(repo, ['hash-object', '--stdin']);
+
+    expect(result.exitCode).toBe(0);
+    // The empty blob: git read stdin, got EOF, and hashed nothing.
+    expect(result.stdout.trim()).toBe('e69de29bb2d1d6434b8b29ae775ad8c2e48c5391');
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it('refuses an index redirected to a sibling whose name begins with two dots', async () => {
+    // `relative()` returns `..bak` here, which a `..` prefix test reads as an
+    // escape from the very directory the path is inside.
+    const before = readFileSync(join(dir, '.git', 'index'));
+
+    const error = await rejection(
+      runner.run(repo, ['add', '-A'], { indexFile: join(dir, '..bak') }),
+    );
+    expect(error.message).toContain('resolves inside');
+    expect(existsSync(join(dir, '..bak'))).toBe(false);
+    expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
   });
 
   it('refuses the plumbing writers that a verb denylist would miss', async () => {

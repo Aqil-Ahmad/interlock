@@ -51,6 +51,10 @@ Set on every invocation:
   aliases, hooks or `merge.tool` cannot change behaviour or execute code.
 - A timeout and `maxBuffer`. A hung git must not wedge the daemon.
 
+Close the child's stdin. Nothing here writes to git, and a command that reads it
+— `hash-object --stdin`, `update-index --stdin` — otherwise blocks on an open
+pipe until the timeout kills it: 30 s instead of 8 ms.
+
 Use `-z` and NUL-separated parsing for anything listing paths. Git paths may
 contain spaces, quotes and newlines, and newline-splitting `git diff --name-only`
 is the classic way to corrupt a file list.
@@ -110,6 +114,10 @@ path; it does not follow a symlink, and on macOS `tmpdir()` returns
 `/var/folders/...` for a directory whose real path is `/private/var/folders/...`,
 so two names for the same file compare as different. The index file does not
 exist yet, so resolve its parent directory and rejoin the basename.
+
+Test containment on whole path segments. `relative('/repo', '/repo/..bak')`
+returns `'..bak'`, so a `..` prefix test calls a path inside the repository
+outside it — compare against `'..'` and `'..' + sep`.
 
 Check the redirection against the **shared** git directory too. A linked
 worktree's git dir is `<main>/.git/worktrees/<name>`, so its handle names neither

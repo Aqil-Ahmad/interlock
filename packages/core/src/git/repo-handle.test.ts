@@ -86,8 +86,9 @@ describe('createGitRunner refusals', () => {
 
   it.each(DANGEROUS_COMMANDS)('refuses `git %s` against a user repo', async (command) => {
     const error = await rejection(runner.run(userRepo, [command]));
-    expect(error.code).toBe('GIT_COMMAND_FAILED');
-    // Not an infra failure: a mutation reaching here is a programming error.
+    // Refused, not failed: a mutation reaching here is a bug in Interlock, not
+    // a broken environment and not a property of the repository.
+    expect(error.code).toBe('GIT_COMMAND_REFUSED');
     expect(error.infra).toBe(false);
   });
 
@@ -112,7 +113,7 @@ describe('createGitRunner refusals', () => {
     ['--exec-path', ['--exec-path=/evil', 'status']],
   ])('refuses a caller-supplied %s', async (_name, args) => {
     const error = await rejection(runner.run(userRepo, args));
-    expect(error.code).toBe('GIT_COMMAND_FAILED');
+    expect(error.code).toBe('GIT_COMMAND_REFUSED');
     expect(error.message).toContain('reserved global flag');
   });
 
@@ -222,6 +223,8 @@ describe('flags that outrank their verb', () => {
     // An indexFile does not buy these back: none of them writes only the index.
     const error = await rejection(runner.run(userRepo, args, { indexFile: '/elsewhere/index' }));
     expect(error.message).toContain('mutating');
+    // A refusal is a bug in Interlock, not a broken environment.
+    expect(error.code).toBe('GIT_COMMAND_REFUSED');
     expect(error.infra).toBe(false);
   });
 
