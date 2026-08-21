@@ -198,6 +198,16 @@ administrative file remains; two branches with no common ancestor; a path
 containing a space and a path containing a newline; a file that is binary; a
 rename plus an edit on the same path.
 
+Fixtures may assume POSIX. Tests shell out to `#!/bin/sh` spy scripts, set modes
+with `chmod`, and stub `HOME`; CI runs ubuntu and macOS only. Write the clearest
+POSIX fixture rather than a portable one, and if Windows is ever supported this
+is the decision to revisit — in one place, not per test.
+
+Git's help output is not a stable format. 2.39 prints `-n, --dry-run` where 2.55
+prints `-n, --[no-]dry-run`, so a test reading `git <verb> -h` must parse flag
+names out and treat `--[no-]x` as both `--x` and `--no-x`. Matching the
+surrounding prose passes on the local git and fails on whatever CI has.
+
 The suite in `packages/core/test/user-repo-untouched.test.ts` hashes worktree,
 index, refs, stash and config before and after a run. Any new git code path gets
 exercised by it. It is never skipped and never weakened — a failure there means

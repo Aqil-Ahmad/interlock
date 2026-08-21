@@ -16,7 +16,7 @@ import { createLogger } from '@interlock/shared';
 import type { LogRecord } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createGitRunner, SAFE_FLAGS } from '../src/git/repo-handle.js';
-import type { UserRepo } from '../src/git/repo-handle.js';
+import type { ShadowRepo, UserRepo } from '../src/git/repo-handle.js';
 import { rejection } from './support/rejection.js';
 
 /**
@@ -70,8 +70,10 @@ describe('git runner against a real repository', () => {
 
   it('passes an argument that looks like a flag through as a literal', async () => {
     const marker = join(dir, 'pwned');
-    // git refuses to create a ref whose name begins with `-`, so the injection
-    // is exercised the way it would actually arrive: as an argument value.
+    // One argv word, so this does not distinguish a shell from no shell — the
+    // metacharacter test above does that. What it pins is that an unknown flag
+    // reaches git verbatim and is rejected there, rather than being filtered,
+    // rewritten or split by the runner on the way.
     const result = await runner.run(repo, [
       'rev-parse',
       '--verify',
@@ -352,6 +354,109 @@ describe('git runner against a real repository', () => {
     expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
   });
 
+  it('does not run a program named by repository-local config', async () => {
+    // `core.fsmonitor` is executed during an ordinary `status`. Repository
+    // config is the one layer the environment scrubbing cannot reach, so a
+    // read command is an arbitrary-execution vector without the `-c` override.
+    const spy = join(dir, 'fsmonitor-spy.sh');
+    const marker = join(dir, 'fsmonitor-fired');
+    writeFileSync(spy, `#!/bin/sh\ntouch '${marker}'\nprintf '/\\0'\n`);
+    chmodSync(spy, 0o755);
+    git('config', 'core.fsmonitor', spy);
+    writeFileSync(join(dir, 'a.txt'), 'dirty\n');
+
+    const result = await runner.run(repo, ['status', '--porcelain']);
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("does not read the user's global config", async () => {
+    // `diff.external` runs a program during an ordinary `diff`, and unlike
+    // `core.fsmonitor` no `-c` override neutralises it — so this fails if
+    // `GIT_CONFIG_GLOBAL` stops pointing at nowhere, rather than passing on the
+    // strength of a different defence.
+    const home = mkdtempSync(join(tmpdir(), 'interlock-home-'));
+    const spy = join(home, 'spy.sh');
+    const marker = join(home, 'global-fired');
+    writeFileSync(spy, `#!/bin/sh\ntouch '${marker}'\n`);
+    chmodSync(spy, 0o755);
+    writeFileSync(join(home, '.gitconfig'), `[diff]\n\texternal = ${spy}\n`);
+    writeFileSync(join(dir, 'a.txt'), 'dirty\n');
+
+    vi.stubEnv('HOME', home);
+    try {
+      const result = await runner.run(repo, ['diff']);
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('writes to a shadow repository without running its hooks', async () => {
+    // The write path exists for this, and nothing else exercises it: a guard
+    // that refused everything rather than only user repos would pass the rest
+    // of this suite. A real clone, because a shadow of itself is not a shadow.
+    const shadowPath = mkdtempSync(join(tmpdir(), 'interlock-shadow-'));
+    execFileSync('git', ['clone', '-q', dir, shadowPath], { stdio: 'pipe' });
+    const shadow: ShadowRepo = {
+      kind: 'shadow',
+      rootPath: shadowPath,
+      gitDir: join(shadowPath, '.git'),
+      originPath: dir,
+    };
+    const marker = join(shadowPath, 'hook-fired');
+    writeFileSync(
+      join(shadowPath, '.git', 'hooks', 'pre-commit'),
+      `#!/bin/sh\ntouch '${marker}'\n`,
+    );
+    chmodSync(join(shadowPath, '.git', 'hooks', 'pre-commit'), 0o755);
+
+    try {
+      execFileSync('git', ['-C', shadowPath, 'config', 'user.name', 'Interlock Test'], {
+        stdio: 'pipe',
+      });
+      execFileSync('git', ['-C', shadowPath, 'config', 'user.email', 'test@example.invalid'], {
+        stdio: 'pipe',
+      });
+      writeFileSync(join(shadowPath, 'b.txt'), 'shadow work\n');
+
+      const staged = await runner.run(shadow, ['add', '-A']);
+      const committed = await runner.run(shadow, ['commit', '-m', 'speculative']);
+
+      expect(staged.exitCode).toBe(0);
+      expect(committed.exitCode).toBe(0);
+      const log = await runner.run(shadow, ['log', '--oneline', '-1']);
+      expect(log.stdout).toContain('speculative');
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(shadowPath, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a SIGTERM it did not send as a signal death, not a timeout', async () => {
+    // `execFile` sends SIGTERM on timeout, so the two look alike from the
+    // outside — except that Node sets `killed` only for a kill it issued
+    // itself. Reporting an OOM kill as a timeout sends whoever debugs it after
+    // an elapsed limit that never elapsed.
+    const suicidalGit = join(dir, 'suicidal-git');
+    writeFileSync(suicidalGit, '#!/bin/sh\nkill -TERM $$\n');
+    chmodSync(suicidalGit, 0o755);
+
+    const patient = createGitRunner({ gitPath: suicidalGit, timeoutMs: 30_000 });
+    const startedAt = Date.now();
+    const error = await rejection(patient.run(repo, ['status']));
+
+    expect(error.message).toContain('SIGTERM');
+    expect(error.message).not.toContain('did not finish');
+    expect(error.details.signal).toBe('SIGTERM');
+    expect(error.details.timeoutMs).toBeUndefined();
+    // The timeout never elapsed, so a report of one would be doubly wrong.
+    expect(Date.now() - startedAt).toBeLessThan(30_000);
+  });
+
   it('refuses the plumbing writers that a verb denylist would miss', async () => {
     writeFileSync(join(dir, 'staged.txt'), 'staged\n');
     git('add', 'staged.txt');
@@ -417,6 +522,32 @@ describe('git runner against a real repository', () => {
 });
 
 /**
+ * Long flags git lists for a verb, with `--[no-]x` recorded under both
+ * spellings.
+ *
+ * Git 2.39 prints `--dry-run` where 2.55 prints `--[no-]dry-run`, so the names
+ * have to be read out of the usage rather than matched inside it.
+ */
+function declaredLongFlags(usage: string): readonly string[] {
+  const declared = new Set<string>();
+  for (const token of usage.match(/--(?:\[no-\])?[a-zA-Z0-9][a-zA-Z0-9-]*/g) ?? []) {
+    if (!token.startsWith('--[no-]')) {
+      declared.add(token);
+      continue;
+    }
+    const name = token.slice('--[no-]'.length);
+    declared.add(`--${name}`);
+    declared.add(`--no-${name}`);
+  }
+  return [...declared];
+}
+
+/** Short flags git lists for a verb, as bare characters. */
+function declaredShortFlags(usage: string): readonly string[] {
+  return [...usage.matchAll(/(?:^|[\s,])-([a-zA-Z])(?=[\s,]|$)/gm)].map((match) => match[1]!);
+}
+
+/**
  * Every name in the allowlist must be a real flag of its verb. Long flags match
  * by prefix, so an invented name would license abbreviations git resolves to
  * something else, and a future git renaming one would widen the allowlist in
@@ -436,12 +567,17 @@ describe('the flag allowlist against real git', () => {
   it.each([...SAFE_FLAGS.keys()])('%s declares every flag the guard permits', (verb) => {
     const usage = help(verb);
     const policy = SAFE_FLAGS.get(verb)!;
+    const long = declaredLongFlags(usage);
+    const short = declaredShortFlags(usage);
+
+    // An empty parse would make every assertion below vacuously true.
+    expect(long.length, `${verb} usage parsed no flags`).toBeGreaterThan(0);
 
     for (const flag of policy.long) {
-      expect(usage, `${verb} ${flag}`).toMatch(new RegExp(`(^|[\\s,])${flag}($|[\\s,=[])`, 'm'));
+      expect(long, `${verb} ${flag}`).toContain(flag);
     }
     for (const char of policy.short) {
-      expect(usage, `${verb} -${char}`).toMatch(new RegExp(`(^|[\\s,])-${char}($|[\\s,])`, 'm'));
+      expect(short, `${verb} -${char}`).toContain(char);
     }
   });
 });

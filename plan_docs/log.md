@@ -4,6 +4,20 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-08-21
+
+- **Added:** a test pinning that a SIGTERM the runner did not send is reported as a signal death, not a timeout — a fake git that runs `kill -TERM $$`. Reviewed three times as a live bug and disproved twice by measurement; it is now a test, so it stops being an argument. Conflating the two branches fails it.
+- **Decided:** the test suite is POSIX-only, deliberately. Spy scripts are `#!/bin/sh`, modes come from `chmod`, and `HOME` is stubbed where Windows would need `USERPROFILE`; CI is ubuntu and macOS. `windowsHide` in the runner is cheap insurance, not a portability commitment.
+- **Checked, no change:** the reserved-global-flag refusal and the `GIT_COMMAND_REFUSED` code are covered — five flags including `-c core.hooksPath=`, asserted in `repo-handle.test.ts`. Deleting `usesReservedGlobalFlag` fails five tests. Reported missing twice by a reviewer reading only the integration file.
+
+- **Added:** tests for the config-injection defences, which were documented and unverified. A repo-local `core.fsmonitor` runs a program during `status`, and a global `diff.external` runs one during `diff`; both fire against unguarded git and are blocked here, each proven by removing the defence and watching the test fail.
+- **Learned:** the first version of the global-config test was vacuous. It used `core.fsmonitor`, which the runner's `-c core.fsmonitor=` already overrides at every layer, so it passed with `GIT_CONFIG_GLOBAL` deleted — it was re-testing the previous defence. A test for one defence has to use a vector no other defence covers.
+- **Added:** the first test that runs a mutating command against a real `ShadowRepo`. Nothing exercised the write path, so a guard that refused every repo rather than only user repos passed the whole suite.
+- **Found:** `diff.external` is a repository-local execution vector alongside `textconv`, and the source comment named only the latter. Same residual risk and the same bound — `.git/config` is not cloned.
+
+- **Fixed:** CI red on `dev`. The test asserting every allowlisted flag is a real git flag matched git's prose with a regex, and git changed the prose: 2.39 prints `-n, --dry-run` where 2.55 prints `-n, --[no-]dry-run`, so the literal `--all` never appears and four verbs failed on ubuntu while passing on the local 2.39. It now parses flag names out of the usage text and records `--[no-]x` under both spellings. Verified against the exact 2.55 output from the failed run, and re-checked that an invented flag still fails on both renderings.
+- **Learned:** a test that shells out to a tool is pinned to that tool's _output format_, not just its behaviour. Parse tokens, never match the sentence around them.
+
 ## 2026-08-20
 
 - **Fixed:** `isWithin` tested for a `..` prefix, so `relative()` returning `..bak` for a sibling _inside_ the directory read as an escape from it. An `indexFile` at `<repo>/..bak` passed the protection check and git would have written a stray file into the user's worktree. The escape has to be a whole `..` segment.

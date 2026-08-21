@@ -391,11 +391,11 @@ function buildEnv(indexFile: string | undefined): NodeJS.ProcessEnv {
   // Read commands must never take `index.lock`, or they stall the user's own git.
   env.GIT_OPTIONAL_LOCKS = '0';
   // Neutralises *global and system* config only. Repository-local `.git/config`
-  // still applies, and some of its keys run programs — `core.fsmonitor` during
-  // `status`, `diff.<driver>.textconv` during `diff`. The runner disables what it
-  // can by name below; textconv has no single key to clear, so it stays a
-  // residual risk, bounded today because `.git/config` is not cloned and so is
-  // not attacker-controlled.
+  // still applies, and several of its keys run programs — `core.fsmonitor`
+  // during `status`, `diff.external` and `diff.<driver>.textconv` during `diff`.
+  // The runner clears by name the two it can; the diff drivers have no single
+  // key to clear and stay a residual risk, bounded today because `.git/config`
+  // is not cloned and so is not attacker-controlled.
   env.GIT_CONFIG_GLOBAL = devNull;
   env.GIT_CONFIG_SYSTEM = devNull;
   env.GIT_CONFIG_NOSYSTEM = '1';
