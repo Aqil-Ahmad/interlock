@@ -14,8 +14,8 @@ every task here and is not repeated per task.
 
 ## Tasks
 
-- [ ] **Git runner**
-      **Files:** `packages/core/src/git/repo-handle.ts`, `repo-handle.test.ts`
+- [x] **Git runner**
+      **Files:** `packages/core/src/git/repo-handle.ts`, `repo-handle.test.ts`, `packages/core/test/git-runner.test.ts`
       **What:** the `GitRunner` implementation behind the existing interface.
 
   Build it on `execFile` with an argument array — never a shell, never string
@@ -23,17 +23,31 @@ every task here and is not repeated per task.
 <path>` rather than changing process directory, because the daemon watches
   several repos concurrently and `process.chdir` is global. Set
   `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0` and an empty
-  `GIT_CONFIG_GLOBAL` so a user's global config cannot change behaviour.
-  Enforce `isMutatingCommand` at runtime against a `UserRepo`, throwing
-  `GIT_COMMAND_FAILED` — the type split catches mistakes at compile time, this
-  catches them at run time. Redact stdout and stderr before they leave the
-  function. Apply a timeout and a max buffer; a hung `git` must not wedge the
-  daemon.
+  `GIT_CONFIG_GLOBAL` so a user's global config cannot change behaviour — noting
+  that this reaches global and system config only, and repository-local
+  `.git/config` still applies. Classify commands with an **allowlist** of
+  read-only operations, so an unfamiliar verb is refused by default; a denylist
+  fails open on `read-tree --reset` and `update-ref`, which rewrite the index
+  and move refs without looking like writes. Allowlist **flags** the same way for
+  the verbs where a flag decides the class: `read-tree -u` writes the working
+  tree, `--index-output` overrides the redirected index, `update-index
+--split-index` writes into `$GIT_DIR`, and `symbolic-ref -d` deletes a ref while
+  taking one operand. Match long flags by prefix, since git resolves any
+  unambiguous abbreviation, and short flags per character, since git bundles
+  them. Return output verbatim and redact
+  only what is logged — callers parse this output, and rewriting a path or an
+  object id that matches a secret pattern corrupts it silently. Apply a timeout
+  and a max buffer; a hung `git` must not wedge the daemon.
 
   **Done when:** a branch literally named `--upload-pack=touch /tmp/pwned`
-  cannot execute anything, proven by a test; every verb in
-  `MUTATING_GIT_COMMANDS` is refused against a `UserRepo` by a table-driven
-  test; and a command exceeding its timeout is killed and reported.
+  cannot execute anything, proven by a test; a table-driven test refuses a
+  corpus of writing verbs against a `UserRepo`, including the plumbing writers a
+  denylist misses; an unrecognised verb is refused by default; a writing flag is
+  refused under both its full spelling and its abbreviation, asserted against the
+  damage rather than the message; every flag in the allowlist is checked against
+  `git <verb> -h` so an invented name cannot widen it; and a command exceeding
+  its timeout is killed and reported as a timeout rather than as any other signal
+  death.
   **Constraints:** hard rule 1. This function is the only place git is invoked,
   so it is the only place the read-only promise can be broken.
 
@@ -59,8 +73,8 @@ every task here and is not repeated per task.
       **What:** `captureDirtyState` — turn uncommitted work into a tree object
       without touching the user's index.
 
-  Point `GIT_INDEX_FILE` at a temp file outside the repo, populate it, then
-  `write-tree`. Objects land in the user's object database, which is additive and
+  Pass `indexFile` to the git runner so staging targets a temp index outside the
+  repo, populate it, then `write-tree`. Objects land in the user's object database, which is additive and
   safe; the index never is. Untracked files are included, ignored files are not.
   A clean worktree returns the HEAD tree and does no work. The temp index is
   removed on the error path as well as the success path.

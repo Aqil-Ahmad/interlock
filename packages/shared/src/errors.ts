@@ -4,6 +4,10 @@
  * Every error carries a stable `code` so callers can react without matching on
  * messages, and an `infra` flag so environmental failures (Docker down,
  * toolchain missing) are never reported to users as conflict Findings.
+ *
+ * A refused operation is neither: `GIT_COMMAND_REFUSED` means Interlock's own
+ * code asked for something the safety rules forbid, so it is a bug here rather
+ * than a broken environment or a property of the repository under analysis.
  */
 
 export type InterlockErrorCode =
@@ -11,6 +15,7 @@ export type InterlockErrorCode =
   | 'REPO_NOT_FOUND'
   | 'REPO_NOT_GIT'
   | 'GIT_COMMAND_FAILED'
+  | 'GIT_COMMAND_REFUSED'
   | 'SHADOW_UNAVAILABLE'
   | 'MERGE_FAILED'
   | 'SANDBOX_UNAVAILABLE'

@@ -51,6 +51,10 @@ Set on every invocation:
   aliases, hooks or `merge.tool` cannot change behaviour or execute code.
 - A timeout and `maxBuffer`. A hung git must not wedge the daemon.
 
+Close the child's stdin. Nothing here writes to git, and a command that reads it
+— `hash-object --stdin`, `update-index --stdin` — otherwise blocks on an open
+pipe until the timeout kills it: 30 s instead of 8 ms.
+
 Use `-z` and NUL-separated parsing for anything listing paths. Git paths may
 contain spaces, quotes and newlines, and newline-splitting `git diff --name-only`
 is the classic way to corrupt a file list.
@@ -60,10 +64,10 @@ is the classic way to corrupt a file list.
 To snapshot uncommitted work, point git at a different index:
 
 ```ts
-// GIT_INDEX_FILE outside the repo; objects are additive and safe, the index is not
-const tmpIndex = join(tmpdir(), `interlock-${ulid()}.index`);
-await runner.run(repo, ['add', '-A'], { env: { GIT_INDEX_FILE: tmpIndex } });
-const tree = await runner.run(repo, ['write-tree'], { env: { GIT_INDEX_FILE: tmpIndex } });
+// An index outside the repo; objects are additive and safe, the index is not
+const tmpIndex = join(mkdtempSync(join(tmpdir(), 'interlock-')), 'index');
+await runner.run(repo, ['add', '-A'], { indexFile: tmpIndex });
+const tree = await runner.run(repo, ['write-tree'], { indexFile: tmpIndex });
 ```
 
 Writing objects into the user's object database is fine — it is append-only and
@@ -72,6 +76,53 @@ stashing or changing config is not, ever.
 
 Always remove the temp index on the error path too. Prefer `try/finally` over
 cleanup at the end of the happy path.
+
+`indexFile` is the runner's only environment capability, deliberately. The
+runner strips inherited `GIT_*` variables so a user's shell cannot redirect a
+command, and an open environment map would hand that redirection straight back
+to any caller.
+
+Redirecting the index protects the index and nothing else. Three flags walk
+straight past it:
+
+- `read-tree -u` updates the **working tree** to match the index it built, so a
+  redirected index only means it overwrites uncommitted edits from a different
+  tree.
+- `read-tree --index-output=<path>` overrides `GIT_INDEX_FILE`, so the path that
+  was validated is not the path git writes.
+- `update-index --split-index` leaves a `sharedindex.*` file in `$GIT_DIR`
+  whatever `GIT_INDEX_FILE` says.
+
+So classify flags with an **allowlist per verb**, never a list of dangerous ones.
+A denylist of flags fails open exactly as a denylist of verbs does, and none of
+these three reads like a write. Two properties of git's parser decide how to
+match:
+
+- **Any unambiguous prefix resolves.** `--index-out=`, `--index=` and `--i=` are
+  all `--index-output=`; `--d` is `--delete`. Match long flags by prefix, and
+  only against names git really has — an invented one licenses abbreviations
+  that resolve somewhere else.
+- **Short flags bundle.** `-um` enables `-u`, so match per character.
+
+The same letter means different things to different verbs — `-u` on `add` is
+`--update` and harmless, `-u` on `read-tree` writes the worktree — so the
+allowlist is keyed by verb, never global. Stop scanning at `--`: a file named
+`-u` is a path.
+
+Validate a redirection with `realpath`, never `resolve`. `resolve` normalises a
+path; it does not follow a symlink, and on macOS `tmpdir()` returns
+`/var/folders/...` for a directory whose real path is `/private/var/folders/...`,
+so two names for the same file compare as different. The index file does not
+exist yet, so resolve its parent directory and rejoin the basename.
+
+Test containment on whole path segments. `relative('/repo', '/repo/..bak')`
+returns `'..bak'`, so a `..` prefix test calls a path inside the repository
+outside it — compare against `'..'` and `'..' + sep`.
+
+Check the redirection against the **shared** git directory too. A linked
+worktree's git dir is `<main>/.git/worktrees/<name>`, so its handle names neither
+the main checkout nor `<main>/.git` — and the index a redirection must miss lives
+in both.
 
 ## Merging without a worktree
 
