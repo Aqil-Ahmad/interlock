@@ -55,6 +55,11 @@ Close the child's stdin. Nothing here writes to git, and a command that reads it
 — `hash-object --stdin`, `update-index --stdin` — otherwise blocks on an open
 pipe until the timeout kills it: 30 s instead of 8 ms.
 
+A repository's `.interlock.json` is attacker-controlled the same way its branch
+names are. Never build a regex from anything in it: a glob alternating wildcards
+with literals takes 20 seconds at 33 characters once translated, on the event
+loop, for every branch it is tried against. Scan instead.
+
 Use `-z` and NUL-separated parsing for anything listing paths. Git paths may
 contain spaces, quotes and newlines, and newline-splitting `git diff --name-only`
 is the classic way to corrupt a file list.

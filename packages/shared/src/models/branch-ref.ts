@@ -17,7 +17,12 @@ export interface BranchRef {
   readonly headSha: string;
   /** Worktree path when this branch is checked out somewhere; null for bare refs. */
   readonly worktreePath: string | null;
-  readonly dirty: DirtyState;
+  /**
+   * Uncommitted work in this branch's worktree, or `null` when it could not be
+   * read — a locked worktree on a volume that is gone, for instance. Distinct
+   * from a clean state, which is a positive observation.
+   */
+  readonly dirty: DirtyState | null;
   /** Owning agent session, when one has been identified. */
   readonly sessionId: AgentSessionId | null;
   readonly firstSeenAt: string;
@@ -44,7 +49,12 @@ export interface DirtyState {
  * Content identity of a branch for caching: head plus, when dirty, the snapshot
  * of uncommitted work. Runs with equal identities on both sides can reuse each
  * other's results.
+ *
+ * `null` when the worktree could not be read. Unobserved state has no identity
+ * to key a cache on — treating it as the head alone would let a result computed
+ * from a clean tree be reused for a branch whose tree is unknown.
  */
-export function contentIdentity(ref: BranchRef): string {
+export function contentIdentity(ref: BranchRef): string | null {
+  if (ref.dirty === null) return null;
   return ref.dirty.snapshotId === null ? ref.headSha : `${ref.headSha}+${ref.dirty.snapshotId}`;
 }

@@ -276,7 +276,7 @@ function subcommandIndexOf(args: readonly string[]): number {
 }
 
 /** The subcommand in a git argv, or `null` if there is none. */
-function subcommandOf(args: readonly string[]): string | null {
+export function subcommandOf(args: readonly string[]): string | null {
   const index = subcommandIndexOf(args);
   return index === -1 ? null : args[index]!;
 }
