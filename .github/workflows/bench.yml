@@ -2,26 +2,51 @@ name: Benchmarks
 
 # Budgets: <2% steady-state CPU, <60s to a textual finding, <3min to a typecheck finding.
 
+# Shared-runner numbers are regression smoke — did something get an order of
+# magnitude worse — and never the figures quoted as results. CPU steal on a
+# two-core runner makes a p95 describe the runner. Reported numbers come from a
+# quiet machine.
+#
+# `dev` rather than `main`: `main` is release-only, so a push trigger there
+# would find a regression at release time instead of at the commit. Weekly alone
+# leaves a regression unattributed for up to seven days.
 on:
+  push:
+    branches: [dev]
   schedule:
     - cron: '0 3 * * 1' # Mondays, 03:00 UTC
   workflow_dispatch:
 
+# Serialised rather than cancelled: a manual dispatch and the weekly run share a
+# ref, so cancel-in-progress would let one kill the other.
+concurrency:
+  group: ${{ github.workflow }}
+
+# The default token is writable. Nothing here writes to the repository, and a
+# workflow that cannot write cannot be turned into one that does by a step it
+# runs.
+permissions:
+  contents: read
+
 jobs:
   bench:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm bench
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bench-results
           path: eval/reports/bench-*.json
+          retention-days: 30
+          # `warn` only until there are benchmarks: `pnpm bench` prints the
+          # budgets and writes nothing, so `error` would fail every run.
           if-no-files-found: warn

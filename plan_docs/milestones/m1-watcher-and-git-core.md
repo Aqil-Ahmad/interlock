@@ -240,12 +240,21 @@ every task here and is not repeated per task.
   The active number is the one M2's scheduler budget is built on. Idle only
   proves the watcher is not spinning.
 
+  Measure both on a quiet machine, not in CI. A shared two-core runner with CPU
+  steal produces a p95 that describes the runner. CI benchmarking is regression
+  smoke — did something get an order of magnitude worse — and belongs on a
+  schedule with a wide noise floor, never as a required check on a pull
+  request.
+
 - [ ] **Daemon skeleton and localhost API**
       **Files:** `packages/daemon/src/daemon.ts`, `packages/daemon/src/api/`
       **What:** `createDaemon` wiring watcher → bus → store, and the routes
       already listed in `api/index.ts`.
 
-  Bind `127.0.0.1` explicitly — never `0.0.0.0`, never a bare port. Generate a
+  Bind `127.0.0.1` explicitly — never `0.0.0.0`, never a bare port. Take port 0
+  and read back what the OS assigned: vitest runs files in parallel workers, and
+  two of them binding the same fixed port is a flake that appears once, under
+  load, and never reproduces locally. Generate a
   bearer token at first start, store it 0600, require it on every route
   including the WebSocket upgrade. Shut down cleanly on SIGINT and SIGTERM:
   stop the watcher, drain in-flight work, close the store.
@@ -331,8 +340,16 @@ every task here and is not repeated per task.
   pass. `GIT_OPTIONAL_LOCKS=0` from the git runner task should prevent most of
   this; if it does not, that is worth knowing.
 
-  **Done when:** it fails loudly if any byte of user state changes, and it runs
-  in CI on every pull request.
+  Give it its own CI job, required, with no retry and a generous timeout. Its
+  failure means something wrote to a user's repository, which starts a different
+  conversation than a red test job — the check list is where that distinction
+  becomes visible. When it fails the first question is _what_ wrote, so print
+  which hashes diverged rather than only that they did; the failure output is
+  the diagnosis.
+
+  **Done when:** it fails loudly if any byte of user state changes, names the
+  state that changed, and runs in CI on every pull request as its own required
+  check.
   **Constraints:** this test is the enforcement mechanism for the project's
   central promise. It is never skipped, never weakened, and a failure is a
   release blocker rather than a flake to retry.

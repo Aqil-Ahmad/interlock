@@ -37,9 +37,21 @@
       **Done when:** each layer's contribution is separable. If a layer adds nothing, say so and consider removing it.
 
 - [ ] **Overhead benchmarks**
-      **Files:** `scripts/bench.ts`
+      **Files:** `scripts/bench.ts`, `.github/workflows/bench.yml`
       **What:** CPU, memory, disk, time to verdict per pair.
-      **Done when:** measured against the stated budgets — under 2% steady-state CPU, under 60s to a textual finding, under 3 minutes to a typecheck finding — with any miss reported honestly rather than quietly rebaselined.
+
+  `pnpm bench` prints the budgets and writes nothing today, so the workflow
+  uploads an artifact that never exists. Once it writes
+  `eval/reports/bench-<timestamp>.json`, flip `if-no-files-found` to `error`: a
+  green run that produced no report is the failure most worth hearing about, and
+  `warn` buries it in a job that passed. Add a step that prints last run's p50
+  and p95 beside this one's, so the job reads itself rather than requiring
+  someone to download two files and diff them.
+
+  Numbers quoted anywhere come from a quiet machine. CI benchmarking is
+  regression smoke only — a shared two-core runner with CPU steal produces a p95
+  that describes the runner.
+  **Done when:** measured against the stated budgets — under 2% steady-state CPU, under 60s to a textual finding, under 3 minutes to a typecheck finding — with any miss reported honestly rather than quietly rebaselined.
 
 - [ ] **Hardening pass**
       **What:** bug-fix freeze, docs completeness, demo recording.

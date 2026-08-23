@@ -5,27 +5,71 @@ on:
     branches: [main, dev]
   pull_request:
 
+# The default token is writable. Nothing here writes to the repository, and a
+# workflow that cannot write cannot be turned into one that does by a step it
+# runs.
+permissions:
+  contents: read
+
+# Superseding a pull request push is free; superseding a push to a shared branch
+# cancels a run mid-test and leaves that commit unverified.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  verify:
-    name: lint · typecheck · test (node ${{ matrix.node }}, ${{ matrix.os }})
+  # Building, linting, formatting and types are properties of the source, not of
+  # the machine reading it, so they run once rather than once per matrix cell.
+  static:
+    name: build · lint · format · typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The script `pnpm verify` runs locally, so the two cannot drift into
+      # checking different things while both report green. It builds first:
+      # packages resolve each other through `exports` maps pointing at built
+      # output, which type-aware linting and typechecking both need.
+      - name: Verify
+        run: pnpm verify:static
+
+  test:
+    name: test (node ${{ matrix.node }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        # Linux and macOS only; Windows is out of scope.
-        os: [ubuntu-latest, macos-latest]
         # 24 is the floor declared in `engines`; 26 is what development runs on.
-        node: ['24', '26']
+        # macOS earns one cell rather than a full axis: it is where path
+        # canonicalisation differs — `/var` is a symlink to `/private/var` and
+        # git resolves it — and where the watcher will use FSEvents. Nothing
+        # else here is OS-dependent, and macOS minutes bill at ten times Linux.
+        include:
+          - os: ubuntu-latest
+            node: '24'
+          - os: ubuntu-latest
+            node: '26'
+            coverage: true
+          - os: macos-latest
+            node: '26'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -33,35 +77,51 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # Packages resolve each other through their `exports` maps, which point at
-      # built output, so type-aware linting and typechecking both need this first.
-      - name: Build
-        run: pnpm build
+      # The flag allowlist is asserted against whatever git the runner image
+      # ships, and git has changed how `-h` renders between versions. When that
+      # assertion fails, the version is the first thing to look at.
+      - name: git version
+        run: git --version
 
-      - name: Lint
-        run: pnpm lint
-
-      - name: Format check
-        run: pnpm format:check
-
-      - name: Typecheck
-        run: pnpm typecheck
-
+      # Vitest resolves the workspace packages to their sources, so the suite
+      # needs no prior build.
       - name: Test
+        if: ${{ !matrix.coverage }}
         run: pnpm test
+
+      # The floors are global, so one cell decides them. Enforcing the same
+      # numbers on three platforms buys nothing and, once any branch is
+      # platform-conditional, produces a floor that passes on one and fails on
+      # another. This runs what `pnpm verify` runs.
+      - name: Test with coverage
+        if: ${{ matrix.coverage }}
+        run: pnpm test:coverage
 
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+
+      # No install: `pnpm audit` resolves advisories from `pnpm-lock.yaml` and
+      # never reads `node_modules`.
+      #
       # Reported, not a merge gate: an upstream advisory should not block a
-      # change that has nothing to do with it.
-      - run: pnpm audit --audit-level high
+      # change that has nothing to do with it. No scope filter — this repository
+      # ships no runtime dependencies yet, and a compromised dev dependency runs
+      # here with the workflow's token.
+      - name: Audit
+        id: audit
         continue-on-error: true
+        run: pnpm audit --audit-level high
+
+      # A job that can only be green reports to nobody. The annotation surfaces
+      # on the run summary; the findings themselves are in the step above.
+      - name: Report advisories
+        if: steps.audit.outcome == 'failure'
+        run: echo "::warning title=Dependency advisories::pnpm audit reported advisories at high or above - see the Audit step"

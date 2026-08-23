@@ -50,6 +50,8 @@ silently skip one.
 - One session, one scoped task. Keep diffs reviewable.
 - Branch off `dev` and target `dev`. `main` is release-only — never commit to it or open a pull request against it.
 - Done means code + tests + docs together, `pnpm verify` green, and a CHANGELOG entry if the change is user-visible.
+- CI runs the same scripts `pnpm verify` runs. Add a check to the script, not to the workflow, or the two drift into checking different things while both report green.
+- Coverage floors ratchet upward only. Raise them when a milestone lands; never lower one to get a change through.
 - A function that is declared but not yet written throws `notImplemented(what)`. Keep it that way — returning an empty result would let a missing implementation look like "no conflicts found". A module for work that has not started does not get a stub; it gets a task in `plan_docs/`.
 
 ## Skills
