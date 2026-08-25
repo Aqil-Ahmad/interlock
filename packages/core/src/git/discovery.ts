@@ -1,7 +1,25 @@
 import { existsSync } from 'node:fs';
+import { constants } from 'node:fs';
+import { open } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
-import { InterlockError, isInterlockError, ulid } from '@interlock/shared';
-import type { BranchRef, DirtyState, Repo, RepoId, BranchRefId } from '@interlock/shared';
+import {
+  InterlockError,
+  isInterlockError,
+  MAX_IGNORE_PATTERN_LENGTH,
+  MAX_REPO_CONFIG_BYTES,
+  parseRepoConfigOverride,
+  REPO_CONFIG_FILENAME,
+  ulid,
+} from '@interlock/shared';
+import type {
+  BranchRef,
+  DirtyState,
+  Repo,
+  RepoConfigOverride,
+  RepoId,
+  BranchRefId,
+} from '@interlock/shared';
 import { subcommandOf } from './repo-handle.js';
 import type { AnyRepo, GitResult, GitRunner, UserRepo } from './repo-handle.js';
 
@@ -160,6 +178,7 @@ async function resolveDefaultBranch(repo: UserRepo, runner: GitRunner): Promise<
  */
 export async function describeRepo(repo: UserRepo, options: DescribeOptions): Promise<Repo> {
   const defaultBranch = await resolveDefaultBranch(repo, options.runner);
+  const config = await readRepoConfig(repo.rootPath);
   const now = new Date().toISOString();
   const id = ulid<RepoId>();
 
@@ -168,10 +187,124 @@ export async function describeRepo(repo: UserRepo, options: DescribeOptions): Pr
     rootPath: repo.rootPath,
     defaultBranch,
     shadowPath: shadowPathFor(id, options.dataDir),
-    config: {},
+    config,
     discoveredAt: now,
     lastSeenAt: now,
   };
+}
+
+/**
+ * Flags for opening a file whose path and contents the repository controls.
+ *
+ * POSIX-only, in line with the rest of this suite. Both flags are security
+ * decisions, and on a platform lacking them `O_RDONLY | undefined` degrades to
+ * a plain read that follows symlinks and blocks on fifos — so their absence is
+ * refused here rather than discovered as a missing defence.
+ */
+const OPEN_UNTRUSTED = ((): number => {
+  const { O_NOFOLLOW, O_NONBLOCK, O_RDONLY } = constants;
+  if (O_NOFOLLOW === undefined || O_NONBLOCK === undefined) {
+    throw new InterlockError(
+      'CONFIG_INVALID',
+      'This platform does not support opening a file without following symlinks',
+      { remedy: 'Run Interlock on Linux or macOS.', infra: true },
+    );
+  }
+  return O_RDONLY | O_NONBLOCK | O_NOFOLLOW;
+})();
+
+/**
+ * Read the repository's override file, or an empty override when there is none.
+ *
+ * Malformed is refused rather than ignored. The file decides which branches go
+ * unexamined, so falling back to the defaults would have Interlock watch work
+ * the repository asked it to leave alone, and say nothing about why.
+ *
+ * The path is repository content and every part of opening it is adversarial.
+ * `O_NONBLOCK` is what makes the rest reachable: opening a fifo without it
+ * blocks until a writer appears, so a `.interlock.json` created with `mkfifo`
+ * wedges discovery before any check runs. `O_NOFOLLOW` refuses a symlink
+ * outright — following one reads a file outside the repository, and the key
+ * names of whatever it finds come back in the error. `isFile` then rejects what
+ * remains: a directory, or a device whose size reads as zero.
+ *
+ * The read is bounded rather than trusted to `st_size`, which understates the
+ * readable length of a procfs file and reads as zero for every one of them.
+ */
+async function readRepoConfig(rootPath: string): Promise<RepoConfigOverride> {
+  const path = join(rootPath, REPO_CONFIG_FILENAME);
+
+  let handle;
+  try {
+    handle = await open(path, OPEN_UNTRUSTED);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? null;
+    if (code === 'ENOENT') return {};
+    if (code === 'ELOOP') {
+      throw configProblem(path, `${REPO_CONFIG_FILENAME} must not be a symlink`);
+    }
+    throw configProblem(path, `${REPO_CONFIG_FILENAME} could not be opened`, code);
+  }
+
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw configProblem(path, `${REPO_CONFIG_FILENAME} is not a regular file`);
+    }
+    return parseRepoConfigOverride(await readCapped(handle, path), path);
+  } catch (error) {
+    // A read that fails midway is still a problem with this file, and shaping
+    // it here keeps every exit from this function the same kind of error.
+    if (isInterlockError(error)) throw error;
+    throw configProblem(
+      path,
+      `${REPO_CONFIG_FILENAME} could not be read`,
+      (error as NodeJS.ErrnoException).code ?? null,
+    );
+  } finally {
+    // A failure to close a read handle is not actionable, and letting it throw
+    // here would replace the diagnostic this function exists to produce.
+    await handle.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Read a file whose length is not known in advance.
+ *
+ * One byte past the ceiling is enough to know the file exceeds it, and reading
+ * in a loop is what makes the bound real: a single `read` may return short even
+ * when more is available.
+ */
+async function readCapped(handle: FileHandle, path: string): Promise<string> {
+  const buffer = Buffer.allocUnsafe(MAX_REPO_CONFIG_BYTES + 1);
+  let filled = 0;
+
+  while (filled < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, filled);
+    if (bytesRead === 0) break;
+    filled += bytesRead;
+  }
+
+  if (filled > MAX_REPO_CONFIG_BYTES) {
+    throw configProblem(
+      path,
+      `${REPO_CONFIG_FILENAME} is larger than ${String(MAX_REPO_CONFIG_BYTES)} bytes`,
+    );
+  }
+  return buffer.subarray(0, filled).toString('utf8');
+}
+
+/**
+ * A problem with the override file itself rather than with its contents.
+ *
+ * Not `infra`: an unreadable file inside a watched repository is repository
+ * state, and the infra flag is for a broken environment.
+ */
+function configProblem(path: string, message: string, code: string | null = null): InterlockError {
+  return new InterlockError('CONFIG_INVALID', message, {
+    details: { path, code },
+    remedy: `Replace ${path} with a readable JSON file, or delete it to fall back to the global configuration.`,
+  });
 }
 
 function shadowPathFor(id: RepoId, dataDir: string): string {
@@ -298,9 +431,6 @@ async function readDirtyState(worktreePath: string, runner: GitRunner): Promise<
   };
 }
 
-/** Longest ignore pattern accepted; beyond this the glob is not a glob. */
-const MAX_PATTERN_LENGTH = 200;
-
 /**
  * Match a branch name against a glob supporting `*` and `?`.
  *
@@ -323,7 +453,7 @@ const MAX_PATTERN_LENGTH = 200;
  * this only matters if the matcher is reused on something else.
  */
 function matchesGlob(name: string, pattern: string): boolean {
-  if (pattern.length > MAX_PATTERN_LENGTH) return false;
+  if (pattern.length > MAX_IGNORE_PATTERN_LENGTH) return false;
 
   const subject = [...name];
   const glob = [...pattern];

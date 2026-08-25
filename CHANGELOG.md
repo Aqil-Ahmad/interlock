@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Per-repository configuration: `.interlock.json` in a repository root overrides `ignore`, `ignoreBranches` and `toolchain` commands. Validated against the schema, with unknown keys and malformed files refused rather than ignored.
 - Monorepo scaffold: pnpm workspaces, strict TypeScript with project references, ESLint (flat config, type-aware, with layering rules), Prettier, Vitest, GitHub Actions CI.
 - `@interlock/shared`: data models (Repo, BranchRef, AgentSession, ChangeSet, MergePair, SpeculativeRun, Finding, Advice, EventRecord), event vocabulary, config schema with validation, typed errors, structured logging with secret redaction, ULID generation.
 - `@interlock/core`: `UserRepo`/`ShadowRepo` handles, the git runner enforcing them, the `Analyzer` contract, finding ranking; contracts for git discovery, dirty-state capture and speculative merge.

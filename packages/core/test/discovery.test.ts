@@ -1,8 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ulid } from '@interlock/shared';
+import { MAX_REPO_CONFIG_BYTES, ulid } from '@interlock/shared';
 import type { RepoId } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { describeRepo, listBranchRefs, mergeBase, openUserRepo } from '../src/git/discovery.js';
@@ -280,6 +288,123 @@ describe('repo discovery', () => {
       } finally {
         rmSync(plain, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('the repository override file', () => {
+    const configPath = (): string => join(root, '.interlock.json');
+
+    it('reads no file as no overrides', async () => {
+      expect((await describeRepo(repo, options)).config).toEqual({});
+    });
+
+    it('reads a valid file into the repo', async () => {
+      writeFileSync(
+        configPath(),
+        JSON.stringify({ ignoreBranches: ['release/*'], toolchain: { test: 'pnpm test' } }),
+      );
+
+      expect((await describeRepo(repo, options)).config).toEqual({
+        ignoreBranches: ['release/*'],
+        toolchain: { test: 'pnpm test' },
+      });
+    });
+
+    it('refuses a malformed file and names what is wrong', async () => {
+      // Falling back to the defaults would watch branches the repository asked
+      // Interlock to leave alone, and say nothing about why.
+      writeFileSync(configPath(), '{ "ignoreBranches": "release/*" }');
+
+      const error = await rejection(describeRepo(repo, options));
+
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(error.message).toContain('ignoreBranches must be an array of strings');
+      expect(error.remedy).toContain('.interlock.json');
+    });
+
+    it('refuses something that is not a regular file', async () => {
+      // A size check cannot catch a directory, a fifo, or a symlink to a
+      // character device whose size reads as zero and whose read never ends.
+      mkdirSync(configPath());
+
+      const error = await rejection(describeRepo(repo, options));
+
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(error.message).toContain('not a regular file');
+    });
+
+    it('refuses a fifo instead of blocking on it', async () => {
+      // `open` on a fifo waits for a writer, so without O_NONBLOCK this never
+      // reaches a check — discovery stops rather than fails. The assertion is
+      // that it resolves at all; the vitest timeout is the real detector.
+      execFileSync('mkfifo', [configPath()], { stdio: 'pipe' });
+
+      const error = await rejection(describeRepo(repo, options));
+
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(error.message).toContain('not a regular file');
+    });
+
+    it('refuses a symlink rather than reading what it points at', async () => {
+      // Following one reads a file outside the repository, and the key names of
+      // whatever is found come back in the error as a structure oracle.
+      const outside = join(base, 'outside.json');
+      writeFileSync(outside, JSON.stringify({ auths: { registry: { auth: 'c2VjcmV0' } } }));
+      symlinkSync(outside, configPath());
+
+      const error = await rejection(describeRepo(repo, options));
+
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(error.message).toContain('must not be a symlink');
+      expect(JSON.stringify(error)).not.toContain('auths');
+    });
+
+    it('bounds the read rather than trusting the reported size', async () => {
+      // `st_size` understates procfs files and reads as zero for all of them,
+      // so the ceiling has to be enforced by how much is read.
+      writeFileSync(configPath(), 'x'.repeat(MAX_REPO_CONFIG_BYTES + 1));
+
+      const error = await rejection(describeRepo(repo, options));
+
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(error.message).toContain('larger than');
+    });
+
+    it('reads a file exactly at the ceiling', async () => {
+      // Padded with whitespace, not with a longer pattern: the ceiling bounds
+      // the file and a separate limit bounds each pattern.
+      const document = '{"ignore":["dist"]}';
+      writeFileSync(configPath(), document + ' '.repeat(MAX_REPO_CONFIG_BYTES - document.length));
+
+      expect((await describeRepo(repo, options)).config.ignore).toEqual(['dist']);
+    });
+
+    it('keeps the errno when the file cannot be opened', async () => {
+      // EACCES, EMFILE and ENOSPC all reach the same branch and are not the
+      // same problem to whoever has to fix one.
+      writeFileSync(configPath(), '{}');
+      chmodSync(configPath(), 0o000);
+
+      try {
+        const error = await rejection(describeRepo(repo, options));
+        expect(error.code).toBe('CONFIG_INVALID');
+        expect(error.message).toContain('could not be opened');
+        expect(error.details.code).toBe('EACCES');
+        // Repository state, not a broken environment.
+        expect(error.infra).toBe(false);
+      } finally {
+        chmodSync(configPath(), 0o644);
+      }
+    });
+
+    it('reads the file in the main worktree when opened through a linked one', async () => {
+      // Both handles name one repository, so both must see one configuration.
+      writeFileSync(configPath(), JSON.stringify({ ignoreBranches: ['wip-*'] }));
+      const viaWorktree = await openUserRepo(join(base, 'wt-feature'), options);
+
+      expect((await describeRepo(viaWorktree, options)).config).toEqual({
+        ignoreBranches: ['wip-*'],
+      });
     });
   });
 

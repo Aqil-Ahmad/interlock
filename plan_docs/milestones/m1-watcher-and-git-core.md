@@ -87,7 +87,7 @@ every task here and is not repeated per task.
   yields the same handle as opening it at its root; and a pathological ignore
   pattern completes in milliseconds.
 
-- [ ] **Repo config override**
+- [x] **Repo config override**
       **Files:** `packages/core/src/git/discovery.ts`, `packages/shared/src/config.ts`
       **What:** read `.interlock.json` from the repository root into `Repo.config`.
 
@@ -98,6 +98,11 @@ every task here and is not repeated per task.
 
   **Done when:** a repo with no file, a valid file and a malformed file each
   produce the right result, and the malformed one names what is wrong.
+
+  Reading the file into `Repo.config` is where this task ends. Neither
+  `config.ignoreBranches` nor `config.ignore` is applied anywhere yet —
+  `listBranchRefs` takes its own option and the watcher does not exist — so a
+  repository's rules are stored and not yet honoured. The watcher wires both.
 
 - [ ] **Dirty-state snapshots**
       **Files:** `packages/core/src/git/worktree.ts`
@@ -178,6 +183,10 @@ every task here and is not repeated per task.
   `(repoId, ref)`. Keying on the id instead would insert a duplicate row every
   time the watcher re-lists a branch.
 
+  `Repo.config` is a stored copy of a file that changes underneath it, so the
+  row is a cache rather than the truth. Whatever re-reads `.interlock.json` has
+  to be able to update it in place, keyed on `rootPath` like the rest.
+
   `BranchRef.dirty` is nullable, and `null` — the worktree could not be read —
   must survive the round trip as itself rather than as a clean state. A schema
   that folds the two together loses the distinction permanently, since nothing
@@ -193,6 +202,30 @@ every task here and is not repeated per task.
       **Files:** `packages/daemon/src/watcher/`
       **What:** filesystem events plus git ref changes, debounced, publishing
       `worktree.changed`.
+
+  Apply the repository's own rules: `config.ignoreBranches` into
+  `listBranchRefs`, and `config.ignore` to the paths this watches. Both are read
+  into `Repo.config` already and applied nowhere, so until this lands a
+  repository that asked to be left alone is watched anyway.
+
+  `*` in a glob crosses `/` here, so `src/*` matches `src/deep/file.ts`. That is
+  right for branch names and wrong for the path intuition `.gitignore` teaches,
+  so `config.ignore` needs a path-aware matcher or a documented difference —
+  not the branch matcher reused silently.
+
+  **Re-read `.interlock.json` when it changes.** `describeRepo` reads it once,
+  at first sighting, and the stored `Repo.config` is the last word after that —
+  so a repository that adds a branch to `ignoreBranches` mid-session is never
+  honoured, and changing an override means deleting the stored row. The two
+  failure modes are asymmetric in the wrong direction: refusing a malformed file
+  is loud and reachable once, while serving a stale one is silent and permanent.
+  A refusal on re-read keeps the last good config and surfaces the problem; it
+  must not take the repository out of the watch set.
+
+  **Contain a failing repository to itself.** `describeRepo` throws
+  `CONFIG_INVALID` for one repository's broken file, and discovery reads
+  repositories in a sweep. One bad `.interlock.json` must not stop the others,
+  the same way one unreachable worktree does not stop the branches beside it.
 
   Ignore `.git/` internals except `refs/` and `HEAD`, and honour `.gitignore` —
   watching `node_modules` is the difference between 2% CPU and 100%. Debounce

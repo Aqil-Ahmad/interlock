@@ -34,6 +34,7 @@ _which branch caused which half_ of each one.
       **Files:** `packages/core/src/sandbox/toolchain.ts`
       **What:** identify the project's package manager and typechecker from `package.json` and `tsconfig.json`, with a per-repo config override.
       **Done when:** pnpm, npm and yarn TypeScript projects are detected, and anything else reports `TOOLCHAIN_UNSUPPORTED` rather than guessing.
+      **Constraints:** the override's commands come from `.interlock.json`, which is repository content — a command string chosen by whoever writes the repository. Validation there proves it is a string and nothing more. It runs in the sandbox or it does not run.
 
 - [ ] **Typecheck runner**
       **Files:** `packages/core/src/analyzers/typecheck.ts`
