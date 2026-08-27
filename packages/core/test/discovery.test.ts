@@ -469,6 +469,22 @@ describe('repo discovery', () => {
       expect(await mergeBase(repo, 'main', 'unrelated', options)).toBeNull();
     });
 
+    it.each([
+      ['a flag-shaped revision', '--is-ancestor'],
+      ['an empty revision', ''],
+    ])('refuses %s rather than letting git read it as an option', async (_name, value) => {
+      // `--is-ancestor` makes merge-base an exit-code test that prints nothing,
+      // which reads back as "no common ancestor" — a pair dropped in silence.
+      for (const args of [
+        [value, 'feature'],
+        ['main', value],
+      ] as const) {
+        const error = await rejection(mergeBase(repo, args[0], args[1], options));
+        expect(error.code).toBe('GIT_COMMAND_REFUSED');
+        expect(error.infra).toBe(false);
+      }
+    });
+
     it('raises for a ref that does not exist rather than reporting no merge-base', async () => {
       // git exits 1 for no common ancestor and 128 for an unresolvable ref.
       // Collapsing the two drops the pair from analysis in silence.

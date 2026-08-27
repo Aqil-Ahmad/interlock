@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { InterlockError, notImplemented } from '@interlock/shared';
-import { runRequired } from './repo-handle.js';
+import { assertObjectId, runRequired } from './repo-handle.js';
 import type { GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
 import { parseStatus } from './status.js';
 
@@ -30,9 +30,6 @@ import { parseStatus } from './status.js';
  * 32 KB, so a port revisits this number rather than discovering it.
  */
 export const MAX_PATHSPEC_BYTES = 96 * 1024;
-
-/** Object ids as git writes them: SHA-1 or SHA-256 length, and nothing between. */
-const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
 /**
  * What a capture is allowed to look at.
@@ -136,7 +133,7 @@ export async function captureDirtyState(
     // running `git gc --prune=now` between snapshots can collect the tree this
     // capture means to extend. Losing the base is a reason to take a full
     // snapshot, not a reason to fail.
-    assertObjectId(scope.baseTreeOid);
+    assertObjectId(scope.baseTreeOid, 'baseTreeOid');
     assertInsideWorktree(scope.paths);
     const base = await resolveTree(worktree, runner, `${scope.baseTreeOid}^{tree}`);
     if (base !== null) {
@@ -223,20 +220,6 @@ async function changedPaths(
   }
 
   return [...reported];
-}
-
-/**
- * A base tree comes back from storage, and a revision is interpolated into a
- * `rev-parse` argument. Checking its shape keeps a value that drifted — or
- * arrived flag-shaped — from being handed to git as one.
- */
-function assertObjectId(oid: string): void {
-  if (!OBJECT_ID.test(oid)) {
-    throw new InterlockError('GIT_COMMAND_REFUSED', 'Base tree is not an object id', {
-      details: { baseTreeOid: oid },
-      remedy: 'Pass the tree recorded by a previous snapshot.',
-    });
-  }
 }
 
 /**

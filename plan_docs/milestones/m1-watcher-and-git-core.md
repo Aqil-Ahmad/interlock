@@ -138,25 +138,29 @@ every task here and is not repeated per task.
     rather than an empty index also keeps a file that is tracked despite
     matching `.gitignore`, which a rebuild from the worktree alone would drop.
 
-  Filter the reported paths through `status --porcelain -z` **against the seeded
-  index**, reading only the **worktree column**. The index column compares that
-  index against `HEAD`, so a change already absorbed into the base tree keeps
-  reporting forever — a deleted file reports `D` there in every later batch, and
-  restaging it finds nothing on disk and nothing in the index, which `git add`
-  treats as fatal. Not the user's index either. Against the user's index the question is "is this
-  path dirty relative to HEAD", and a file the user reverted answers no — so the
-  capture keeps a base tree still holding the edit, wrong rather than stale, the
-  same failure the seed was fixed to avoid. Seed first, then filter.
+  Filter the reported paths through `status --porcelain -z` against the seeded
+  index, reading only the worktree column. Two separate mistakes live here.
+  Asking the _user's_ index answers "is this path dirty relative to HEAD", and a
+  file the user reverted answers no — so the capture keeps a base tree still
+  holding the edit, wrong rather than stale, the failure the seed was fixed to
+  avoid. Reading the _index column_ of the right index is the mirror: it
+  compares that index against `HEAD`, so a deletion already absorbed reports
+  `D` in every later batch, and restaging it finds nothing on disk and nothing
+  in the index, which `git add` treats as fatal. Seed first, filter second, and
+  read the worktree column only.
   `git add` refuses a path it is told to add that is ignored, and fails outright
   on one matching nothing — a file created and deleted inside a debounce window.
   Both are ordinary watcher output and both would fail the capture; `status`
   reports neither. Repository config is the layer environment scrubbing cannot
   reach, and `core.splitIndex` puts a `sharedindex.*` file in the user's
   `$GIT_DIR` on every index write whatever `GIT_INDEX_FILE` says — so a fixture
-  setting it is part of proving the repository was left alone. Both halves of a rename have to be reported, because a
-  pathspec narrows git's rename detection too. Paths are worktree-relative, and
-  one that escapes is refused by name rather than filtered away or left to fail
-  as an error about git.
+  setting it is part of proving the repository was left alone.
+
+  Both halves of a rename have to be reported, because a pathspec narrows git's
+  rename detection too. Paths are worktree-relative, and one that escapes is
+  refused by name rather than filtered away or left to fail as an error about
+  git — and they reach git as literal names, since a leading `:` would otherwise
+  be read as pathspec magic.
 
   Objects written this way are unreferenced until something points at them, so a
   user running `git gc --prune=now` can collect a tree Interlock is still holding.

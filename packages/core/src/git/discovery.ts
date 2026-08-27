@@ -21,7 +21,7 @@ import type {
   RepoId,
   BranchRefId,
 } from '@interlock/shared';
-import { runRequired } from './repo-handle.js';
+import { assertRevision, runRequired } from './repo-handle.js';
 import type { GitRunner, UserRepo } from './repo-handle.js';
 
 /**
@@ -566,7 +566,10 @@ export async function mergeBase(
   b: string,
   options: DiscoveryOptions,
 ): Promise<string | null> {
-  const result = await options.runner.run(repo, ['merge-base', a, b]);
+  assertRevision(a, 'a');
+  assertRevision(b, 'b');
+
+  const result = await options.runner.run(repo, ['merge-base', a, b, '--']);
   // Exit 1 is "no common ancestor". Anything else is a ref git could not
   // resolve, and reporting that as a missing merge-base would drop the pair
   // from analysis without saying why.
