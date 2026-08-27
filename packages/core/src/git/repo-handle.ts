@@ -388,6 +388,16 @@ function buildEnv(indexFile: string | undefined): NodeJS.ProcessEnv {
 
   // Fail instead of blocking on a credential prompt that has no terminal.
   env.GIT_TERMINAL_PROMPT = '0';
+  // Paths reaching git here are file paths, never pathspec expressions. Without
+  // this a leading `:` turns one into magic — `:(exclude)src` silently drops a
+  // file from a snapshot, and a file genuinely named `:(top)x` can never be
+  // named at all.
+  //
+  // Repository-wide policy, not one caller's accommodation: it applies to every
+  // command the runner runs. A call site wanting a glob or a magic pathspec
+  // would silently match nothing rather than fail, so that call site has to
+  // expand the pattern itself.
+  env.GIT_LITERAL_PATHSPECS = '1';
   // Read commands must never take `index.lock`, or they stall the user's own git.
   env.GIT_OPTIONAL_LOCKS = '0';
   // Neutralises *global and system* config only. Repository-local `.git/config`
@@ -423,8 +433,14 @@ function gitFailed(
  * avoid the user's index, and pointing it back at `.git/index` would write the
  * very file the whole design protects.
  */
-function indexRedirectionProblem(repo: UserRepo, indexFile: string | undefined): string | null {
-  if (indexFile === undefined) return 'it writes the index, and no indexFile was given';
+function indexRedirectionProblem(
+  repo: UserRepo,
+  kind: CommandKind,
+  indexFile: string | undefined,
+): string | null {
+  if (indexFile === undefined) {
+    return kind === 'index-only' ? 'it writes the index, and no indexFile was given' : null;
+  }
   if (!isAbsolute(indexFile)) return 'indexFile must be an absolute path';
 
   const target = realTargetOf(indexFile);
@@ -532,8 +548,12 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
         );
       }
 
-      if (repo.kind === 'user' && kind === 'index-only') {
-        const rejection = indexRedirectionProblem(repo, runOptions.indexFile);
+      // Whenever a redirection is present, not only for the class that writes
+      // one. A read-only verb carrying `indexFile` would otherwise skip the
+      // check entirely, and `status` against a redirected index is how a
+      // snapshot asks what changed relative to the tree it is extending.
+      if (repo.kind === 'user' && (kind === 'index-only' || runOptions.indexFile !== undefined)) {
+        const rejection = indexRedirectionProblem(repo, kind, runOptions.indexFile);
         if (rejection !== null) {
           return Promise.reject(
             new InterlockError(
@@ -573,6 +593,11 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
         '--no-pager',
         '-c',
         'core.fsmonitor=',
+        '-c',
+        // A repository that enables the split index makes every index write
+        // leave a `sharedindex.*` file in `$GIT_DIR` — the user's, whatever
+        // `GIT_INDEX_FILE` says. Redirecting the index does not move it.
+        'core.splitIndex=false',
         '-c',
         `core.hooksPath=${devNull}`,
         ...args,
@@ -691,4 +716,34 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
       });
     },
   };
+}
+
+/**
+ * Run a command whose non-zero exit means the repository is unusable.
+ *
+ * The runner returns a non-zero exit as a result rather than throwing, because
+ * for most commands that is an answer — `merge-tree` reports conflicts that
+ * way. Callers that cannot continue without the output say so with this.
+ *
+ * git's stderr names branches and paths, which is repository content. It stays
+ * out of the error: `details` is documented as carrying neither secrets nor
+ * file contents, and an `InterlockError` reaches both the API and the agents.
+ * The runner logs the failing command through the redacting sink.
+ */
+export async function runRequired(
+  runner: GitRunner,
+  repo: AnyRepo,
+  args: readonly string[],
+  options: GitRunOptions = {},
+): Promise<GitResult> {
+  const result = await runner.run(repo, args, options);
+  if (result.exitCode !== 0) {
+    const command = subcommandOf(args);
+    throw new InterlockError('GIT_COMMAND_FAILED', `git ${command ?? ''} failed`, {
+      details: { rootPath: repo.rootPath, command, exitCode: result.exitCode },
+      remedy: 'Check that the repository is readable and no other git process holds it.',
+      infra: true,
+    });
+  }
+  return result;
 }

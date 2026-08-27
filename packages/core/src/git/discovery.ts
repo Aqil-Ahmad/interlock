@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isUnmerged, isUntracked, parseStatus } from './status.js';
 import {
   InterlockError,
   isInterlockError,
@@ -20,8 +21,8 @@ import type {
   RepoId,
   BranchRefId,
 } from '@interlock/shared';
-import { subcommandOf } from './repo-handle.js';
-import type { AnyRepo, GitResult, GitRunner, UserRepo } from './repo-handle.js';
+import { runRequired } from './repo-handle.js';
+import type { GitRunner, UserRepo } from './repo-handle.js';
 
 /**
  * Repo, branch and worktree discovery.
@@ -45,30 +46,6 @@ export interface DiscoveryOptions {
 export interface DescribeOptions extends DiscoveryOptions {
   /** Root of Interlock's data dir; shadow clones live under it. */
   readonly dataDir: string;
-}
-
-/**
- * Run a command whose non-zero exit means the repository is unusable.
- *
- * git's stderr names branches and paths, which is repository content. It stays
- * out of the error: `details` is documented as carrying neither secrets nor
- * file contents, and an `InterlockError` reaches both the API and the agents.
- * The runner logs the failing command through the redacting sink.
- */
-async function required(
-  runner: GitRunner,
-  repo: AnyRepo,
-  args: readonly string[],
-): Promise<GitResult> {
-  const result = await runner.run(repo, args);
-  if (result.exitCode !== 0) {
-    throw new InterlockError('GIT_COMMAND_FAILED', `git ${subcommandOf(args) ?? ''} failed`, {
-      details: { rootPath: repo.rootPath, command: subcommandOf(args), exitCode: result.exitCode },
-      remedy: 'Check that the repository is readable and no other git process holds it.',
-      infra: true,
-    });
-  }
-  return result;
 }
 
 /**
@@ -121,7 +98,7 @@ export async function openUserRepo(path: string, options: DiscoveryOptions): Pro
   // second shadow clone for work that is already being watched. git lists the
   // main worktree first from anywhere in the repository, and that path is the
   // one identity every worktree agrees on.
-  const worktrees = await required(options.runner, probe, [
+  const worktrees = await runRequired(options.runner, probe, [
     'worktree',
     'list',
     '--porcelain',
@@ -135,7 +112,7 @@ export async function openUserRepo(path: string, options: DiscoveryOptions): Pro
     });
   }
 
-  const gitDir = await required(options.runner, probeHandle(main.path), [
+  const gitDir = await runRequired(options.runner, probeHandle(main.path), [
     'rev-parse',
     '--absolute-git-dir',
   ]);
@@ -360,20 +337,14 @@ function parseWorktreeList(stdout: string): WorktreeEntry[] {
   return entries;
 }
 
-/** Two-letter status codes that mark a path as conflicted. */
-const UNMERGED_CODES: ReadonlySet<string> = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
-
 /**
- * Parse `git status --porcelain -z` into staged, unstaged and untracked paths.
- *
- * A rename or copy emits the destination and then the source as two fields, so
- * the source is consumed rather than read as the next entry.
+ * Group a worktree's status into staged, unstaged and untracked paths.
  *
  * A conflicted path counts once, as unstaged: both of its columns are non-blank,
  * so reading them independently would report the same path as staged and
  * unstaged at the same time. Resolving it is what makes it stageable.
  */
-function parseStatus(stdout: string): {
+function groupStatus(stdout: string): {
   staged: string[];
   unstaged: string[];
   untracked: string[];
@@ -382,43 +353,29 @@ function parseStatus(stdout: string): {
   const unstaged: string[] = [];
   const untracked: string[] = [];
 
-  const fields = stdout.split('\0');
-  for (let i = 0; i < fields.length; i++) {
-    const field = fields[i];
-    if (field === undefined || field.length < 4) continue;
-
-    const index = field[0]!;
-    const worktree = field[1]!;
-    const path = field.slice(3);
-
-    if (index === '?' && worktree === '?') {
-      untracked.push(path);
+  for (const entry of parseStatus(stdout)) {
+    if (isUntracked(entry)) {
+      untracked.push(entry.path);
       continue;
     }
-    // The source path of a rename or copy, whichever column reported it.
-    if (index === 'R' || index === 'C' || worktree === 'R' || worktree === 'C') i++;
-
-    if (UNMERGED_CODES.has(`${index}${worktree}`)) {
-      unstaged.push(path);
+    if (isUnmerged(entry)) {
+      unstaged.push(entry.path);
       continue;
     }
-    if (index !== ' ' && index !== '?') staged.push(path);
-    if (worktree !== ' ' && worktree !== '?') unstaged.push(path);
+    if (entry.index !== ' ' && entry.index !== '?') staged.push(entry.path);
+    if (entry.worktree !== ' ' && entry.worktree !== '?') unstaged.push(entry.path);
   }
 
   return { staged, unstaged, untracked };
 }
 
-/**
- * Uncommitted work in one worktree.
- *
- * A failed `status` is raised rather than read as an empty result: "clean" is
- * the most dangerous wrong answer here, because nothing downstream looks again
- * at a branch that reported no changes.
- */
 async function readDirtyState(worktreePath: string, runner: GitRunner): Promise<DirtyState> {
-  const status = await required(runner, probeHandle(worktreePath), ['status', '--porcelain', '-z']);
-  const { staged, unstaged, untracked } = parseStatus(status.stdout);
+  const status = await runRequired(runner, probeHandle(worktreePath), [
+    'status',
+    '--porcelain',
+    '-z',
+  ]);
+  const { staged, unstaged, untracked } = groupStatus(status.stdout);
 
   return {
     isDirty: staged.length + unstaged.length + untracked.length > 0,
@@ -505,13 +462,18 @@ export async function listBranchRefs(
 ): Promise<BranchRef[]> {
   const ignore = options.ignoreBranches ?? [];
 
-  const refs = await required(options.runner, repo, [
+  const refs = await runRequired(options.runner, repo, [
     'for-each-ref',
     '--format=%(refname)%09%(objectname)',
     'refs/heads',
   ]);
 
-  const worktrees = await required(options.runner, repo, ['worktree', 'list', '--porcelain', '-z']);
+  const worktrees = await runRequired(options.runner, repo, [
+    'worktree',
+    'list',
+    '--porcelain',
+    '-z',
+  ]);
   const byRef = new Map<string, WorktreeEntry>();
   for (const entry of parseWorktreeList(worktrees.stdout)) {
     // A missing directory means two different things depending on the lock.

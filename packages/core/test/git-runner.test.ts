@@ -267,6 +267,34 @@ describe('git runner against a real repository', () => {
     expect(still.stdout.trim()).toBe('refs/remotes/origin/main');
   });
 
+  it('validates an index redirection on a read command, not only on a writing one', async () => {
+    // The guarantee is that the runner validates the redirection, so it cannot
+    // be conditional on the verb: a snapshot asks `status` what changed
+    // relative to a redirected index, which is a read carrying one.
+    const before = readFileSync(join(dir, '.git', 'index'));
+
+    const error = await rejection(
+      runner.run(repo, ['status', '--porcelain'], { indexFile: join(dir, '.git', 'index') }),
+    );
+
+    expect(error.code).toBe('GIT_COMMAND_REFUSED');
+    expect(error.message).toContain('resolves inside');
+    expect(readFileSync(join(dir, '.git', 'index'))).toEqual(before);
+  });
+
+  it('allows a read command whose redirection points outside the repository', async () => {
+    const indexDir = mkdtempSync(join(tmpdir(), 'interlock-index-'));
+
+    try {
+      const result = await runner.run(repo, ['status', '--porcelain'], {
+        indexFile: join(indexDir, 'index'),
+      });
+      expect(result.exitCode).toBe(0);
+    } finally {
+      rmSync(indexDir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses an abbreviated --index-output, which git resolves and a guard may not', async () => {
     // Git accepts any unambiguous prefix, so `--i=` is `--index-output=`.
     writeFileSync(join(dir, 'staged.txt'), 'staged\n');
