@@ -214,7 +214,7 @@ every task here and is not repeated per task.
   rename detection, so scoped to the destination git counts a hunk for content
   that never changed.
 
-- [ ] **SQLite store**
+- [x] **SQLite store**
       **Files:** `packages/daemon/src/store/`
       **What:** `openStore` plus migration 001 covering every entity in
       `shared/models`.
@@ -223,8 +223,19 @@ every task here and is not repeated per task.
   and keeps `core` dependency-free. Record the choice in ADR-0003 either way.
   Enable WAL and foreign keys. Migrations run inside one transaction and are
   append-only; 001 must run against both an empty database and one that already
-  has it. The file is 0700 under the data dir. Store spans and truncated
+  has it. The data dir is 0700 and the database file 0600 — an executable bit
+  means nothing on a database, and the mode has to be set before WAL is enabled,
+  because SQLite gives the `-wal` the mode the database file has at the time and
+  that file holds rows the database does not yet. Store spans and truncated
   excerpts, never full file contents, never secrets.
+
+  An upsert on a natural key returns the reconciled row rather than nothing. The
+  stored id is the one that won, and the caller's next write references it — so
+  a `void` return would hand back a repository whose branches all orphan. What
+  is preserved on conflict follows from the same reasoning: `discoveredAt` and
+  `firstSeenAt` describe the first sighting rather than this one, and
+  `Repo.shadowPath` is derived from the id that won, so the incoming value names
+  a directory built from a ULID that was discarded.
 
   Upsert on the natural key, not on the id: discovery mints a fresh ULID per
   observation, so `repos` reconciles on `rootPath` and `branch_refs` on
@@ -240,11 +251,17 @@ every task here and is not repeated per task.
   that folds the two together loses the distinction permanently, since nothing
   re-reads a branch that reported no changes.
 
+  `BranchRef.sessionId` gets no column. Discovery re-lists every branch with no
+  session attached, so a stored copy is cleared by the next sweep and
+  attribution never survives one. Sessions own the link, and the branch reads it
+  back from `agent_sessions`, most recently active live session first.
+
   **Done when:** the daemon restarts and reproduces its previous state; listing
   the same branch twice leaves one row, not two; a branch stored with an unknown
   dirty state reads back unknown rather than clean; a test runs migrations twice
-  and asserts idempotency; a test asserts the file mode; and `readEvents(since)`
-  replays in ULID order across a restart.
+  and asserts idempotency; a test asserts the file mode, of the sidecars as well
+  as the database; and `readEvents(since)` replays in ULID order across a
+  restart.
 
 - [ ] **Watcher**
       **Files:** `packages/daemon/src/watcher/`
@@ -269,6 +286,14 @@ every task here and is not repeated per task.
   is loud and reachable once, while serving a stale one is silent and permanent.
   A refusal on re-read keeps the last good config and surfaces the problem; it
   must not take the repository out of the watch set.
+
+  **The store has no deletion path, and this is where it is needed.** Upserts
+  reconcile on the natural key, so a branch that stops existing keeps its row,
+  its merge pairs and its change sets forever — and `prune` deliberately keeps
+  each branch's newest change set, so retention never reaches them either. The
+  watcher is what notices a branch is gone, so the `Store` grows the deletion
+  API here rather than earlier: removing a branch takes its pairs and change
+  sets with it by cascade, and `branch.disappeared` is the event that drives it.
 
   **Contain a failing repository to itself.** `describeRepo` throws
   `CONFIG_INVALID` for one repository's broken file, and discovery reads

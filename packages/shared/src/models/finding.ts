@@ -33,7 +33,8 @@ export interface Finding {
   readonly resolvedAt: string | null;
 }
 
-export type Severity = 'info' | 'low' | 'medium' | 'high';
+export const SEVERITIES = ['info', 'low', 'medium', 'high'] as const;
+export type Severity = (typeof SEVERITIES)[number];
 
 /**
  * `open` — reproduces on the latest snapshots.
@@ -41,7 +42,8 @@ export type Severity = 'info' | 'low' | 'medium' | 'high';
  * `resolved` — no longer reproduces.
  * `dismissed` — a human marked it as not a problem.
  */
-export type FindingStatus = 'open' | 'stale' | 'resolved' | 'dismissed';
+export const FINDING_STATUSES = ['open', 'stale', 'resolved', 'dismissed'] as const;
+export type FindingStatus = (typeof FINDING_STATUSES)[number];
 
 export interface Attribution {
   readonly branchA: BranchRefId;

@@ -20,7 +20,8 @@ export interface SpeculativeRun {
   readonly durationMs: number | null;
 }
 
-export type RunStatus = 'queued' | 'running' | 'complete' | 'failed' | 'superseded';
+export const RUN_STATUSES = ['queued', 'running', 'complete', 'failed', 'superseded'] as const;
+export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** Result of the speculative merge itself, before any analyzer runs. */
 export interface MergeOutcome {
@@ -30,16 +31,19 @@ export interface MergeOutcome {
   readonly mergedSha: string | null;
 }
 
-export type AnalyzerKind = 'textual' | 'typecheck' | 'build' | 'test' | 'ast-semantic';
+export const ANALYZER_KINDS = ['textual', 'typecheck', 'build', 'test', 'ast-semantic'] as const;
+export type AnalyzerKind = (typeof ANALYZER_KINDS)[number];
 
-export type AnalyzerVerdict =
-  | 'clean'
+export const ANALYZER_VERDICTS = [
+  'clean',
   /** Analyzer found problems; see the Findings it produced. */
-  | 'findings'
+  'findings',
   /** Could not run — Docker down, toolchain missing. Never a Finding. */
-  | 'infra-failure'
-  | 'skipped'
-  | 'timeout';
+  'infra-failure',
+  'skipped',
+  'timeout',
+] as const;
+export type AnalyzerVerdict = (typeof ANALYZER_VERDICTS)[number];
 
 export interface AnalyzerResult {
   readonly analyzer: AnalyzerKind;

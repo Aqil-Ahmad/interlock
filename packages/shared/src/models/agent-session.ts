@@ -6,7 +6,8 @@ import type { AgentSessionId, BranchRefId, RepoId } from '../ids.js';
  * Populated by agent hook scripts where available, inferred best-effort
  * otherwise.
  */
-export type AgentKind = 'claude-code' | 'codex' | 'cursor' | 'human' | 'unknown';
+export const AGENT_KINDS = ['claude-code', 'codex', 'cursor', 'human', 'unknown'] as const;
+export type AgentKind = (typeof AGENT_KINDS)[number];
 
 export interface AgentSession {
   readonly id: AgentSessionId;
