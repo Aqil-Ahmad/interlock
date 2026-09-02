@@ -9,6 +9,7 @@ export * from './models/index.js';
 export * from './events/index.js';
 export * from './config.js';
 export * from './errors.js';
+export * from './glob.js';
 export * from './ids.js';
 export * from './logger.js';
 

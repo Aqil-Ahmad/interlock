@@ -7,7 +7,7 @@ import { isUnmerged, isUntracked, parseStatus } from './status.js';
 import {
   InterlockError,
   isInterlockError,
-  MAX_IGNORE_PATTERN_LENGTH,
+  matchesGlob,
   MAX_REPO_CONFIG_BYTES,
   parseRepoConfigOverride,
   REPO_CONFIG_FILENAME,
@@ -386,61 +386,6 @@ async function readDirtyState(worktreePath: string, runner: GitRunner): Promise<
     untrackedFiles: untracked,
     capturedAt: new Date().toISOString(),
   };
-}
-
-/**
- * Match a branch name against a glob supporting `*` and `?`.
- *
- * Deliberately not a full glob implementation: `core` takes no dependencies,
- * and branch ignore rules in practice are `release/*` and `wip-*`.
- *
- * Matched by scanning rather than by translating to a regex. Patterns come from
- * a repository's own config, written by the agents Interlock watches, and the
- * names come from the same repository — so both sides are hostile. A regex
- * translation backtracks exponentially on a pattern that alternates literals
- * with wildcards: `a*a*a…b` against a name of `a`s takes 20 seconds at 33
- * characters, on the event loop, for every branch the pattern is tried against.
- * This scan backtracks to the last `*` only, which bounds it at the product of
- * the two lengths.
- *
- * Both sides are compared by code point, so `?` consumes an astral character
- * whole rather than half a surrogate pair. `*` is tested before a literal match
- * so that it always expands: a name containing a literal `*` would otherwise
- * consume the wildcard meant to span it. Refnames forbid both characters, so
- * this only matters if the matcher is reused on something else.
- */
-function matchesGlob(name: string, pattern: string): boolean {
-  if (pattern.length > MAX_IGNORE_PATTERN_LENGTH) return false;
-
-  const subject = [...name];
-  const glob = [...pattern];
-  let subjectIndex = 0;
-  let globIndex = 0;
-  // Where to resume if the run this `*` is currently claiming turns out to be
-  // one character too short.
-  let starIndex = -1;
-  let resumeIndex = 0;
-
-  while (subjectIndex < subject.length) {
-    const globChar = glob[globIndex];
-    if (globChar === '*') {
-      starIndex = globIndex;
-      globIndex++;
-      resumeIndex = subjectIndex;
-    } else if (globChar === '?' || (globChar !== undefined && globChar === subject[subjectIndex])) {
-      globIndex++;
-      subjectIndex++;
-    } else if (starIndex !== -1) {
-      globIndex = starIndex + 1;
-      resumeIndex++;
-      subjectIndex = resumeIndex;
-    } else {
-      return false;
-    }
-  }
-
-  while (glob[globIndex] === '*') globIndex++;
-  return globIndex === glob.length;
 }
 
 /**

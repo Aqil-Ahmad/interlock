@@ -30,3 +30,15 @@ export interface Watcher {
 export function createWatcher(_options: WatcherOptions): Watcher {
   return notImplemented('createWatcher');
 }
+
+export { createWorktreeWatcher } from './worktree-watcher.js';
+export type {
+  ChangeSignal,
+  SignalKind,
+  WatchFactory,
+  WatchTarget,
+  WorktreeWatcher,
+  WorktreeWatcherOptions,
+} from './worktree-watcher.js';
+export { createDebouncer } from './debounce.js';
+export type { DebounceOptions, Debouncer } from './debounce.js';

@@ -263,20 +263,50 @@ every task here and is not repeated per task.
   as the database; and `readEvents(since)` replays in ULID order across a
   restart.
 
-- [ ] **Watcher**
+- [x] **Watcher: filesystem and ref events**
       **Files:** `packages/daemon/src/watcher/`
-      **What:** filesystem events plus git ref changes, debounced, publishing
+      **What:** debounced filesystem and git-ref signals, published as
       `worktree.changed`.
 
-  Apply the repository's own rules: `config.ignoreBranches` into
-  `listBranchRefs`, and `config.ignore` to the paths this watches. Both are read
-  into `Repo.config` already and applied nowhere, so until this lands a
-  repository that asked to be left alone is watched anyway.
+  Ignore `.git/` internals except `refs/` and `HEAD`, and honour `.gitignore` —
+  watching `node_modules` is the difference between 2% CPU and 100%. A linked
+  worktree's `.git` is a file pointing into `<main>/.git/worktrees/<name>`, and
+  its `refs/` live in the main git dir while its `HEAD` does not, so ref
+  watching follows `gitDir` rather than assuming `<root>/.git`.
 
-  `*` in a glob crosses `/` here, so `src/*` matches `src/deep/file.ts`. That is
-  right for branch names and wrong for the path intuition `.gitignore` teaches,
-  so `config.ignore` needs a path-aware matcher or a documented difference —
-  not the branch matcher reused silently.
+  Apply `config.ignore` to the paths this watches. `*` in a branch glob crosses
+  `/`, so `src/*` matches `src/deep/file.ts`; that is right for branch names and
+  wrong for the path intuition `.gitignore` teaches, so this needs a path-aware
+  matcher or a documented difference — not the branch matcher reused silently.
+  Match by scanning rather than by translating to a regex: the patterns are
+  repository content.
+
+  Debounce per worktree, not globally, and coalesce a burst of writes into one
+  event. Handle the editor patterns that break naive watchers: atomic
+  rename-over-file, a directory being deleted while watched, and a file count
+  that exceeds the OS watch limit, which must degrade to polling with a warning
+  rather than crashing.
+
+  Resolve watched paths with `realpath` before comparing them to anything from
+  discovery: git reports canonical paths, so on macOS a worktree registered as
+  `/var/...` arrives from git as `/private/var/...` and naive comparison never
+  matches. Recursive `fs.watch` on macOS also reports an event naming the
+  watched directory itself, which is not a change inside it.
+
+  **Done when:** an edit produces exactly one debounced event; a burst of writes
+  inside the debounce window produces one, not one each; a `git commit` produces
+  a ref event; a write under an ignored path produces none; and a worktree whose
+  directory is deleted while watched stops cleanly instead of throwing.
+
+- [ ] **Watcher: reconciliation sweep and repository rules**
+      **Files:** `packages/daemon/src/watcher/`, `packages/daemon/src/store/`
+      **What:** the periodic pass that reconciles discovery against the store.
+
+  Filesystem events are lossy on macOS, so a sweep runs alongside them rather
+  than instead of them. It applies `config.ignoreBranches` to `listBranchRefs`,
+  which together with the previous task is what finally makes a repository's own
+  rules mean something — both are read into `Repo.config` already and applied
+  nowhere.
 
   **Re-read `.interlock.json` when it changes.** `describeRepo` reads it once,
   at first sighting, and the stored `Repo.config` is the last word after that —
@@ -290,45 +320,39 @@ every task here and is not repeated per task.
   **The store has no deletion path, and this is where it is needed.** Upserts
   reconcile on the natural key, so a branch that stops existing keeps its row,
   its merge pairs and its change sets forever — and `prune` deliberately keeps
-  each branch's newest change set, so retention never reaches them either. The
-  watcher is what notices a branch is gone, so the `Store` grows the deletion
-  API here rather than earlier: removing a branch takes its pairs and change
-  sets with it by cascade, and `branch.disappeared` is the event that drives it.
+  each branch's newest change set, so retention never reaches them either.
+  Removing a branch takes its pairs and change sets with it by cascade, and
+  `branch.disappeared` is the event that drives it.
 
   **Contain a failing repository to itself.** `describeRepo` throws
   `CONFIG_INVALID` for one repository's broken file, and discovery reads
   repositories in a sweep. One bad `.interlock.json` must not stop the others,
   the same way one unreachable worktree does not stop the branches beside it.
 
-  Ignore `.git/` internals except `refs/` and `HEAD`, and honour `.gitignore` —
-  watching `node_modules` is the difference between 2% CPU and 100%. Debounce
-  per worktree, not globally, and coalesce a burst of writes into one event.
-  Handle the editor patterns that break naive watchers: atomic rename-over-file,
-  a directory being deleted while watched, and a file count that exceeds the
-  OS watch limit, which must degrade to polling with a warning rather than
-  crashing.
+  **Done when:** a branch created between sweeps appears; one deleted disappears
+  and takes its pairs and change sets with it; a repository whose
+  `.interlock.json` becomes malformed keeps its last good config, stays in the
+  watch set and does not stop the repositories beside it; a branch added to
+  `ignoreBranches` mid-session stops being reported without a restart.
 
-  Resolve watched paths with `realpath` before comparing them to anything from
-  discovery: git reports canonical paths, so on macOS a worktree registered as
-  `/var/...` arrives from git as `/private/var/...` and naive comparison never
-  matches.
+- [ ] **Watcher: snapshot pipeline and the numbers**
+      **Files:** `packages/daemon/src/watcher/`, `packages/shared/src/events/`
+      **What:** `branch.snapshot`, carrying `{ branchRef, treeOid, changeSet }`.
 
-  Publish two events at different levels. `worktree.changed` is the raw
-  filesystem signal, kept for replay and debugging. `branch.snapshot`, carrying
-  `{ branchRef, treeOid, changeSet }`, is what downstream actually consumes — it
-  keys off content identity rather than filesystem noise.
+  Two events at different levels. `worktree.changed` is the raw filesystem
+  signal, kept for replay and debugging; `branch.snapshot` is what downstream
+  actually consumes, because it keys off content identity rather than filesystem
+  noise. The event does not exist in the vocabulary yet and is a wire format
+  once published.
 
   Cache the last tree OID per worktree and drop the event when a debounce
   produces the same OID. A worktree whose dirty state came back `null` has no
   OID to compare, so it is never deduplicated against — `contentIdentity`
   returns `null` there for the same reason, and a cache keyed on the head alone
-  would reuse a result computed from a tree nobody read. Editors and agents both write files that end up
-  byte-identical, and the saving is not the snapshot itself but everything after
-  it: ChangeSet extraction, scheduling, and every pair that would be marked stale.
-
-  **Done when:** an edit produces exactly one debounced event; a `git commit`
-  produces a ref event; a rewrite that leaves content unchanged publishes no
-  `branch.snapshot`; and two numbers are in `log.md` —
+  would reuse a result computed from a tree nobody read. Editors and agents both
+  write files that end up byte-identical, and the saving is not the snapshot
+  itself but everything after it: ChangeSet extraction, scheduling, and every
+  pair that would be marked stale.
 
   Decide the per-`status` timeout here, with the latency numbers in hand rather
   than ahead of them. Discovery reads worktrees serially and a `status` on an
@@ -336,6 +360,11 @@ every task here and is not repeated per task.
   runner's full default before returning unknown, so one pathological repo can
   dominate a sweep. Guessing a shorter bound now would trade that for the worse
   failure: a slow but working worktree reported as unreadable.
+
+  **Done when:** a rewrite that leaves content unchanged publishes no
+  `branch.snapshot`; a real edit publishes exactly one carrying a ChangeSet; a
+  worktree that cannot be read publishes one with a null tree rather than being
+  deduplicated against the last good one; and two numbers are in `log.md` —
 
   - **idle** CPU with three worktrees on a repo of at least 10,000 files, which
     must stay under 2%;
