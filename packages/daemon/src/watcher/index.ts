@@ -40,5 +40,7 @@ export type {
   WorktreeWatcher,
   WorktreeWatcherOptions,
 } from './worktree-watcher.js';
+export { createSweep } from './sweep.js';
+export type { Sweep, SweepOptions, SweepOutcome } from './sweep.js';
 export { createDebouncer } from './debounce.js';
 export type { DebounceOptions, Debouncer } from './debounce.js';

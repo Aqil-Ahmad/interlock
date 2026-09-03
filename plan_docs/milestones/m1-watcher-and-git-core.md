@@ -298,7 +298,7 @@ every task here and is not repeated per task.
   a ref event; a write under an ignored path produces none; and a worktree whose
   directory is deleted while watched stops cleanly instead of throwing.
 
-- [ ] **Watcher: reconciliation sweep and repository rules**
+- [x] **Watcher: reconciliation sweep and repository rules**
       **Files:** `packages/daemon/src/watcher/`, `packages/daemon/src/store/`
       **What:** the periodic pass that reconciles discovery against the store.
 

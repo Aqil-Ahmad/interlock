@@ -47,12 +47,26 @@ export interface BranchUpdated extends EventBase {
   readonly type: 'branch.updated';
   readonly branchRefId: BranchRefId;
   readonly headSha: string;
-  readonly dirty: boolean;
+  /**
+   * `null` when the worktree could not be read, which is not the same as
+   * clean. Folding the two together here would undo the distinction the store
+   * keeps, one layer further out and in a log that is never re-derived.
+   */
+  readonly dirty: boolean | null;
 }
 
 export interface BranchDisappeared extends EventBase {
   readonly type: 'branch.disappeared';
   readonly branchRefId: BranchRefId;
+  /**
+   * Why it stopped being tracked.
+   *
+   * `deleted` — the branch is gone from the repository.
+   * `ignored` — it still exists, and the repository asked to be left alone
+   * about it. Without this the two are indistinguishable on replay, and a
+   * branch the user merely excluded reads as one that was destroyed.
+   */
+  readonly reason: 'deleted' | 'ignored';
 }
 
 export interface WorkingTreeChanged extends EventBase {
