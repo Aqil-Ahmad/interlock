@@ -421,14 +421,19 @@ export async function listBranchRefs(
   ]);
   const byRef = new Map<string, WorktreeEntry>();
   for (const entry of parseWorktreeList(worktrees.stdout)) {
-    // A missing directory means two different things depending on the lock.
-    // Unlocked, the worktree is garbage awaiting `worktree prune` and holds no
-    // observable work. Locked, it is state someone deliberately preserved —
-    // which is what a worktree on a removable volume is locked for — so it is
-    // unreachable rather than absent, and its dirty state is unknown.
-    // `worktree prune` consults the lock; whether `worktree list` annotates
-    // both is a porcelain detail that has moved between versions.
-    if ((entry.prunable && !entry.locked) || entry.ref === null) continue;
+    // `prunable` means three different things, and git reports the same word
+    // for all of them. Unlocked and really gone, the worktree is garbage
+    // awaiting `worktree prune` and holds no observable work. Locked, it is
+    // state someone deliberately preserved — which is what a worktree on a
+    // removable volume is locked for — so it is unreachable rather than absent.
+    // And a directory git cannot read is `prunable gitdir file points to
+    // non-existent location` with no lock at all, though the work is still
+    // there: dropping that one reports the branch clean, which is the one
+    // answer nothing ever revisits.
+    //
+    // Only the filesystem separates the first from the third.
+    if (entry.ref === null) continue;
+    if (entry.prunable && !entry.locked && !existsSync(entry.path)) continue;
     byRef.set(entry.ref, entry);
   }
 

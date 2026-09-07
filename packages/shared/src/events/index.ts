@@ -75,10 +75,31 @@ export interface WorkingTreeChanged extends EventBase {
   readonly changedPaths: readonly string[];
 }
 
-export interface ChangeSetComputed extends EventBase {
-  readonly type: 'changeset.computed';
+/**
+ * A branch's content as it actually stands, uncommitted work included.
+ *
+ * The level downstream consumes. `worktree.changed` is filesystem noise — a
+ * save that rewrote a file byte for byte is indistinguishable from one that
+ * changed it — while this is keyed on the tree the content hashes to, so it is
+ * published only when something really differs.
+ */
+export interface BranchSnapshot extends EventBase {
+  readonly type: 'branch.snapshot';
   readonly branchRefId: BranchRefId;
-  readonly changeSetId: ChangeSetId;
+  /**
+   * Tree the worktree hashed to, or `null` when it could not be read.
+   *
+   * `null` is never compared against a previous value: unknown is not a state
+   * to deduplicate on, and treating it as one would suppress the next real
+   * change on a worktree that came back.
+   */
+  readonly treeOid: string | null;
+  /**
+   * The diff computed from that tree, by id — the row itself is in the store.
+   *
+   * `null` when there was no tree to diff, or no merge base to diff it against.
+   */
+  readonly changeSetId: ChangeSetId | null;
   readonly fileCount: number;
 }
 
@@ -183,7 +204,7 @@ export type InterlockEvent =
   | BranchUpdated
   | BranchDisappeared
   | WorkingTreeChanged
-  | ChangeSetComputed
+  | BranchSnapshot
   | SessionRegistered
   | SessionEnded
   | PairScheduled

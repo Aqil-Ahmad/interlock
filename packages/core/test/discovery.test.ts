@@ -198,6 +198,26 @@ describe('repo discovery', () => {
       expect(refs.find((ref) => ref.name === 'feature')?.dirty?.isDirty).toBe(false);
     });
 
+    it('reports a worktree it cannot enter as unknown rather than clean', async () => {
+      // git prints `prunable gitdir file points to non-existent location` for a
+      // directory it cannot read, with no lock — the same word it uses for one
+      // that is really gone. The two are opposite answers: an absent worktree
+      // holds no uncommitted work, an unreadable one may hold any amount, and
+      // clean is the one answer nothing ever revisits. Only the filesystem
+      // separates them.
+      const unreadable = join(base, 'wt-feature');
+      chmodSync(unreadable, 0o000);
+      try {
+        const refs = await listBranchRefs(repo, repoId, options);
+
+        expect(refs.find((ref) => ref.name === 'feature')?.dirty).toBeNull();
+        // And still only that one: the rest of the repository is unaffected.
+        expect(refs.find((ref) => ref.name === 'main')?.dirty?.isDirty).toBe(false);
+      } finally {
+        chmodSync(unreadable, 0o755);
+      }
+    });
+
     it('counts a conflicted path once', async () => {
       // Both status columns are non-blank for an unmerged path, so reading them
       // independently reports the same file as staged and unstaged at once.

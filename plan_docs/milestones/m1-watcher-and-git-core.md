@@ -335,7 +335,7 @@ every task here and is not repeated per task.
   watch set and does not stop the repositories beside it; a branch added to
   `ignoreBranches` mid-session stops being reported without a restart.
 
-- [ ] **Watcher: snapshot pipeline and the numbers**
+- [x] **Watcher: snapshot pipeline and the numbers**
       **Files:** `packages/daemon/src/watcher/`, `packages/shared/src/events/`
       **What:** `branch.snapshot`, carrying `{ branchRef, treeOid, changeSet }`.
 

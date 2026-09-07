@@ -4,6 +4,7 @@ import { isInterlockError, matchesGlob, silentLogger } from '@interlock/shared';
 import type { BranchRef, Logger, Repo } from '@interlock/shared';
 import type { EventBus } from '../bus/index.js';
 import type { Store } from '../store/index.js';
+import { createSnapshotPipeline } from './snapshot.js';
 
 /**
  * Reconciles what git reports against what the store holds.
@@ -31,6 +32,9 @@ export interface SweepOptions {
   /** Root of Interlock's data dir; shadow paths are derived from it. */
   readonly dataDir: string;
   readonly logger?: Logger;
+  /** Passed through to the snapshot pipeline; see its own options. */
+  readonly recaptureAfterMs?: number;
+  readonly now?: () => number;
 }
 
 export interface SweepOutcome {
@@ -49,11 +53,29 @@ export interface Sweep {
   reconcile(rootPath: string): Promise<void>;
   /** Reconcile every repository, containing a failure to the one it came from. */
   all(rootPaths: readonly string[]): Promise<SweepOutcome>;
+  /**
+   * Report that a worktree changed on disk, so the next pass hashes it.
+   *
+   * A pass that runs on a timer reconciles refs and branches cheaply; hashing
+   * every worktree it sees is what the daemon's idle cost is made of. This is
+   * how a filesystem signal says which one is worth the walk.
+   */
+  markChanged(worktreePath: string): void;
 }
 
 export function createSweep(options: SweepOptions): Sweep {
   const log = (options.logger ?? silentLogger).child('sweep');
   const { store, bus, runner, dataDir } = options;
+  const snapshots = createSnapshotPipeline({
+    store,
+    bus,
+    runner,
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
+    ...(options.recaptureAfterMs === undefined
+      ? {}
+      : { recaptureAfterMs: options.recaptureAfterMs }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
   /**
    * One pass per repository at a time.
    *
@@ -97,6 +119,8 @@ export function createSweep(options: SweepOptions): Sweep {
         : { ignoreBranches: repo.config.ignoreBranches }),
     });
 
+    let failure: Error | undefined;
+
     // Keyed on `ref` rather than id: discovery mints a fresh ULID per
     // observation, so the id says nothing about whether this branch is new.
     const remaining = new Map((await store.listBranchRefs(repo.id)).map((ref) => [ref.ref, ref]));
@@ -126,6 +150,23 @@ export function createSweep(options: SweepOptions): Sweep {
           dirty: dirtyFlag(after),
         });
       }
+
+      // After the row exists, so a snapshot never names a branch the store has
+      // not heard of, and after the announcement, so replay reads the change
+      // before the content it produced.
+      try {
+        await snapshots.capture(handle, repo, after);
+      } catch (error) {
+        // Held, not swallowed. Letting it out here starves every branch after
+        // this one on every later pass — a worktree removed mid-pass throws —
+        // but a pass that could not snapshot something did not succeed, and
+        // reporting otherwise hides a broken runner behind a quiet log line.
+        log.warn('could not snapshot a branch', {
+          branch: after.name,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        failure ??= error instanceof Error ? error : new Error(String(error));
+      }
     }
 
     const ignored = (name: string): boolean =>
@@ -148,7 +189,10 @@ export function createSweep(options: SweepOptions): Sweep {
       });
       // Its merge pairs and change sets go with it, by cascade.
       await store.deleteBranchRef(gone.id);
+      if (gone.worktreePath !== null) snapshots.forget(gone.worktreePath);
     }
+
+    if (failure !== undefined) throw failure;
   };
 
   const reconcileResolved = async (handle: UserRepo): Promise<void> => {
@@ -221,6 +265,10 @@ export function createSweep(options: SweepOptions): Sweep {
       // Joined rather than queued: a second pass asked for while one is running
       // would read the same git state and find nothing new to say.
       return inFlight.get(rootPath) ?? start(rootPath);
+    },
+
+    markChanged(worktreePath: string): void {
+      snapshots.markChanged(worktreePath);
     },
 
     async all(rootPaths: readonly string[]): Promise<SweepOutcome> {

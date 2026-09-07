@@ -54,7 +54,8 @@ function main(): void {
   for (const budget of BUDGETS) {
     console.log(`  ${budget.id.padEnd(28)} ${budget.budget.padEnd(18)} ${budget.description}`);
   }
-  console.log('\nNo benchmarks implemented yet; they land with the scheduler.');
+  console.log('\nWatcher: pnpm exec tsx scripts/watcher-bench.ts');
+  console.log('The rest land with the scheduler.');
 }
 
 main();
