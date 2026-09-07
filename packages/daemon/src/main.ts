@@ -12,7 +12,12 @@ async function main(): Promise<void> {
   const logger = createLogger('daemon', { level: config.logLevel });
   const daemon = createDaemon({ config, logger });
 
+  let shuttingDown = false;
   const shutdown = (signal: string): void => {
+    // A second signal while the first is draining must not start a second stop
+    // or exit out from under the one in progress.
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info('shutting down', { signal });
     void daemon.stop().then(
       () => process.exit(0),
@@ -27,7 +32,8 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   await daemon.start();
-  logger.info('daemon started', { port: config.daemon.port, pid: process.pid });
+  // The bound port, not the configured one: `daemon.port` may be `0`.
+  logger.info('daemon started', { port: daemon.runtime?.port, pid: process.pid });
 }
 
 main().catch((error: unknown) => {
