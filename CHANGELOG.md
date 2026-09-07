@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The daemon runs: watcher, event bus and SQLite store wired together behind a loopback HTTP API. It binds `127.0.0.1` only and authenticates every request — including ones for paths that do not exist — with a bearer token generated at first start and stored 0600. The port it bound is published to `daemon.json` in the data dir so the CLI can find it, and removed on a clean stop. Serves `/api/health`, `/api/repos` and `/api/repos/:id/branches`.
 - Per-repository configuration: `.interlock.json` in a repository root overrides `ignore`, `ignoreBranches` and `toolchain` commands. Validated against the schema, with unknown keys and malformed files refused rather than ignored.
 - Monorepo scaffold: pnpm workspaces, strict TypeScript with project references, ESLint (flat config, type-aware, with layering rules), Prettier, Vitest, GitHub Actions CI.
 - `@interlock/shared`: data models (Repo, BranchRef, AgentSession, ChangeSet, MergePair, SpeculativeRun, Finding, Advice, EventRecord), event vocabulary, config schema with validation, typed errors, structured logging with secret redaction, ULID generation.
