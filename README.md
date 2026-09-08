@@ -91,11 +91,3 @@ Node ≥ 24, pnpm 11, git ≥ 2.30, Docker for the semantic analyzers.
 Dual-licensed: [AGPL-3.0-only](LICENSE_AGPL) by default, commercial terms for
 organisations that cannot accept the AGPL. Resolution rules in
 [LICENSE.md](LICENSE.md).
-
-The AGPL covers Interlock's own source. It places no obligation whatsoever on the
-repositories Interlock analyses — your code is read, never linked against or
-redistributed.
-
-Contributions require agreement to the [CLA](CLA.md). You keep the copyright in
-your work; the agreement grants the right to sublicense it, which is what makes
-the commercial license possible.
