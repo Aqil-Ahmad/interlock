@@ -158,7 +158,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // The bus resolves a publish once its subscribers settle, but a persisted
     // event is one more `await` behind that, so the queue outlives the last
     // publish by a tick and the store must not close in between.
-    await appends;
+    //
+    // Drained in a loop rather than with one `await`. `appends` is re-assigned
+    // by every append, so awaiting it pins the tail as it was at that instant
+    // and anything chained while that await was pending is left behind — to be
+    // rejected by a store that has closed underneath it. Nothing publishes once
+    // the watcher has stopped, so the second pass is a check rather than work;
+    // what it removes is the assumption, which is not written down anywhere
+    // else and stops holding the moment there is a second producer.
+    for (;;) {
+      const tail = appends;
+      await tail;
+      if (appends === tail) break;
+    }
 
     await store?.close();
     store = null;
