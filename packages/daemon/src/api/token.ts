@@ -4,8 +4,10 @@ import {
   constants,
   fchmodSync,
   fstatSync,
+  linkSync,
   openSync,
   readFileSync,
+  rmSync,
   writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -70,7 +72,7 @@ export function ensureToken(dataDir: string, logger: Logger): string {
   const path = tokenPath(dataDir);
   ensureDataDir(dirname(path), logger);
 
-  const minted = mint(path);
+  const minted = mint(path, logger);
   return minted ?? read(path, logger);
 }
 
@@ -132,16 +134,32 @@ function read(path: string, logger: Logger): string {
 /**
  * Write a fresh token, or `null` when one is already there.
  *
- * `wx` is the exclusive create: the mode argument is applied by `open` itself,
- * so the file is never briefly world-readable the way a write-then-chmod leaves
- * it.
+ * Written under a name nothing looks for and then linked into place, rather
+ * than created at its final name and filled in afterwards. Creating it first
+ * leaves a window in which the file exists and is empty, and the second daemon
+ * of a simultaneous first start reads exactly that — so the one case this
+ * function exists to handle ends with it refusing to start over a token the
+ * other daemon was still writing.
+ *
+ * `link` is what makes the publish exclusive: it fails rather than replacing,
+ * so the first to reach it wins and everyone else reads a file that was
+ * complete before it had a name. The mode is `open`'s own, so the token is
+ * never briefly world-readable the way a write-then-chmod leaves it.
  */
-function mint(path: string): string | null {
-  let handle: number;
+function mint(path: string, logger: Logger): string | null {
+  const token = randomBytes(TOKEN_BYTES).toString('base64url');
+  // Random rather than the pid: a crash leaves the staging file behind, and a
+  // reused pid would then collide with it on the exclusive create.
+  const staging = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+
   try {
-    handle = openSync(path, 'wx', TOKEN_FILE_MODE);
+    const handle = openSync(staging, 'wx', TOKEN_FILE_MODE);
+    try {
+      writeSync(handle, `${token}\n`);
+    } finally {
+      closeSync(handle);
+    }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return null;
     throw new InterlockError('CONFIG_INVALID', 'The API token file could not be created', {
       cause: error,
       details: { path },
@@ -149,13 +167,29 @@ function mint(path: string): string | null {
     });
   }
 
-  const token = randomBytes(TOKEN_BYTES).toString('base64url');
   try {
-    writeSync(handle, `${token}\n`);
+    linkSync(staging, path);
+    return token;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return null;
+    throw new InterlockError('CONFIG_INVALID', 'The API token file could not be created', {
+      cause: error,
+      details: { path },
+      remedy: 'Check that the Interlock data directory is writable by this user.',
+    });
   } finally {
-    closeSync(handle);
+    // The link made a second name for the same file, or it did not; either way
+    // this one is not wanted. A failure to remove it is not worth refusing to
+    // start over, but it is worth saying, since nothing else ever will.
+    try {
+      rmSync(staging, { force: true });
+    } catch (error) {
+      logger.warn('could not remove the staging file for the API token', {
+        path: staging,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
-  return token;
 }
 
 /**
@@ -179,6 +213,11 @@ function digest(value: string): Buffer {
  *
  * The scheme is compared case-insensitively because RFC 7235 says it is, and a
  * client sending `bearer` is not an attacker.
+ *
+ * Only the first space separates the scheme, and the remainder is trimmed — so
+ * a credential containing a space would come back altered. Minted tokens are
+ * base64url and cannot contain one, which is what makes the trim safe rather
+ * than merely convenient.
  */
 export function bearerToken(header: string | undefined): string | null {
   if (header === undefined) return null;

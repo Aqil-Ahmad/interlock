@@ -5,6 +5,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  readdirSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -190,6 +191,14 @@ describe('localhost API', () => {
     expect(response.status).toBe(200);
   });
 
+  it('accepts the Host header in any case, because a host name is not case-sensitive', async () => {
+    const response = await call('/api/health', {
+      token: bound.token,
+      host: `LOCALHOST:${String(bound.port)}`,
+    });
+    expect(response.status).toBe(200);
+  });
+
   it('sends no CORS header, so a browser cannot read an answer it provoked', async () => {
     const response = await call('/api/health', { token: bound.token });
     expect(response.headers['access-control-allow-origin']).toBeUndefined();
@@ -324,10 +333,25 @@ describe('the API token file', () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it('mints a token owner-readable only', () => {
+  it('mints a token owner-readable only, leaving nothing behind', () => {
     const token = ensureToken(dataDir, logger());
     expect(token.length).toBeGreaterThanOrEqual(40);
     expect(statSync(tokenPath(dataDir)).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dataDir)).toStrictEqual(['token']);
+  });
+
+  it('never publishes a token file before it holds a token', () => {
+    // Two daemons starting at once: one wins the exclusive publish and the
+    // other reads what it wrote. Created at its final name and filled in
+    // afterwards, the loser reads the gap — an empty file — and refuses to
+    // start over a token that was merely still being written.
+    ensureToken(dataDir, logger());
+    const published = readFileSync(tokenPath(dataDir), 'utf8');
+
+    // Every state the file is ever visible in, which is one.
+    expect(published.trim()).not.toBe('');
+    expect(ensureToken(dataDir, logger())).toBe(published.trim());
+    expect(readdirSync(dataDir)).toStrictEqual(['token']);
   });
 
   it('keeps the token across starts, because clients are configured with it', () => {
