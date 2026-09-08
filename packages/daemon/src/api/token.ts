@@ -1,16 +1,17 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
-  chmodSync,
-  mkdirSync,
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
   openSync,
   readFileSync,
-  statSync,
   writeSync,
-  closeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { InterlockError, tokenPath } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
+import { ensureDataDir } from '../data-dir.js';
 
 /**
  * The bearer token guarding the localhost API.
@@ -32,7 +33,28 @@ const TOKEN_BYTES = 32;
 
 /** Owner-only. Anything wider means another local user could have read it. */
 const TOKEN_FILE_MODE = 0o600;
-const DATA_DIR_MODE = 0o700;
+
+/**
+ * Flags for reading the token back.
+ *
+ * `O_NOFOLLOW` because everything after the open acts on what was opened: a
+ * symlink here would have the mode check tighten, and the read read, whatever
+ * it pointed at. `O_NONBLOCK` because opening a fifo without it waits for a
+ * writer, which wedges the daemon before any check runs. Both are security
+ * decisions and `O_RDONLY | undefined` is a plain following read, so a platform
+ * without them is refused rather than quietly served.
+ */
+const OPEN_TOKEN = ((): number => {
+  const { O_NOFOLLOW, O_NONBLOCK, O_RDONLY } = constants;
+  if (O_NOFOLLOW === undefined || O_NONBLOCK === undefined) {
+    throw new InterlockError(
+      'CONFIG_INVALID',
+      'This platform does not support opening a file without following symlinks',
+      { remedy: 'Run Interlock on Linux or macOS.', infra: true },
+    );
+  }
+  return O_RDONLY | O_NONBLOCK | O_NOFOLLOW;
+})();
 
 /**
  * Read the token, minting one on first start.
@@ -41,38 +63,70 @@ const DATA_DIR_MODE = 0o700;
  * each mint one and disagree about which is valid — the loser reads what the
  * winner wrote.
  *
- * @throws InterlockError `CONFIG_INVALID` when the file exists but holds nothing
- *         usable, which no daemon wrote and guessing past would silently
- *         disable authentication.
+ * @throws InterlockError `CONFIG_INVALID` when the file exists but holds
+ *         nothing a daemon wrote; see {@link read}.
  */
 export function ensureToken(dataDir: string, logger: Logger): string {
   const path = tokenPath(dataDir);
-  mkdirSync(dirname(path), { recursive: true, mode: DATA_DIR_MODE });
+  ensureDataDir(dirname(path), logger);
 
   const minted = mint(path);
-  if (minted !== null) return minted;
+  return minted ?? read(path, logger);
+}
 
-  // Tightened rather than rotated. A botched `chmod -R` and a token another
-  // user actually read are indistinguishable from here, and only one of them is
-  // worth invalidating every configured client for. Closing the window is what
-  // this can do; saying so loudly is the rest.
-  const mode = statSync(path).mode & 0o777;
-  if ((mode & 0o077) !== 0) {
-    chmodSync(path, TOKEN_FILE_MODE);
-    logger.warn('the API token file was readable by other users; tightened it', {
-      path,
-      mode: mode.toString(8),
-    });
+/**
+ * Read back a token an earlier start minted, tightening its mode on the way.
+ *
+ * Every step acts on one descriptor rather than on the path again: checking the
+ * mode of one file and then changing the mode of whatever the name refers to a
+ * moment later is two different files if anything moved in between.
+ *
+ * @throws InterlockError `CONFIG_INVALID` for a file no daemon wrote — a
+ *         symlink, or one holding nothing. Guessing past either silently
+ *         decides what the API authenticates against.
+ */
+function read(path: string, logger: Logger): string {
+  let handle: number;
+  try {
+    handle = openSync(path, OPEN_TOKEN);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? null;
+    throw new InterlockError(
+      'CONFIG_INVALID',
+      code === 'ELOOP' ? 'The API token file is a symlink' : 'The API token file could not be read',
+      {
+        cause: error,
+        details: { path, code },
+        remedy: `Delete ${path} and start the daemon again to mint a new token.`,
+      },
+    );
   }
 
-  const token = readFileSync(path, 'utf8').trim();
-  if (token === '') {
-    throw new InterlockError('CONFIG_INVALID', 'The API token file is empty', {
-      details: { path },
-      remedy: `Delete ${path} and start the daemon again to mint a new token.`,
-    });
+  try {
+    // Tightened rather than rotated. A botched `chmod -R` and a token another
+    // user actually read are indistinguishable from here, and only one of them
+    // is worth invalidating every configured client for. Closing the window is
+    // what this can do; saying so loudly is the rest.
+    const mode = fstatSync(handle).mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      fchmodSync(handle, TOKEN_FILE_MODE);
+      logger.warn('the API token file was readable by other users; tightened it', {
+        path,
+        mode: mode.toString(8),
+      });
+    }
+
+    const token = readFileSync(handle, 'utf8').trim();
+    if (token === '') {
+      throw new InterlockError('CONFIG_INVALID', 'The API token file is empty', {
+        details: { path },
+        remedy: `Delete ${path} and start the daemon again to mint a new token.`,
+      });
+    }
+    return token;
+  } finally {
+    closeSync(handle);
   }
-  return token;
 }
 
 /**
