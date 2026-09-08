@@ -187,20 +187,29 @@ export function createApiServer(options: ApiOptions): ApiServer {
       server = listener;
 
       return new Promise((resolve, reject) => {
-        const failed = (error: unknown): void => {
+        let bound = false;
+        // Kept for the life of the listener rather than removed once it binds.
+        // An `error` on an emitter with nothing listening is rethrown, so a
+        // failure after the bind — an accept that fails, a descriptor that goes
+        // away — would take the process down instead of being reported.
+        listener.on('error', (error: Error) => {
+          if (bound) {
+            log.error('the API listener failed', { error: error.message });
+            return;
+          }
           server = null;
           reject(bindFailure(error, config));
-        };
-        listener.once('error', failed);
+        });
         // The host is passed explicitly and is a literal type in the config, so
         // there is no spelling of this that listens on another interface.
         listener.listen(config.daemon.port, config.daemon.host, () => {
-          listener.removeListener('error', failed);
           const address = listener.address();
           if (address === null || typeof address === 'string') {
-            failed(new Error('the listener reported no address'));
+            server = null;
+            reject(bindFailure(new Error('the listener reported no address'), config));
             return;
           }
+          bound = true;
           log.info('API listening', { host: address.address, port: address.port });
           resolve({ host: address.address, port: address.port, token: minted });
         });
@@ -268,12 +277,22 @@ function sameOrigin(request: IncomingMessage): boolean {
   // not a host it was reached by.
   if (header.startsWith('[')) return false;
   const colon = header.lastIndexOf(':');
-  return LOOPBACK_HOSTS.has(colon === -1 ? header : header.slice(0, colon));
+  // Lowercased because a host name is case-insensitive: `LOCALHOST` is the same
+  // name, and refusing it would be a client that works everywhere else failing
+  // here. The port is deliberately not checked — whatever a request claims, it
+  // arrived on the port this listener holds.
+  const name = (colon === -1 ? header : header.slice(0, colon)).toLowerCase();
+  return LOOPBACK_HOSTS.has(name);
 }
 
 /**
  * Path segments, with the query string and empty segments dropped, or `null`
  * for a path that does not decode.
+ *
+ * Split before decoding, which is the order that matters: decoding first turns
+ * a `%2F` inside one segment into a separator and hands the caller a path it
+ * never sent, which is the classic traversal confusion. Doing it this way means
+ * an encoded slash stays inside the segment it was written in.
  */
 function pathSegments(url: string): string[] | null {
   const query = url.indexOf('?');
