@@ -1,10 +1,12 @@
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { connect } from 'node:net';
@@ -201,6 +203,7 @@ describe('localhost API', () => {
       const authorized = await call('/api/health', { token: bound.token, method });
       expect(authorized.status, method).toBe(405);
       expect(authorized.headers.allow).toBe('GET');
+      expect(authorized.body).toMatchObject({ error: { code: 'API_REQUEST_INVALID' } });
     }
   });
 
@@ -228,7 +231,35 @@ describe('localhost API', () => {
   });
 
   it('answers an unknown path with 404 once the token is right', async () => {
-    expect((await call('/api/nope', { token: bound.token })).status).toBe(404);
+    const response = await call('/api/nope', { token: bound.token });
+    expect(response.status).toBe(404);
+    // Not `REPO_NOT_FOUND`, which a client would report as a missing
+    // repository, and not `UNAUTHORIZED`, which would send someone to check a
+    // token that was fine.
+    expect(response.body).toMatchObject({ error: { code: 'API_REQUEST_INVALID' } });
+  });
+
+  it('never answers UNAUTHORIZED for a request whose token was accepted', async () => {
+    // The code is what a client reacts to; the message is not. Every one of
+    // these got past the token, so none of them may name it as the problem.
+    const past = [
+      await call('/api/health', { token: bound.token, method: 'POST' }),
+      await call('/api/nope', { token: bound.token }),
+      await call('/api/%', { token: bound.token }),
+      await call(`/api/repos/${ulid<RepoId>()}/branches`, { token: bound.token }),
+    ];
+    for (const response of past) {
+      expect(response.body).not.toMatchObject({ error: { code: 'UNAUTHORIZED' } });
+    }
+  });
+
+  it('answers a path it cannot decode as a client mistake, not a server fault', async () => {
+    // `decodeURIComponent('%')` raises, and left to the catch-all that is a 500
+    // with an error-level log line for what is only a malformed request.
+    const response = await call('/api/%', { token: bound.token });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ error: { code: 'API_REQUEST_INVALID' } });
+    expect(logs.filter((record) => record.level === 'error')).toStrictEqual([]);
   });
 
   it('refuses to start twice on one instance', async () => {
@@ -318,6 +349,37 @@ describe('the API token file', () => {
     ensureToken(dataDir, logger());
     expect(statSync(tokenPath(dataDir)).mode & 0o777).toBe(0o600);
     expect(logs.some((record) => record.level === 'warn')).toBe(true);
+  });
+
+  it('reports a data directory it did not create and finds readable by others', () => {
+    // The store warns about the same directory on the same terms. Whichever of
+    // the two runs first is the one that decides whether the user is told, so
+    // silence in either is silence.
+    const loose = join(dataDir, 'loose');
+    mkdirSync(loose, { mode: 0o755 });
+
+    ensureToken(loose, logger());
+    expect(statSync(loose).mode & 0o777).toBe(0o755);
+    expect(logs.map((record) => record.msg)).toContain(
+      'the directory holding Interlock state is readable beyond its owner',
+    );
+  });
+
+  it('sets the mode on a data directory it creates', () => {
+    const fresh = join(dataDir, 'fresh', 'nested');
+    ensureToken(fresh, logger());
+    expect(statSync(fresh).mode & 0o777).toBe(0o700);
+  });
+
+  it('refuses a token file that is a symlink rather than reading through it', () => {
+    // Everything after the open acts on what was opened, so following one here
+    // would tighten the mode of, and read, whatever it points at.
+    const elsewhere = join(dataDir, 'elsewhere');
+    writeFileSync(elsewhere, 'not-the-token\n', { mode: 0o600 });
+    symlinkSync(elsewhere, tokenPath(dataDir));
+
+    const log = logger();
+    expect(() => ensureToken(dataDir, log)).toThrowError(/symlink/u);
   });
 
   it('refuses an empty token file rather than authenticating against nothing', () => {

@@ -8,6 +8,12 @@
  * A refused operation is neither: `GIT_COMMAND_REFUSED` means Interlock's own
  * code asked for something the safety rules forbid, so it is a bug here rather
  * than a broken environment or a property of the repository under analysis.
+ *
+ * `API_REQUEST_INVALID` is the daemon saying it cannot serve the request as
+ * asked — an unknown route, a method it does not answer, a path it cannot
+ * decode. It is separate from `UNAUTHORIZED` because a client reacts to the two
+ * differently, and telling someone to check their token when they sent the
+ * wrong method is worse than saying nothing.
  */
 
 export type InterlockErrorCode =
@@ -27,6 +33,7 @@ export type InterlockErrorCode =
   | 'STORE_MIGRATION_FAILED'
   | 'DAEMON_UNREACHABLE'
   | 'UNAUTHORIZED'
+  | 'API_REQUEST_INVALID'
   | 'NOT_IMPLEMENTED';
 
 export interface InterlockErrorOptions extends ErrorOptions {

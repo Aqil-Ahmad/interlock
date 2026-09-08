@@ -101,7 +101,10 @@ export function createApiServer(options: ApiOptions): ApiServer {
     if (request.method !== 'GET') {
       response.setHeader('Allow', 'GET');
       send(response, 405, {
-        error: { code: 'UNAUTHORIZED', message: `${String(request.method)} is not allowed` },
+        error: {
+          code: 'API_REQUEST_INVALID',
+          message: `${String(request.method)} is not allowed`,
+        },
       });
       return;
     }
@@ -115,6 +118,19 @@ export function createApiServer(options: ApiOptions): ApiServer {
 
   const route = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const segments = pathSegments(request.url ?? '/');
+    if (segments === null) {
+      // A percent-escape that does not decode is a client typing mistake. Left
+      // to `decodeURIComponent`, the `URIError` reaches the catch-all and is
+      // answered as an internal error, with a matching line in the log.
+      //
+      // Raised rather than sent, unlike the 404 and the 405 below: those are
+      // protocol outcomes with a status of their own, while this is an error,
+      // and routing it through `statusFor` is what keeps that mapping something
+      // the suite reaches.
+      throw new InterlockError('API_REQUEST_INVALID', 'The request path could not be decoded', {
+        remedy: 'Check the percent-escapes in the path.',
+      });
+    }
 
     if (matches(segments, ['api', 'health'])) {
       send(response, 200, {
@@ -149,7 +165,10 @@ export function createApiServer(options: ApiOptions): ApiServer {
       }
     }
 
-    send(response, 404, { error: { code: 'REPO_NOT_FOUND', message: 'No such route' } });
+    // Not `REPO_NOT_FOUND`: a client matching on that would report a repository
+    // that does not exist when what it actually asked for was a path this
+    // daemon does not serve.
+    send(response, 404, { error: { code: 'API_REQUEST_INVALID', message: 'No such route' } });
   };
 
   return {
@@ -252,14 +271,23 @@ function sameOrigin(request: IncomingMessage): boolean {
   return LOOPBACK_HOSTS.has(colon === -1 ? header : header.slice(0, colon));
 }
 
-/** Path segments, with the query string and empty segments dropped. */
-function pathSegments(url: string): string[] {
+/**
+ * Path segments, with the query string and empty segments dropped, or `null`
+ * for a path that does not decode.
+ */
+function pathSegments(url: string): string[] | null {
   const query = url.indexOf('?');
   const path = query === -1 ? url : url.slice(0, query);
-  return path
-    .split('/')
-    .filter((segment) => segment !== '')
-    .map((segment) => decodeURIComponent(segment));
+  const segments: string[] = [];
+  for (const segment of path.split('/')) {
+    if (segment === '') continue;
+    try {
+      segments.push(decodeURIComponent(segment));
+    } catch {
+      return null;
+    }
+  }
+  return segments;
 }
 
 function matches(segments: readonly string[], expected: readonly string[]): boolean {
@@ -299,6 +327,7 @@ function statusFor(error: InterlockError): number {
     case 'REPO_NOT_FOUND':
       return 404;
     case 'CONFIG_INVALID':
+    case 'API_REQUEST_INVALID':
       return 400;
     case 'NOT_IMPLEMENTED':
       return 501;
