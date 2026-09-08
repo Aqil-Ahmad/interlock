@@ -4,6 +4,10 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-09
+
+- **Blocked, and it is a gap rather than a decision: nothing loads a config file, and nothing starts the daemon as a user would.** The daemon runs and the API answers — verified by hand against a real repository — but `main.ts` calls `resolveConfig()` with no argument, so `repos` is always empty and a repository can only be named by editing code. `configPath` exists in `shared` and is read nowhere; its only appearance is inside an error's `remedy`, which points a user at a file no daemon opens. Separately, `interlock daemon start` is named in `main.ts`'s own docstring and in the `interlock status` task, and is a `notImplemented` stub with no task behind it. Both are written into the `interlock status` task, because that is the next one picked up and M1's exit criteria — three worktrees under active edit, `interlock status` showing them — cannot be reached without them.
+
 ## 2026-09-08 — a second daemon review: one real bug, one crash, two latent
 
 - **The token file was visible before it held a token.** Created at its final name with an exclusive `wx` and filled in afterwards, which leaves a window where it exists and is empty — and the second daemon of a simultaneous first start reads exactly that, then refuses to start because "the token file is empty". The one case the exclusive create exists to handle was the case it got wrong. It is written under a random staging name and `link`ed into place now: `link` fails rather than replacing, so the first to reach it wins and everyone else reads a file that was complete before it had a name. Staging is random rather than the pid, because a crash leaves one behind and a reused pid would collide with it.

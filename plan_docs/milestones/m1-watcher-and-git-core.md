@@ -493,6 +493,18 @@ status` must not stop the process exiting, so the drain has a deadline and
   unreadable worktree as unknown rather than clean, prints an actionable error
   with the daemon stopped, and its exit codes are covered by tests.
 
+  **Two things this depends on have no task, and the milestone's exit criteria
+  need both.** Nothing reads a config file: `resolveConfig()` is called with no
+  argument, so `repos` is always empty and the only way to name a repository is
+  to edit `main.ts`. `configPath` is exported from `shared` and referenced in
+  one error `remedy`, which is the whole of it. And `main.ts` says it is
+  "started by `interlock daemon start`", `daemon` is a declared command, and the
+  task above tells this one to print that command when the daemon is down — but
+  nothing defines it. Decide whether each is its own task or a clause here
+  before starting, because "shows live branches, updating within seconds"
+  cannot be demonstrated without a way to say which repository and a way to
+  start the thing watching it.
+
 - [ ] **Agent session hooks**
       **Files:** `packages/daemon/src/hooks/`
       **What:** `registerSession`, `renderHookScripts` — map an agent session to
