@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, statSync } from 'node:fs';
+import { chmodSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { StatementSync } from 'node:sqlite';
@@ -17,6 +17,7 @@ import type {
   Repo,
   SpeculativeRun,
 } from '@interlock/shared';
+import { ensureDataDir } from '../data-dir.js';
 import { runMigrations } from './migrations/index.js';
 import {
   analyzerCacheParams,
@@ -146,8 +147,7 @@ export interface StoreOptions {
 /** The in-memory database SQLite recognises by name rather than by path. */
 const MEMORY_PATH = ':memory:';
 
-/** Owner-only. A directory needs `x` to be traversable; a database file does not. */
-const DATA_DIR_MODE = 0o700;
+/** Owner-only. An executable bit means nothing on a database. */
 const DB_FILE_MODE = 0o600;
 
 /**
@@ -224,19 +224,10 @@ function open(options: StoreOptions): Store {
     });
   }
 
-  if (path !== MEMORY_PATH) {
-    const parent = dirname(path);
-    // Only a directory this call created gets its mode set — `mkdir` masks the
-    // mode it is given with the umask. Tightening one that was already there
-    // would reach outside Interlock's own data dir: `openStore` takes any path,
-    // and a database put in a home or a shared directory must not silently
-    // change that directory for everything else using it.
-    if (mkdirSync(parent, { recursive: true, mode: DATA_DIR_MODE }) !== undefined) {
-      chmodSync(parent, DATA_DIR_MODE);
-    } else if ((statSync(parent).mode & 0o077) !== 0) {
-      log.warn('the directory holding the store is readable beyond its owner', { parent });
-    }
-  }
+  // `openStore` takes any path, so the directory it lands in is not necessarily
+  // Interlock's own; the shared helper is what keeps this and the token file
+  // from disagreeing about the mode of a directory they both create.
+  if (path !== MEMORY_PATH) ensureDataDir(dirname(path), log);
 
   // Foreign keys are on by default; pinning it here keeps a change to that
   // default from quietly turning the cascades into dangling rows.

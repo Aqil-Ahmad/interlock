@@ -1,7 +1,8 @@
-import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { runtimePath } from '@interlock/shared';
 import type { DaemonRuntime, Logger } from '@interlock/shared';
+import { ensureDataDir } from './data-dir.js';
 
 /**
  * How a running daemon tells a client on this machine where to find it.
@@ -14,7 +15,6 @@ import type { DaemonRuntime, Logger } from '@interlock/shared';
 
 /** Owner-only, like everything else under the data dir. */
 const RUNTIME_FILE_MODE = 0o600;
-const DATA_DIR_MODE = 0o700;
 
 /**
  * Publish the runtime file.
@@ -23,9 +23,9 @@ const DATA_DIR_MODE = 0o700;
  * atomic within a directory — a client reading it never sees half a file, and a
  * previous daemon's file is replaced rather than truncated and rewritten.
  */
-export function publishRuntime(dataDir: string, runtime: DaemonRuntime): void {
+export function publishRuntime(dataDir: string, runtime: DaemonRuntime, logger: Logger): void {
   const path = runtimePath(dataDir);
-  mkdirSync(dirname(path), { recursive: true, mode: DATA_DIR_MODE });
+  ensureDataDir(dirname(path), logger);
   const staging = `${path}.${String(runtime.pid)}.tmp`;
   try {
     writeFileSync(staging, `${JSON.stringify(runtime, null, 2)}\n`, { mode: RUNTIME_FILE_MODE });

@@ -259,7 +259,7 @@ describe('store', () => {
         expect(statSync(existing).mode & 0o777).toBe(0o755);
         // Silence would leave a loose directory looking deliberate.
         expect(records.map((r) => r.msg)).toContain(
-          'the directory holding the store is readable beyond its owner',
+          'the directory holding Interlock state is readable beyond its owner',
         );
         // The database itself is owner-only wherever it lands.
         expect(statSync(join(existing, 'interlock.db')).mode & 0o777).toBe(0o600);

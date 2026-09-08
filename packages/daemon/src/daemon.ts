@@ -117,7 +117,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
           pid: process.pid,
           startedAt: new Date().toISOString(),
         };
-        publishRuntime(config.dataDir, runtime);
+        publishRuntime(config.dataDir, runtime, log);
         log.info('daemon started', { port: runtime.port, repos: config.repos.length });
       } catch (error) {
         // A half-started daemon holds a port and a database handle, and the
