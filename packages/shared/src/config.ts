@@ -30,7 +30,24 @@ export interface InterlockConfig {
 export interface DaemonConfig {
   /** Loopback only; the literal type keeps it unconfigurable. */
   readonly host: '127.0.0.1';
+  /** `0` asks the OS for a free one, which is what parallel test workers use. */
   readonly port: number;
+}
+
+/**
+ * What a running daemon publishes so a client on this machine can reach it.
+ *
+ * The configured port may be `0`, and a daemon that crashed leaves this behind,
+ * so its presence is a claim rather than a guarantee: a client connects and
+ * treats a refused connection as the daemon being gone.
+ */
+export interface DaemonRuntime {
+  /** Refuse a daemon speaking a different wire format rather than guessing. */
+  readonly protocolVersion: number;
+  /** What the listener actually bound, never what was asked for. */
+  readonly port: number;
+  readonly pid: number;
+  readonly startedAt: string;
 }
 
 export interface SchedulerConfig {
@@ -313,6 +330,26 @@ export function configPath(dataDir: string = DEFAULT_DATA_DIR): string {
 }
 
 /**
+ * Where a running daemon publishes its port.
+ *
+ * Rewritten on every start and removed on a clean stop.
+ */
+export function runtimePath(dataDir: string = DEFAULT_DATA_DIR): string {
+  return join(dataDir, 'daemon.json');
+}
+
+/**
+ * Where the API bearer token lives, 0600.
+ *
+ * Separate from the runtime file because it is minted once and kept: agents and
+ * the MCP server are configured with it, so a token rotating on restart breaks
+ * every configured client.
+ */
+export function tokenPath(dataDir: string = DEFAULT_DATA_DIR): string {
+  return join(dataDir, 'token');
+}
+
+/**
  * Merge partial user config over the defaults and validate the result.
  *
  * @throws InterlockError `CONFIG_INVALID` listing every problem at once, so a
@@ -368,10 +405,18 @@ export function validateConfig(config: InterlockConfig): string[] {
     problems.push(`logLevel must be one of ${LOG_LEVELS.join(', ')}`);
   }
 
-  if (!isPort(config.daemon.port))
+  if (!isPort(config.daemon.port) && !isEphemeral(config.daemon.port))
     problems.push(`daemon.port out of range: ${String(config.daemon.port)}`);
-  if (!isPort(config.mcp.port)) problems.push(`mcp.port out of range: ${String(config.mcp.port)}`);
-  if (config.daemon.port === config.mcp.port) problems.push('daemon.port and mcp.port must differ');
+  if (!isPort(config.mcp.port) && !isEphemeral(config.mcp.port))
+    problems.push(`mcp.port out of range: ${String(config.mcp.port)}`);
+  // Two ephemeral requests never collide: the OS assigns each a free port.
+  if (
+    config.daemon.port === config.mcp.port &&
+    !isEphemeral(config.daemon.port) &&
+    !isEphemeral(config.mcp.port)
+  ) {
+    problems.push('daemon.port and mcp.port must differ');
+  }
 
   requireNumber(
     config.scheduler.debounceMs,
@@ -469,6 +514,17 @@ function requireBoolean(value: boolean, name: string, problems: string[]): void 
 
 function isPort(value: number): boolean {
   return Number.isInteger(value) && value > 1024 && value < 65_536;
+}
+
+/**
+ * `0` asks the OS for a free port and is read back off the listener.
+ *
+ * Accepted rather than a test-only escape hatch: parallel vitest workers each
+ * need a port nothing else holds, and a fixed one there is a flake that appears
+ * under load and never reproduces locally.
+ */
+function isEphemeral(value: number): boolean {
+  return value === 0;
 }
 
 export type DeepPartial<T> = {

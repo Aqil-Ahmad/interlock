@@ -381,22 +381,98 @@ every task here and is not repeated per task.
   schedule with a wide noise floor, never as a required check on a pull
   request.
 
-- [ ] **Daemon skeleton and localhost API**
-      **Files:** `packages/daemon/src/daemon.ts`, `packages/daemon/src/api/`
-      **What:** `createDaemon` wiring watcher → bus → store, and the routes
-      already listed in `api/index.ts`.
+- [x] **Daemon skeleton and localhost API**
+      **Files:** `packages/daemon/src/daemon.ts`, `packages/daemon/src/api/`,
+      `packages/daemon/src/watcher/index.ts`, `packages/shared/src/config.ts`
+      **What:** `createWatcher` joining the three watcher parts, `createDaemon`
+      wiring watcher → bus → store, and the routes M1 can answer.
 
-  Bind `127.0.0.1` explicitly — never `0.0.0.0`, never a bare port. Take port 0
-  and read back what the OS assigned: vitest runs files in parallel workers, and
-  two of them binding the same fixed port is a flake that appears once, under
-  load, and never reproduces locally. Generate a
-  bearer token at first start, store it 0600, require it on every route
-  including the WebSocket upgrade. Shut down cleanly on SIGINT and SIGTERM:
-  stop the watcher, drain in-flight work, close the store.
+  **Three routes, not the eight in `api/index.ts`.** That list is the finished
+  API and most of it is owned by later milestones: findings come from M2's
+  textual detection, `POST /check` from M2's scheduler, `/order` from M7, and
+  `WS /ws` is M6's own task. Building them now means routes that return an empty
+  array because nothing produces the data — which is exactly the failure
+  `notImplemented` exists to prevent, since "no findings" is the answer a working
+  detector gives. This task ships `GET /api/health`, `GET /api/repos` and
+  `GET /api/repos/:id/branches`: what the store already holds, and what
+  `interlock status` needs. The rest stay in the doc comment as the shape being
+  built toward. Leave the transport HTTP-only; M6 adds the stream when there is
+  something live to push.
 
-  **Done when:** a test asserts the listener address is `127.0.0.1`; a test
-  asserts an unauthenticated request gets 401 on every route; and SIGTERM during
-  an in-flight operation leaves no temp files and a readable database.
+  **`createWatcher` lands here.** The three watcher tasks built a filesystem
+  watcher, a debouncer, a sweep and a snapshot pipeline, and joined none of them
+  — the only composition that exists is in `scripts/watcher-bench.ts`, which
+  says so in a comment. `createWatcher` is a declared stub, so wiring watcher →
+  bus → store means writing it: an initial reconciliation, a signal path that
+  marks the worktree changed and reconciles the repository it belongs to, and a
+  timer at the **30s cadence** `log.md` recommends. Signals arrive naming a
+  worktree, so the watcher has to hold worktree → repository and re-target its
+  watches when a sweep changes the branch set. A linked worktree's `.git` is a
+  file naming its git dir, which is where its `HEAD` lives, while its `refs/`
+  live in the main checkout's — a target built from `<root>/.git` alone watches
+  the wrong file for every worktree but the first.
+
+  **Bind `127.0.0.1` explicitly — never `0.0.0.0`, never a bare port,** and read
+  the address back off the listener rather than trusting what was asked for.
+  `daemon.port` is honoured as configured; `0` means "let the OS choose", which
+  is what tests use, because vitest runs files in parallel workers and two of
+  them binding one fixed port is a flake that appears under load and never
+  reproduces locally. Reading back is what makes both cases the same code path.
+
+  **The port has to be discoverable, or the CLI cannot find the daemon.** A
+  runtime file in the data dir, 0600, written after the bind succeeds and removed
+  on a clean stop, carrying the port, the pid and when it started. Written by
+  rename onto its final name, so a CLI reading it never sees half a file. The
+  CLI depends on `shared` and not on `daemon`, so the shape and the path live in
+  `shared` beside `configPath`. A file left behind by a crash is a stale port,
+  not a running daemon; the connection being refused is what says so, which is
+  `DAEMON_UNREACHABLE` and already has a code.
+
+  **The token is minted once and kept, not per start.** Agents and the MCP server
+  are configured with it, so a token that rotated on restart would break every
+  configured client — it is a separate 0600 file from the runtime one, created
+  with an exclusive open so two daemons racing at first start cannot mint two.
+  Group or other bits on it mean the token may already have been read; tighten
+  the mode and warn naming the file rather than rotating, because a botched
+  `chmod -R` and a real compromise are indistinguishable from here and only one
+  of them is worth breaking every client for.
+
+  **Authenticate before routing.** A 404 for an unknown path on an
+  unauthenticated request enumerates the API to a caller who has no token, so the
+  token check runs first and an unknown route is 401 like everything else. Compare
+  in constant time — `timingSafeEqual` over a digest of each side, since it
+  throws on a length mismatch and the length is itself a leak. Check the `Host`
+  header too: a browser page can post to a loopback port, and a name that
+  resolves to 127.0.0.1 is how that is done. Send no CORS headers at all.
+
+  **The event log is persisted here.** `EventBus` takes an `onRecord` hook and
+  nothing has ever passed one, so every event published so far exists only in
+  memory and `readEvents` has never had anything to replay. The hook is
+  synchronous and `appendEvent` is not, so appends are serialised through a queue
+  — floating the promises reorders an append-only log keyed on a ULID, which is
+  the one property replay depends on.
+
+  **Say what draining means.** In order: stop the timer and the filesystem
+  watcher so no new work starts; cancel pending debounce batches, which describe
+  changes the next start reconciles anyway; await the sweep in flight, which is
+  the single-flight promise; close the listener, destroying idle keep-alive
+  sockets, because `close` otherwise waits for a connection that is not going to
+  send anything; then the store, then the runtime file. Bounded: a wedged `git
+status` must not stop the process exiting, so the drain has a deadline and
+  proceeds past it with a warning. Stop is idempotent — two signals arrive more
+  often than not.
+
+  `purge` stays `notImplemented`; the kill switch is M6's Daemon UX task.
+
+  **Done when:** a test asserts the listener address is `127.0.0.1` and that the
+  port read back off the listener is the one in the runtime file; a test asserts
+  an unauthenticated request gets 401 on every route _and_ on a path that does
+  not exist; a test asserts a token differing only in length is rejected; the
+  runtime file and the token file are 0600 and the token survives a restart while
+  the port need not; an edit in a watched worktree reaches `branch.snapshot` and
+  is readable back through `readEvents` after a restart; and SIGTERM during an
+  in-flight sweep leaves no temp files, no runtime file and a database that
+  reopens.
   **Constraints:** hard rule 3. A regression here is a vulnerability that
   exposes the user's source over the network, not a bug.
 
