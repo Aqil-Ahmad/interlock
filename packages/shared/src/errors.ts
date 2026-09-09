@@ -16,25 +16,38 @@
  * wrong method is worse than saying nothing.
  */
 
-export type InterlockErrorCode =
-  | 'CONFIG_INVALID'
-  | 'REPO_NOT_FOUND'
-  | 'REPO_NOT_GIT'
-  | 'REPO_BARE'
-  | 'GIT_COMMAND_FAILED'
-  | 'GIT_COMMAND_REFUSED'
-  | 'SHADOW_UNAVAILABLE'
-  | 'MERGE_FAILED'
-  | 'SANDBOX_UNAVAILABLE'
-  | 'SANDBOX_TIMEOUT'
-  | 'TOOLCHAIN_UNSUPPORTED'
-  | 'ANALYZER_INFRA_FAILURE'
-  | 'STORE_UNAVAILABLE'
-  | 'STORE_MIGRATION_FAILED'
-  | 'DAEMON_UNREACHABLE'
-  | 'UNAUTHORIZED'
-  | 'API_REQUEST_INVALID'
-  | 'NOT_IMPLEMENTED';
+/**
+ * An array rather than a bare union, because a code arrives over the API as
+ * well as from this process: a client reading one out of a response body has to
+ * be able to ask whether it is a code at all before treating it as one.
+ */
+export const INTERLOCK_ERROR_CODES = [
+  'CONFIG_INVALID',
+  'REPO_NOT_FOUND',
+  'REPO_NOT_GIT',
+  'REPO_BARE',
+  'GIT_COMMAND_FAILED',
+  'GIT_COMMAND_REFUSED',
+  'SHADOW_UNAVAILABLE',
+  'MERGE_FAILED',
+  'SANDBOX_UNAVAILABLE',
+  'SANDBOX_TIMEOUT',
+  'TOOLCHAIN_UNSUPPORTED',
+  'ANALYZER_INFRA_FAILURE',
+  'STORE_UNAVAILABLE',
+  'STORE_MIGRATION_FAILED',
+  'DAEMON_UNREACHABLE',
+  'UNAUTHORIZED',
+  'API_REQUEST_INVALID',
+  'NOT_IMPLEMENTED',
+] as const;
+
+export type InterlockErrorCode = (typeof INTERLOCK_ERROR_CODES)[number];
+
+/** Whether an unknown value — a field of a JSON body, say — is a known code. */
+export function isInterlockErrorCode(value: unknown): value is InterlockErrorCode {
+  return (INTERLOCK_ERROR_CODES as readonly unknown[]).includes(value);
+}
 
 export interface InterlockErrorOptions extends ErrorOptions {
   /** Machine-readable context. Must never contain secrets or file contents. */
