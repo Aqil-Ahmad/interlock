@@ -25,32 +25,43 @@ export interface RenderOptions {
 const DEFAULT_FILE_LIMIT = 10;
 
 /**
+ * The bidi controls, by Unicode's own definition rather than by a list.
+ *
+ * The family is exactly `Bidi_Control`, and hand-maintaining its ranges means
+ * hand-maintaining them again when Unicode adds one — which already happened
+ * once here: an explicit list of the marks, embeddings, overrides and isolates
+ * missed `U+061C ARABIC LETTER MARK`, which behaves like `U+200F`. Naming the
+ * property cannot drift, and carries no literal control character.
+ */
+const BIDI_CONTROL = /\p{Bidi_Control}/u;
+
+/**
  * Whether a code point must never reach a terminal verbatim.
  *
  * Paths here are repository content — an untracked file is named by whoever
  * writes the repository, and the agents Interlock watches write repositories.
  * An escape sequence in a path moves the cursor, clears the screen or sets a
- * colour that outlives the process; the bidi controls reorder what is displayed,
+ * colour that outlives the process; a bidi control reorders what is displayed,
  * so the name shown is not the name on disk. Both are `wrapUntrusted`'s
  * reasoning one layer down, with the terminal as the boundary.
  *
- * Scanned rather than matched against a character class, for the reason the
+ * Scanned rather than matched against one character class, for the reason the
  * glob matcher scans: the input is chosen by the repository, and a predicate
  * can say why each range is here where a dense class cannot.
+ *
+ * Every point this answers for is inside the BMP, which is what lets the
+ * escapes below be four hex digits.
  */
 function unsafe(point: number): boolean {
   return (
     // C0, which is where ESC lives, and with it every terminal sequence.
     point < 0x20 ||
     point === 0x7f ||
-    // C1. Rarely sent deliberately, still acted on by terminals that decode it.
+    // C1. Not a redundant range: `U+009B` is CSI, the single character that
+    // does what `ESC [` does, so a terminal decoding C1 acts on it and a guard
+    // against ESC alone lets the compact form of every sequence through.
     (point >= 0x80 && point <= 0x9f) ||
-    // Directional marks, embeddings, overrides and isolates: the trojan-source
-    // family, which changes the reading order without changing the bytes.
-    point === 0x200e ||
-    point === 0x200f ||
-    (point >= 0x202a && point <= 0x202e) ||
-    (point >= 0x2066 && point <= 0x2069)
+    BIDI_CONTROL.test(String.fromCodePoint(point))
   );
 }
 
@@ -162,36 +173,63 @@ export function renderStatus(views: readonly RepoView[], options: RenderOptions 
 /**
  * The same facts, for something that is not a person.
  *
- * `JSON.stringify` escapes every control character it emits, so this needs no
- * sanitising of its own — and it must not do any, since a consumer wants the
- * path that is on disk rather than one made safe for a screen.
+ * Paths are carried as they are on disk rather than made safe for a screen: a
+ * consumer wants the name it can open, and an escaped one is a different name.
+ *
+ * `JSON.stringify` escapes `U+0000`–`U+001F` and nothing else, so DEL, the C1
+ * block and every bidi control reach the output verbatim — and this document is
+ * piped to a terminal as often as it is parsed. Escaping the rest as `\uXXXX`
+ * keeps both: it is still JSON, `JSON.parse` returns the identical string, and
+ * nothing reading the raw bytes ever sees a control character.
  */
 export function renderJson(views: readonly RepoView[]): string {
-  return `${JSON.stringify(
-    {
-      repos: views.map((view) => ({
-        id: view.repo.id,
-        rootPath: view.repo.rootPath,
-        defaultBranch: view.repo.defaultBranch,
-        branches: view.branches.map((branch) => ({
-          name: branch.name,
-          ref: branch.ref,
-          headSha: branch.headSha,
-          state: branchState(branch),
-          worktreePath: branch.worktreePath,
-          fileCount: branch.dirty === null ? null : fileCount(branch),
-          files:
-            branch.dirty === null
-              ? null
-              : {
-                  staged: branch.dirty.stagedFiles,
-                  unstaged: branch.dirty.unstagedFiles,
-                  untracked: branch.dirty.untrackedFiles,
-                },
+  return `${escapeControls(
+    JSON.stringify(
+      {
+        repos: views.map((view) => ({
+          id: view.repo.id,
+          rootPath: view.repo.rootPath,
+          defaultBranch: view.repo.defaultBranch,
+          branches: view.branches.map((branch) => ({
+            name: branch.name,
+            ref: branch.ref,
+            headSha: branch.headSha,
+            state: branchState(branch),
+            worktreePath: branch.worktreePath,
+            fileCount: branch.dirty === null ? null : fileCount(branch),
+            files:
+              branch.dirty === null
+                ? null
+                : {
+                    staged: branch.dirty.stagedFiles,
+                    unstaged: branch.dirty.unstagedFiles,
+                    untracked: branch.dirty.untrackedFiles,
+                  },
+          })),
         })),
-      })),
-    },
-    null,
-    2,
+      },
+      null,
+      2,
+    ),
   )}\n`;
+}
+
+/**
+ * Escape what `JSON.stringify` left raw, using the same idea of unsafe.
+ *
+ * Applied to the whole document rather than to each string, which is safe for
+ * one reason and one reason only: `stringify` has already escaped every C0
+ * inside every string, so what is left of that range is the newline and the
+ * indentation of the pretty-print. Escaping those produces a document that is
+ * no longer JSON, so C0 is skipped here and everything above it — DEL, C1, the
+ * bidi controls — can only have come from a string.
+ */
+function escapeControls(json: string): string {
+  let out = '';
+  for (const character of json) {
+    const point = character.codePointAt(0) ?? 0;
+    const escape = point >= 0x20 && unsafe(point);
+    out += escape ? `\\u${point.toString(16).padStart(4, '0')}` : character;
+  }
+  return out;
 }

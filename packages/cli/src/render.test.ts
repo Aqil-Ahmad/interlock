@@ -11,6 +11,12 @@ import type { RepoView } from './render.js';
  */
 
 const ESC = String.fromCharCode(0x1b);
+/** CSI as one character: what `ESC [` does, without the ESC. */
+const CSI = String.fromCharCode(0x9b);
+const DEL = String.fromCharCode(0x7f);
+const ALM = String.fromCharCode(0x061c);
+const LRM = String.fromCharCode(0x200e);
+const RLO = String.fromCharCode(0x202e);
 
 function repo(overrides: Partial<Repo> = {}): Repo {
   const id = ulid<RepoId>();
@@ -78,6 +84,32 @@ describe('safeText', () => {
 
   it('escapes a newline, so one path cannot pose as two lines', () => {
     expect(safeText('a.txt\nfeature/other  clean')).toBe('a.txt\\x0afeature/other  clean');
+  });
+
+  it('escapes the C1 block, where CSI is one character rather than two', () => {
+    // A guard against ESC alone lets the compact form of every sequence past.
+    expect(safeText(`${CSI}31mred.ts`)).toBe('\\x9b31mred.ts');
+    expect(safeText(DEL)).toBe('\\x7f');
+  });
+
+  it('escapes every code point Unicode calls a bidi control', () => {
+    // Enumerated rather than sampled, because the list this used to hand-hold
+    // was missing one: U+061C, which behaves like the right-to-left mark.
+    const controls: string[] = [];
+    for (let point = 0; point <= 0xffff; point++) {
+      const character = String.fromCodePoint(point);
+      if (/\p{Bidi_Control}/u.test(character)) controls.push(character);
+    }
+    expect(controls.length).toBeGreaterThan(0);
+    for (const character of controls) {
+      expect(safeText(character), character.codePointAt(0)?.toString(16)).not.toBe(character);
+    }
+  });
+
+  it('escapes the marks as well as the overrides', () => {
+    expect(safeText(ALM)).toBe('\\u{61c}');
+    expect(safeText(LRM)).toBe('\\u{200e}');
+    expect(safeText(RLO)).toBe('\\u{202e}');
   });
 
   it('escapes the bidi controls that reorder what is displayed', () => {
@@ -214,11 +246,29 @@ describe('renderJson', () => {
     expect(parsed.repos[0]?.branches[0]?.files?.untracked[0]).toBe(`${ESC}x`);
   });
 
-  it('escapes the control character in its own output, so the text is still safe', () => {
-    // `JSON.stringify` does this, which is why the renderer must not: the string
-    // is transported intact and the document is inert.
-    const text = renderJson([{ repo: repo(), branches: [dirty({ untracked: [`${ESC}x`] })] }]);
-    expect(text).not.toContain(ESC);
+  it('leaves no control character raw in the document, whatever JSON escapes', () => {
+    // `JSON.stringify` escapes U+0000-U+001F and nothing else, so DEL, the C1
+    // block and every bidi control reach the output verbatim — and this is
+    // piped to a terminal as often as it is parsed.
+    const paths = [`${ESC}a`, `${CSI}b`, `${DEL}c`, `${RLO}d`, `${ALM}e`, `${LRM}f`];
+    const text = renderJson([{ repo: repo(), branches: [dirty({ untracked: paths })] }]);
+
+    for (const raw of [ESC, CSI, DEL, RLO, ALM, LRM]) {
+      expect(text, raw.codePointAt(0)?.toString(16)).not.toContain(raw);
+    }
     expect(text).toContain('\\u001b');
+    expect(text).toContain('\\u009b');
+    expect(text).toContain('\\u202e');
+  });
+
+  it('parses back to the paths that are on disk, byte for byte', () => {
+    // The escaping must cost the consumer nothing: an escaped name is a
+    // different name, and a consumer wants one it can open.
+    const paths = [`${ESC}a`, `${CSI}b`, `${DEL}c`, `${RLO}d`, `${ALM}e`];
+    const parsed = JSON.parse(
+      renderJson([{ repo: repo(), branches: [dirty({ untracked: paths })] }]),
+    ) as { repos: { branches: { files: { untracked: string[] } | null }[] }[] };
+
+    expect(parsed.repos[0]?.branches[0]?.files?.untracked).toStrictEqual(paths);
   });
 });
