@@ -45,6 +45,9 @@ importers:
         specifier: workspace:*
         version: link:../shared
     devDependencies:
+      '@interlock/daemon':
+        specifier: workspace:*
+        version: link:../daemon
       '@types/node':
         specifier: ^26.4.0
         version: 26.4.0
