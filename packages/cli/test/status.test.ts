@@ -195,6 +195,33 @@ describe('interlock status', () => {
       }
     });
 
+    it('renders a real branch name carrying a bidi control without letting it through', async () => {
+      // Git refuses ASCII controls in a ref name and accepts this one, so it is
+      // a name an agent can actually create — and it reorders what a terminal
+      // displays, so the name shown is not the name on disk.
+      const rlo = String.fromCodePoint(0x202e);
+      git(root, 'branch', `wip/${rlo}payload`);
+
+      await until(async () => {
+        await status('--data-dir', dataDir, '--json');
+        const parsed = JSON.parse(stdout()) as { repos: { branches: { name: string }[] }[] };
+        return parsed.repos[0]?.branches.some((b) => b.name.includes(rlo)) ?? false;
+      }, 'the branch to reach the report');
+
+      // The machine path carries it as it is on disk, escaped in transport.
+      await status('--data-dir', dataDir, '--json');
+      const json = stdout();
+      expect(json).not.toContain(rlo);
+      expect(json).toContain('\\u202e');
+      const parsed = JSON.parse(json) as { repos: { branches: { name: string }[] }[] };
+      expect(parsed.repos[0]?.branches.some((b) => b.name === `wip/${rlo}payload`)).toBe(true);
+
+      // The human path never carries it at all.
+      await status('--data-dir', dataDir);
+      expect(stdout()).not.toContain(rlo);
+      expect(stdout()).toContain('\\u{202e}');
+    });
+
     it('does not tell someone to start a daemon that is already running', async () => {
       // A token the daemon will refuse. The remedy has to be about the token,
       // because starting the daemon is something they have already done.
@@ -241,6 +268,9 @@ describe('interlock status', () => {
 
   describe('when the daemon is another build', () => {
     let stand: Server | null = null;
+    /** How many requests were being answered at once, at the busiest moment. */
+    let peak = 0;
+    let inFlight = 0;
 
     /**
      * A listener standing in for a daemon this build did not produce.
@@ -251,14 +281,22 @@ describe('interlock status', () => {
      * which is what may be stood in for.
      */
     const serve = async (
-      routes: Record<string, { status: number; body: unknown }>,
+      routes: Record<string, { status: number; body: unknown; raw?: string; delayMs?: number }>,
     ): Promise<void> => {
       stand = createServer((request, response) => {
         const path = (request.url ?? '/').split('?')[0] ?? '/';
         const answer = routes[path] ?? { status: 404, body: {} };
-        const payload = JSON.stringify(answer.body);
-        response.writeHead(answer.status, { 'content-type': 'application/json' });
-        response.end(payload);
+        const payload = answer.raw ?? JSON.stringify(answer.body);
+
+        const finish = (): void => {
+          response.writeHead(answer.status, { 'content-type': 'application/json' });
+          response.end(payload);
+          inFlight -= 1;
+        };
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        if (answer.delayMs === undefined) finish();
+        else setTimeout(finish, answer.delayMs);
       });
       const listener = stand;
       await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', resolve));
@@ -269,6 +307,11 @@ describe('interlock status', () => {
       writeFileSync(runtimePath(dataDir), JSON.stringify({ port: address.port }), { mode: 0o600 });
       writeFileSync(tokenPath(dataDir), 'stand-in\n', { mode: 0o600 });
     };
+
+    beforeEach(() => {
+      peak = 0;
+      inFlight = 0;
+    });
 
     afterEach(async () => {
       const listener = stand;
@@ -286,6 +329,97 @@ describe('interlock status', () => {
       expect(stderr()).toContain('different protocol');
       expect(stderr()).toContain('999');
       expect(stdout()).toBe('');
+    });
+
+    it('keeps the code the daemon chose rather than re-minting every failure', async () => {
+      // A repository that vanished between listing it and asking about it is
+      // `REPO_NOT_FOUND` at the daemon, and a script matching on codes must not
+      // be told the request was malformed instead.
+      await serve({
+        '/api/health': { status: 200, body: { protocolVersion: 1 } },
+        '/api/repos': {
+          status: 200,
+          body: {
+            repos: [
+              {
+                id: 'gone',
+                rootPath: '/x',
+                defaultBranch: 'main',
+                shadowPath: '/s',
+                config: {},
+                discoveredAt: 'now',
+                lastSeenAt: 'now',
+              },
+            ],
+          },
+        },
+        '/api/repos/gone/branches': {
+          status: 404,
+          body: { error: { code: 'REPO_NOT_FOUND', message: 'No such repository' } },
+        },
+      });
+
+      expect(await status('--data-dir', dataDir)).toBe(70);
+      // The code, not just the prose: a script is meant to react to it without
+      // matching on a message that is free to change.
+      expect(stderr()).toContain('REPO_NOT_FOUND');
+      expect(stderr()).toContain('No such repository');
+      expect(stderr()).not.toContain('API_REQUEST_INVALID');
+    });
+
+    it('refuses to pass on a code this build has never heard of', async () => {
+      // The code arrives from another process, and one that is not a code is
+      // not something to hand to a caller matching on them.
+      await serve({
+        '/api/health': { status: 200, body: { protocolVersion: 1 } },
+        '/api/repos': {
+          status: 500,
+          body: { error: { code: 'SOMETHING_NEW', message: 'from a later build' } },
+        },
+      });
+
+      expect(await status('--data-dir', dataDir)).toBe(70);
+      expect(stderr()).toContain('API_REQUEST_INVALID');
+      expect(stderr()).not.toContain('SOMETHING_NEW');
+      expect(stderr()).toContain('from a later build');
+    });
+
+    it('survives an error body that is not JSON at all', async () => {
+      await serve({
+        '/api/health': { status: 200, body: { protocolVersion: 1 } },
+        '/api/repos': { status: 502, body: null, raw: '<html>gateway</html>' },
+      });
+
+      expect(await status('--data-dir', dataDir)).toBe(70);
+      expect(stderr()).not.toBe('');
+    });
+
+    it('asks about every repository at once rather than one after another', async () => {
+      // Each request carries its own timeout, so a serial pass multiplies the
+      // worst case by the number of repositories. Asserted on overlap rather
+      // than on elapsed time, which passes under load whatever the code does.
+      const repos = ['one', 'two', 'three'].map((id) => ({
+        id,
+        rootPath: `/work/${id}`,
+        defaultBranch: 'main',
+        shadowPath: `/s/${id}`,
+        config: {},
+        discoveredAt: 'now',
+        lastSeenAt: 'now',
+      }));
+      await serve({
+        '/api/health': { status: 200, body: { protocolVersion: 1 } },
+        '/api/repos': { status: 200, body: { repos } },
+        ...Object.fromEntries(
+          repos.map((repo) => [
+            `/api/repos/${repo.id}/branches`,
+            { status: 200, body: { branches: [] }, delayMs: 100 },
+          ]),
+        ),
+      });
+
+      expect(await status('--data-dir', dataDir)).toBe(0);
+      expect(peak).toBeGreaterThan(1);
     });
 
     it('prints the remedy the daemon sent rather than a status code', async () => {
@@ -326,6 +460,26 @@ describe('interlock status', () => {
     it('accepts --data-dir=<path> as well as two arguments', async () => {
       expect(await status(`--data-dir=${dataDir}`)).toBe(69);
       expect(stderr()).toContain('No daemon is running');
+    });
+
+    it('explains itself even when another argument is wrong', async () => {
+      // Whoever mistyped an option is the person most likely to have wanted the
+      // help, so refusing to print it because of that mistake is the least
+      // useful moment to stop.
+      expect(await status('--everything', '--help')).toBe(0);
+      expect(stdout()).toContain('Usage: interlock status');
+      expect(stderr()).toBe('');
+    });
+
+    it('says a data dir that is a file is not a directory', async () => {
+      const notADir = join(base, 'a-file');
+      writeFileSync(notADir, 'not a directory\n');
+
+      // Reported as the path being wrong, not as a daemon nobody started —
+      // starting one would show the same message again.
+      expect(await status('--data-dir', notADir)).toBe(70);
+      expect(stderr()).toContain('not a directory');
+      expect(stderr()).not.toContain('Start it with');
     });
 
     it('prints usage that names the exit codes it uses', async () => {
