@@ -1,4 +1,6 @@
 import { notImplemented } from '@interlock/shared';
+import { statusCommand } from './status.js';
+import type { Command } from './command.js';
 
 /**
  * CLI command surface.
@@ -7,23 +9,16 @@ import { notImplemented } from '@interlock/shared';
  * usable over SSH and scriptable.
  */
 
-export interface Command {
-  readonly name: string;
-  readonly summary: string;
-  /** Returns a process exit code. */
-  run(args: readonly string[]): Promise<number>;
-}
+export type { Command } from './command.js';
+export { runStatus, statusCommand } from './status.js';
+export type { StatusIo } from './status.js';
 
 const todo = (name: string): Command['run'] => {
   return () => notImplemented(`interlock ${name}`);
 };
 
 export const COMMANDS: readonly Command[] = [
-  {
-    name: 'status',
-    summary: 'Show in-flight branches, their dirty state and open findings',
-    run: todo('status'),
-  },
+  statusCommand,
   {
     name: 'watch',
     summary: 'Follow findings live in the terminal',

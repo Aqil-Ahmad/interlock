@@ -5,3 +5,5 @@
  * rather than the internals so measurements reflect what a user sees.
  */
 export * from './commands/index.js';
+export * from './render.js';
+export * from './client/index.js';
