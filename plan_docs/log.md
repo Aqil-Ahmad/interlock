@@ -4,6 +4,13 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-10 — three review findings on the sanitiser, all real
+
+- **The bidi list was one code point short, and hand-maintaining it was the bug.** `U+061C ARABIC LETTER MARK` behaves like `U+200F` and was not in the marks-embeddings-overrides-isolates list — enumerated against `\p{Bidi_Control}` it was the only one of the twelve missing. The list is gone: the predicate names the Unicode property, which is exactly the family the comment claimed and cannot drift when Unicode adds another. A mutation replacing the property with the old hand list fails the suite now.
+- **Two branches of the sanitiser had no test, and one of them mattered.** `U+009B` is CSI — the single character that does what `ESC [` does — so a guard against ESC alone lets the compact form of every escape sequence through, and nothing pinned the C1 range. Neither did anything pin the directional marks. Both are asserted now, and the bidi set is enumerated rather than sampled.
+- **`renderJson`'s justification was wrong about JSON.** `JSON.stringify` escapes `U+0000`–`U+001F` and nothing else, so DEL, C1 and every bidi control reached the output verbatim — the same attack the human path defends against, through the machine path, and `--json` is piped to a terminal as often as it is parsed. The rest are emitted as `\uXXXX`: still JSON, `JSON.parse` returns the identical string, and a consumer gets the path that is on disk. Not sanitised, escaped — the distinction is the whole reason the original decision was right.
+- **The first attempt at that broke every JSON test, which is what the round-trip assertion is for.** Escaping was applied to the whole document on the reasoning that JSON's structural characters are all ASCII — true, and irrelevant, because a pretty-printed document's newlines and indentation _are_ C0. `stringify` has already escaped every C0 inside a string, so what is left of that range is structure and is skipped; everything above it can only have come from a string.
+
 ## 2026-09-09 — `interlock status`, and one branch that could not be reached
 
 - **A branch of the renderer was provably unreachable and mutation found it.** An unknown branch was special-cased so it never printed a file count — but a worktree nobody could read has no files to count, so the special case and the fall-through produced the same string for every input. Removed; the guard that does the work is the count being omitted at zero, and that one is tested. Same shape as the `closeIdleConnections` removed in the daemon round: defence that duplicates something already true.
