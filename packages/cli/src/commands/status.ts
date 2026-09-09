@@ -66,13 +66,16 @@ const processIo: StatusIo = {
  */
 function parseArgs(args: readonly string[], env: StatusIo['env']): Options {
   let json = false;
-  let help = false;
+  // Asked before anything is validated, because someone who mistyped an option
+  // is the person most likely to have wanted this — refusing to explain the
+  // options because one of them was wrong is the least helpful moment to stop.
+  const help = args.includes('--help') || args.includes('-h');
   let dataDir = env.INTERLOCK_DATA_DIR ?? DEFAULT_DATA_DIR;
+  if (help) return { json: false, dataDir, help };
 
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (arg === '--json') json = true;
-    else if (arg === '--help' || arg === '-h') help = true;
     else if (arg === '--data-dir') {
       const value = args[++index];
       if (value === undefined || value.startsWith('-')) {
@@ -118,10 +121,13 @@ export async function runStatus(
 
   try {
     const client = await connectDaemon(options.dataDir);
-    const views: RepoView[] = [];
-    for (const repo of await client.repos()) {
-      views.push({ repo, branches: await client.branches(repo.id) });
-    }
+    const repos = await client.repos();
+    // Together rather than one after another: each carries its own timeout, so
+    // a serial pass multiplies the worst case by the number of repositories
+    // while the daemon answers all of them off one local socket pool.
+    const views: RepoView[] = await Promise.all(
+      repos.map(async (repo) => ({ repo, branches: await client.branches(repo.id) })),
+    );
     io.out(options.json ? renderJson(views) : renderStatus(views));
     // Whatever it found. A report that failed the build because it had
     // something to report would be used once and then piped to `true`.
@@ -135,12 +141,17 @@ export async function runStatus(
 }
 
 /**
- * The message and, when there is one, the remedy — which is the only part a
- * user can act on and is printed verbatim.
+ * The code, the message and, when there is one, the remedy.
+ *
+ * The code leads because a stable one is the whole reason it exists — a caller
+ * is meant to react to it without matching on prose, and a failure that prints
+ * only the prose leaves matching on prose as the only option. The remedy is the
+ * part a person can act on and is printed verbatim.
  */
 function describe(error: unknown): string {
   if (!isInterlockError(error)) return error instanceof Error ? error.message : String(error);
-  return error.remedy === undefined ? error.message : `${error.message}\n\n${error.remedy}`;
+  const line = `${error.code}: ${error.message}`;
+  return error.remedy === undefined ? line : `${line}\n\n${error.remedy}`;
 }
 
 export const statusCommand: Command = {

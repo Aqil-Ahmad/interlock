@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import {
   INTERLOCK_PROTOCOL_VERSION,
   InterlockError,
+  isInterlockErrorCode,
   runtimePath,
   tokenPath,
 } from '@interlock/shared';
@@ -177,7 +178,22 @@ function readToken(dataDir: string): string {
   return token;
 }
 
+/**
+ * No runtime file — which is usually a daemon nobody started, and sometimes a
+ * data dir that is not one.
+ *
+ * `ENOTDIR` says the path names a file, and telling someone to start a daemon
+ * against it would have them do that and see the same message again.
+ */
 function notStarted(dataDir: string, cause: unknown): InterlockError {
+  const code = (cause as NodeJS.ErrnoException | null)?.code;
+  if (code === 'ENOTDIR') {
+    return new InterlockError('CONFIG_INVALID', 'The data directory is not a directory', {
+      cause,
+      details: { dataDir },
+      remedy: `${dataDir} is a file. Pass --data-dir the directory the daemon keeps its state in.`,
+    });
+  }
   return new InterlockError('DAEMON_UNREACHABLE', 'No daemon is running for this data directory', {
     cause,
     details: { dataDir },
@@ -195,17 +211,26 @@ function notRunning(dataDir: string, port: number, cause: unknown): InterlockErr
 }
 
 /**
- * Rebuild the daemon's own error, so its `remedy` survives the wire.
+ * Rebuild the daemon's own error, so what it said survives the wire.
  *
- * The API answers a failure with the same shape `InterlockError.toJSON`
- * produces. Discarding it and reporting the status code instead would throw
- * away the one part a user can act on.
+ * The API answers a failure with the shape `InterlockError.toJSON` produces,
+ * and all three parts of it matter. The `remedy` is the only part a user can
+ * act on. The `code` is what a script reacts to, and re-minting every failure
+ * as one code loses the distinction the daemon drew — a repository that
+ * disappeared between listing it and asking about it is `REPO_NOT_FOUND` there
+ * and must not read as a malformed request here.
+ *
+ * The code is checked rather than trusted: it arrives from another process, and
+ * one this build does not know is not a code to hand to a caller matching on
+ * them.
  */
 async function failure(response: Response, path: string): Promise<InterlockError> {
   let body: unknown;
   try {
     body = await response.json();
   } catch {
+    // An error with no body, or one that is not JSON. The status is then all
+    // there is, and it is still a failure rather than something to read past.
     body = null;
   }
 
@@ -213,9 +238,10 @@ async function failure(response: Response, path: string): Promise<InterlockError
     ?.error;
   const message = typeof error?.message === 'string' ? error.message : response.statusText;
   const remedy = typeof error?.remedy === 'string' ? error.remedy : undefined;
+  const code = isInterlockErrorCode(error?.code) ? error.code : 'API_REQUEST_INVALID';
 
-  return new InterlockError('API_REQUEST_INVALID', `The daemon refused the request: ${message}`, {
-    details: { path, status: response.status, code: error?.code ?? null },
+  return new InterlockError(code, `The daemon refused the request: ${message}`, {
+    details: { path, status: response.status },
     ...(remedy === undefined ? {} : { remedy }),
   });
 }
