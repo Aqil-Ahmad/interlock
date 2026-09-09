@@ -20,6 +20,7 @@
     "@interlock/shared": "workspace:*"
   },
   "devDependencies": {
+    "@interlock/daemon": "workspace:*",
     "@types/node": "^26.4.0"
   }
 }
