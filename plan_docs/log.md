@@ -4,6 +4,15 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-10 — a second status review: the client kept the code and threw it away
+
+- **Re-minting every failure as one code was the bug this repo fixed on the server a round ago, reached from the other side.** A repository that vanished between listing it and asking about it is `REPO_NOT_FOUND` at the daemon and was `API_REQUEST_INVALID` by the time a script saw it. The daemon's code survives the wire now — checked rather than trusted, since it arrives from another process, which needed `INTERLOCK_ERROR_CODES` as a runtime array in `shared` alongside the union it derives, the way `LOG_LEVELS` already does.
+- **Mutation then showed the preserved code was unobservable, which was the more interesting half.** Both `REPO_NOT_FOUND` and `API_REQUEST_INVALID` exit 70 and only the message was printed, so keeping the code changed nothing anyone could see — and `errors.ts` opens by saying a caller reacts to the code without matching on messages, which a CLI printing only the message makes impossible. The code leads every error line now, and both directions are pinned: the daemon's code is kept, and one this build has never heard of is not.
+- **Sequential per-repository fetches multiplied the worst case by the number of repositories,** each carrying its own ten-second timeout. Asserted on overlap — the stand-in counts requests in flight and the peak must exceed one — rather than on elapsed time, which passes under load whatever the code does.
+- **Help now wins over a bad option.** Whoever mistyped one is the likeliest person to want the help, and refusing to print it because of that mistake is the least useful moment to stop.
+- **A `--data-dir` naming a file was reported as a daemon nobody started,** so the remedy told the user to start one — which would have shown them the same message again. `ENOTDIR` is its own answer.
+- **The end-to-end gap was real and stageable.** Git refuses ASCII controls in a ref name and accepts `U+202E`, so a bidi branch name is one an agent can actually create; the suite now drives one through a real daemon and asserts the human path never carries it while the JSON path transports it escaped and parses back to the name on disk. The renderer had this covered as a unit; nothing had proved it survived the wire.
+
 ## 2026-09-10 — three review findings on the sanitiser, all real
 
 - **The bidi list was one code point short, and hand-maintaining it was the bug.** `U+061C ARABIC LETTER MARK` behaves like `U+200F` and was not in the marks-embeddings-overrides-isolates list — enumerated against `\p{Bidi_Control}` it was the only one of the twelve missing. The list is gone: the predicate names the Unicode property, which is exactly the family the comment claimed and cannot drift when Unicode adds another. A mutation replacing the property with the old hand list fails the suite now.
