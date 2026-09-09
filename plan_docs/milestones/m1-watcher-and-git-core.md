@@ -476,34 +476,110 @@ status` must not stop the process exiting, so the drain has a deadline and
   **Constraints:** hard rule 3. A regression here is a vulnerability that
   exposes the user's source over the network, not a bug.
 
-- [ ] **`interlock status`**
-      **Files:** `packages/cli/src/commands/`
+- [x] **`interlock status`**
+      **Files:** `packages/cli/src/commands/`, `packages/cli/src/client/`
       **What:** the first real command — branches, dirty state, touched files.
 
-  Read-only, talks only to the daemon API. When the daemon is not running, say
-  so and give the command to start it — `DAEMON_UNREACHABLE` with a `remedy`.
-  Exit codes: 0 for clean, non-zero for an error, and decide now whether open
-  findings are a non-zero exit, because scripts will depend on it.
+  Read-only, talks only to the daemon API, and performs no analysis of its own.
 
-  A branch whose dirty state is `null` is unknown, not clean, and must read that
-  way — an unreachable worktree is the one case where the display saying
-  "nothing to see" is actively misleading.
+  **Finding the daemon is most of the work.** The port is whatever the listener
+  bound, which is knowable only from the runtime file the daemon publishes, and
+  the token is a second file beside it; both paths come from `shared`, because
+  the CLI depends on `shared` and never on `daemon`. Both live under a data dir
+  that is a configured value, so the command needs a way to be told which one —
+  an argument and an environment variable, resolved in that order over the
+  default — or it can only ever look in one place and the daemon may not be
+  there.
 
-  **Done when:** it renders correctly against three worktrees, shows an
-  unreadable worktree as unknown rather than clean, prints an actionable error
-  with the daemon stopped, and its exit codes are covered by tests.
+  Four failures are distinct and only one of them is "not running":
 
-  **Two things this depends on have no task, and the milestone's exit criteria
-  need both.** Nothing reads a config file: `resolveConfig()` is called with no
-  argument, so `repos` is always empty and the only way to name a repository is
-  to edit `main.ts`. `configPath` is exported from `shared` and referenced in
-  one error `remedy`, which is the whole of it. And `main.ts` says it is
-  "started by `interlock daemon start`", `daemon` is a declared command, and the
-  task above tells this one to print that command when the daemon is down — but
-  nothing defines it. Decide whether each is its own task or a clause here
-  before starting, because "shows live branches, updating within seconds"
-  cannot be demonstrated without a way to say which repository and a way to
-  start the thing watching it.
+  - **No runtime file.** No daemon has started against this data dir. Say so and
+    name the command that starts one.
+  - **A runtime file and nothing listening.** A daemon that crashed leaves the
+    file behind, so this is the ordinary case rather than an edge one, and the
+    connection being refused is what says the file is stale. Same remedy.
+  - **No token, or a token that is refused.** Not the same as a daemon that is
+    down, and telling someone to start a daemon that is already running is worse
+    than saying nothing. A 401 against a running daemon means the file and the
+    process disagree — the remedy is to stop it and start it again.
+  - **A protocol version this build does not speak.** `DaemonRuntime` carries one
+    so a client can refuse rather than guess, and a mismatched daemon is an
+    upgrade the user has half-finished. Refuse, and name both versions.
+
+  All four are `InterlockError` with a `remedy` the CLI prints verbatim.
+  `DAEMON_UNREACHABLE` already exists for the first two.
+
+  **A branch whose dirty state is `null` is unknown, not clean, and must read
+  that way** — an unreachable worktree is the one case where the display saying
+  "nothing to see" is actively misleading. `unknown` and `clean` are different
+  words in the output, and a test asserts they are.
+
+  **Touched files come from `BranchRef.dirty`,** which carries the staged,
+  unstaged and untracked lists and survives the store as JSON. No route has to
+  be added for them, and none should be.
+
+  **What is rendered is repository content.** A path in `untrackedFiles` is
+  named by whoever writes the repository, and the agents Interlock watches write
+  repositories; a terminal reading a path with an escape sequence in it will
+  move its cursor, clear its screen or set a colour that outlasts the process.
+  Escape control characters on the way out rather than trusting the source. This
+  is `wrapUntrusted`'s reasoning one layer down: the boundary is the terminal
+  rather than an agent, and the rule is the same.
+
+  **`--json` is in scope.** The evaluation harness drives the CLI rather than
+  the internals so measurements reflect what a user sees, and a suite that
+  asserts on a rendered table is asserting on formatting. It is also what makes
+  the human table free to change.
+
+  **Exit codes, decided here because scripts will depend on them.** `0` when the
+  command could report, whatever it found — `status` is a reporting command in
+  the shape of `git status`, and a script that wants to fail on findings wants
+  `interlock check`, which is M2's. **Open findings are therefore not a non-zero
+  exit**, and nothing later may quietly change that. `64` for bad arguments,
+  which `main.ts` already uses; `69` for a daemon that cannot be reached, so a
+  script can tell "not running" from "broke" and start one; `70` for anything
+  else. Sysexits, because the first of them is already in the tree.
+
+  **Done when:** it renders three worktrees with their branches, dirty state and
+  touched files; an unreadable worktree reads as unknown rather than clean; each
+  of the four failures above prints its own remedy and the daemon-down one exits
+  `69`; a branch or path carrying an ANSI escape is rendered inert; `--json`
+  emits the same facts as the table; and every exit code is asserted.
+
+  **Constraints:** hard rule 3 — the client talks to `127.0.0.1` at the port the
+  runtime file names and nowhere else. It never reads the store, never runs git,
+  and never writes anything.
+
+  `interlock daemon start` is **not** built here. `daemon start|stop|status|logs`
+  is M6's Daemon UX task, and the remedy names `interlockd`, which is the daemon
+  package's bin and exists today. The remedy changes when M6 lands.
+
+- [ ] **Load the config file**
+      **Files:** `packages/shared/src/config.ts`, `packages/daemon/src/main.ts`
+      **What:** read `config.json` from the data dir into `resolveConfig`.
+
+  `resolveConfig()` is called with no argument, so `repos` is always empty, the
+  watcher watches nothing, and the only way to name a repository is to edit
+  `main.ts`. `configPath` is exported and named in one error `remedy`, which is
+  the whole of it. The milestone's exit criteria — three worktrees under active
+  edit, showing in `interlock status` — cannot be demonstrated without this, and
+  no other task owns it.
+
+  Its own task rather than a clause on the command above, because it is a daemon
+  concern: `interlock status` renders whatever the API reports and is finished
+  without it, while the milestone is not.
+
+  The file is written by the user rather than by a repository, so it is not the
+  adversarial input `.interlock.json` is — but it reaches the same
+  `validateConfig`, a missing file is normal and an unparseable one is not, and
+  the difference has to be visible. Reuse the validation that exists; do not add
+  a second schema.
+
+  **Done when:** a data dir with no config file starts on the defaults; one with
+  a valid file watches the repositories it names; one with a malformed file
+  refuses to start and names what is wrong; and a relative repository path is
+  refused rather than resolved against whatever directory the daemon happened to
+  start in.
 
 - [ ] **Agent session hooks**
       **Files:** `packages/daemon/src/hooks/`
