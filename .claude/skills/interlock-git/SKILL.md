@@ -208,6 +208,22 @@ with `chmod`, and stub `HOME`; CI runs ubuntu and macOS only. Write the clearest
 POSIX fixture rather than a portable one, and if Windows is ever supported this
 is the decision to revisit — in one place, not per test.
 
+A fixture that commits must switch off auto-maintenance:
+
+```ts
+git(path, 'config', 'maintenance.auto', 'false');
+git(path, 'config', 'gc.auto', '0');
+```
+
+Since git 2.47, `commit` spawns `git maintenance run --auto --detach`, and that
+child holds `objects/maintenance.lock` for a moment _after_ `commit` has
+returned. A test that hashes the git dir right after a commit can capture the
+lock on one side and not the other, and then reports a removal nothing in
+Interlock made. Apple's git on a developer Mac is older and does not detach, so
+this never reproduces locally and fails only on the macOS CI runner, under load.
+Interlock itself runs nothing that triggers maintenance — only the fixture's own
+git does.
+
 Git's help output is not a stable format. 2.39 prints `-n, --dry-run` where 2.55
 prints `-n, --[no-]dry-run`, so a test reading `git <verb> -h` must parse flag
 names out and treat `--[no-]x` as both `--x` and `--no-x`. Matching the

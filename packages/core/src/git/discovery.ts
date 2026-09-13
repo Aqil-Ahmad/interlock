@@ -525,10 +525,15 @@ export async function mergeBase(
   // from analysis without saying why.
   if (result.exitCode === 1) return null;
   if (result.exitCode !== 0) {
+    // Not `infra`: git ran and answered, and what it refused is a ref this
+    // repository does not have — a property of the repository, not of the
+    // environment. A timeout or a missing git never reaches this line; the
+    // runner rejects those itself, and those are infrastructure. Exit 128 also
+    // covers a corrupt object store, which cannot be told apart here, so the
+    // classification follows the case git reports overwhelmingly more often.
     throw new InterlockError('GIT_COMMAND_FAILED', 'git merge-base failed', {
       details: { rootPath: repo.rootPath, exitCode: result.exitCode },
       remedy: 'Check that both refs exist in this repository.',
-      infra: true,
     });
   }
 

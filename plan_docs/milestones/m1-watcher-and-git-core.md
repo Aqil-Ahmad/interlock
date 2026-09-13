@@ -641,9 +641,9 @@ status` must not stop the process exiting, so the drain has a deadline and
   daemon; a session whose process was killed is gone within the timeout; and a
   reused PID does not resurrect a dead session.
 
-- [ ] **Enforce the single git call site**
+- [x] **Enforce the single git call site**
       **Files:** `packages/core/test/`
-      **What:** a test that fails if any file outside `packages/core/src/git/repo-handle.ts` imports `node:child_process` or `child_process`.
+      **What:** a test that fails if any shipped source outside `packages/core/src/git/repo-handle.ts` names `child_process`.
 
   A prose rule decays the moment code is being generated across ten files at
   once. Prefer a test over an ESLint rule here: `eslint.config.js` already uses
@@ -651,11 +651,33 @@ status` must not stop the process exiting, so the drain has a deadline and
   rule last-wins per file, so a new broad block would silently disable the
   layering checks it overlaps.
 
-  **Done when:** the test passes today, and fails if a `child_process` import is
-  added anywhere else in `packages/`.
+  **Shipped source, not the tree.** Eleven test files and the benchmark import
+  `execFileSync` to build fixture repositories, and they are right to: a test
+  that committed through the runner would be testing the runner with the runner.
+  The scan covers `packages/*/src/**` less `*.test.ts`, which is what `tsc`
+  builds and what a user runs. `scripts/` and `eval/` are not shipped and are
+  out of scope by the same rule.
 
-- [ ] **User-repo-untouched test**
-      **Files:** `packages/core/test/user-repo-untouched.test.ts`
+  **The module name, not the import statement.** `await import('node:child_process')`
+  and `createRequire(import.meta.url)('child_process')` are not import
+  statements and reach the same syscall. Matching the string catches every
+  spelling, and the cost — a comment in another file that names the module
+  fails the test — is a cost worth paying: the reason to name it is to call it,
+  and the call belongs in one place.
+
+  **Provable, not just passing.** A test that only walks the real tree can show
+  it passes today; it cannot show it would fail. The scanner is a function over
+  a list of files and their contents, unit-tested against a synthetic offender
+  in every spelling, and then run over the tree. A mutation that widens the
+  allowlist or narrows the pattern fails the unit half.
+
+  **Done when:** the test passes today; a synthetic file under `src/` with a
+  static import, a dynamic import and a `require` of either spelling each fail
+  the scanner; a file under `test/` with the same does not; and the failure
+  names the file and the line.
+
+- [x] **User-repo-untouched test**
+      **Files:** `packages/core/test/user-repo-untouched.test.ts`, `packages/core/test/support/repo-state.ts`, `packages/daemon/test/`, `.github/workflows/ci.yml`
       **What:** fill in the five todo tests already stubbed there.
 
   Hash the full worktree, the index, all refs, the stash and the config before
@@ -668,9 +690,23 @@ status` must not stop the process exiting, so the drain has a deadline and
   own — that shared directory holds the index a redirection must miss, and a
   linked worktree's handle names neither it nor the main checkout.
 
-  The cycle must include a snapshot, so the index-only path — the one place a
-  command that writes an index is allowed to run against a user repository — is
-  covered rather than skipped.
+  **Hash everything under `.git`, not a list of files.** A list is a guess at
+  what git might write, and the whole point is to catch what nobody guessed.
+  The one directory that legitimately grows is `objects/`: a snapshot writes a
+  tree there and that is allowed, since the object store is append-only and
+  `gc` reclaims what nothing references. So `objects/` is checked for entries
+  that changed or vanished, never for entries that appeared — and everything
+  else is byte-for-byte, mode and mtime included. The same walk covers the
+  worktree, minus `.git` itself.
+
+  **The cycle is what exists.** Discovery, the dirty-state snapshot and change
+  set extraction are the git-invoking code today; the merge engine and the
+  analyzers are M2's and M3's, and each of those tasks adds itself to this
+  cycle when it lands. Two tests drive it: one in `core` calls every git
+  function directly against every fixture state — that is the entire git
+  surface, since the daemon runs no git of its own — and one in `daemon` runs
+  the real daemon against one fixture with edits landing, so the composition is
+  proven not to sneak anything in.
 
   If the `.git/index` mtime assertion proves flaky, the honest fix is to assert
   index _contents_ rather than mtime — some git versions rewrite the index to
@@ -681,13 +717,17 @@ status` must not stop the process exiting, so the drain has a deadline and
   Give it its own CI job, required, with no retry and a generous timeout. Its
   failure means something wrote to a user's repository, which starts a different
   conversation than a red test job — the check list is where that distinction
-  becomes visible. When it fails the first question is _what_ wrote, so print
-  which hashes diverged rather than only that they did; the failure output is
-  the diagnosis.
+  becomes visible. The job runs a `pnpm` script rather than a vitest path, so
+  the workflow and the local command cannot drift. Making it required is a
+  branch-protection setting and `dev` has none today; that is a repository
+  setting for a human, and the job is what it will point at.
+
+  When it fails the first question is _what_ wrote, so print which hashes
+  diverged rather than only that they did; the failure output is the diagnosis.
 
   **Done when:** it fails loudly if any byte of user state changes, names the
-  state that changed, and runs in CI on every pull request as its own required
-  check.
+  state that changed, and runs in CI on every pull request as its own check,
+  marked required once the branch is protected.
   **Constraints:** this test is the enforcement mechanism for the project's
   central promise. It is never skipped, never weakened, and a failure is a
   release blocker rather than a flake to retry.

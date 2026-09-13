@@ -154,6 +154,30 @@ describe('git runner against a real repository', () => {
     }
   });
 
+  it('switches off auto-maintenance on every command it runs', async () => {
+    // No verb the runner allows on a user repository triggers maintenance, so
+    // this cannot be shown behaviourally: a fake git records the argv instead.
+    // Without it, a verb added later — `fetch` on a shadow, say — would leave
+    // a detached `maintenance run` holding `objects/maintenance.lock` after
+    // the runner had already returned.
+    const scriptDir = mkdtempSync(join(tmpdir(), 'interlock-argv-'));
+    const fakeGit = join(scriptDir, 'git');
+    const recorded = join(scriptDir, 'argv');
+    writeFileSync(fakeGit, `#!/bin/sh\nprintf '%s\\n' "$@" > '${recorded}'\n`);
+    chmodSync(fakeGit, 0o755);
+
+    try {
+      const spying = createGitRunner({ gitPath: fakeGit });
+      await spying.run(repo, ['status']);
+      const argv = readFileSync(recorded, 'utf8').split('\n');
+      const flags = argv.flatMap((arg, index) => (arg === '-c' ? [argv[index + 1]] : []));
+      expect(flags).toContain('maintenance.auto=false');
+      expect(flags).toContain('gc.auto=0');
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
+  });
+
   it('kills a command that outlives its timeout', async () => {
     const scriptDir = mkdtempSync(join(tmpdir(), 'interlock-slow-'));
     const fakeGit = join(scriptDir, 'git');

@@ -396,7 +396,8 @@ function buildEnv(indexFile: string | undefined): NodeJS.ProcessEnv {
   // Repository-wide policy, not one caller's accommodation: it applies to every
   // command the runner runs. A call site wanting a glob or a magic pathspec
   // would silently match nothing rather than fail, so that call site has to
-  // expand the pattern itself.
+  // expand the pattern itself — never by unsetting this, which would hand the
+  // first paragraph back to every other caller at once.
   env.GIT_LITERAL_PATHSPECS = '1';
   // Read commands must never take `index.lock`, or they stall the user's own git.
   env.GIT_OPTIONAL_LOCKS = '0';
@@ -600,6 +601,17 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
         'core.splitIndex=false',
         '-c',
         `core.hooksPath=${devNull}`,
+        // Auto-maintenance is a background process a repository's own git
+        // starts after `commit`, `merge`, `rebase`, `am` and `fetch`, and since
+        // git 2.47 it detaches — holding `objects/maintenance.lock` after the
+        // command that started it has returned. No verb the runner allows on a
+        // user repository triggers it today; switching it off here makes that
+        // a property of the runner rather than of the verb list, so a verb
+        // added later cannot leave a detached writer in someone's repository.
+        '-c',
+        'maintenance.auto=false',
+        '-c',
+        'gc.auto=0',
         ...args,
       ];
       const startedAt = Date.now();

@@ -26,6 +26,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:untouched": "vitest run --no-file-parallelism packages/core/test/single-git-call-site.test.ts packages/core/test/user-repo-untouched.test.ts packages/daemon/test/user-repo-untouched.test.ts",
     "bench": "tsx scripts/bench.ts",
     "eval": "tsx eval/run.ts",
     "adr": "tsx scripts/new-adr.ts",

@@ -510,7 +510,9 @@ describe('repo discovery', () => {
       // Collapsing the two drops the pair from analysis in silence.
       const error = await rejection(mergeBase(repo, 'main', 'refs/heads/absent', options));
       expect(error.code).toBe('GIT_COMMAND_FAILED');
-      expect(error.infra).toBe(true);
+      // A ref the repository lacks is a property of the repository. Git ran
+      // and answered; the environment did its job.
+      expect(error.infra).toBe(false);
     });
   });
 });

@@ -97,6 +97,49 @@ jobs:
         if: ${{ matrix.coverage }}
         run: pnpm test:coverage
 
+  # Interlock's central promise, as its own line in the check list. This suite
+  # also runs inside `test` above; it runs again here so that a failure reads
+  # as "something wrote to a user's repository" rather than as a red test job,
+  # which starts a different conversation. No retry, on purpose: a flake here
+  # is a write that happens sometimes, and that is the finding, not noise.
+  untouched:
+    name: user repositories untouched (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      # macOS earns a cell here that it does not elsewhere. The one failure
+      # this suite has produced was a lock a newer git leaves behind after a
+      # commit, and Ubuntu's git predates that behaviour — so the check meant
+      # to be the visible one would run only on the platform least able to see
+      # what it exists to catch.
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: git version
+        run: git --version
+
+      # The same script a developer runs, so the two cannot check different
+      # things. It covers both halves of the promise — nothing written, and
+      # nothing spawned from anywhere but the listed sites — and runs its files
+      # one at a time: the daemon half is timing-driven, and a diagnosis that
+      # reproduces is worth more than the seconds parallelism would save. Its
+      # output on failure is the diagnosis: every path that changed, and how.
+      - name: User repositories untouched
+        run: pnpm test:untouched
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
