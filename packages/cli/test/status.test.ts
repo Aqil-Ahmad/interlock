@@ -8,6 +8,7 @@ import { createDaemon } from '@interlock/daemon';
 import type { Daemon } from '@interlock/daemon';
 import { createLogger, resolveConfig, runtimePath, tokenPath } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { runHook } from '../src/commands/hook.js';
 import { runStatus } from '../src/commands/status.js';
 import type { StatusIo } from '../src/commands/status.js';
 
@@ -222,6 +223,66 @@ describe('interlock status', () => {
       expect(stdout()).toContain('\\u{202e}');
     });
 
+    it('shows which agent owns a branch once its hook has reported', async () => {
+      // What Claude Code pipes to a hook, and what the agent's parent pid is
+      // to the command it runs. Driven through the real command against the
+      // real daemon, so the whole path is the one a user has.
+      const code = await runHook(['start', '--kind', 'claude-code'], {
+        stdin: () => Promise.resolve(JSON.stringify({ session_id: 'sess-42', cwd: linked })),
+        err: (t) => err.push(t),
+        env: { INTERLOCK_DATA_DIR: dataDir },
+        parentPid: process.pid,
+      });
+      expect(code).toBe(0);
+      expect(err.join('')).toBe('');
+
+      expect(await status('--data-dir', dataDir)).toBe(0);
+      const text = stdout();
+      expect(text).toContain('feature');
+      expect(text).toContain('claude-code (inferred)');
+
+      expect(await status('--data-dir', dataDir, '--json')).toBe(0);
+      const parsed = JSON.parse(stdout()) as {
+        repos: {
+          branches: { name: string; owner: { kind: string; attribution: string } | null }[];
+        }[];
+      };
+      const feature = parsed.repos[0]?.branches.find((b) => b.name === 'feature');
+      expect(feature?.owner).toStrictEqual({
+        kind: 'claude-code',
+        attribution: 'inferred',
+        externalSessionId: 'sess-42',
+      });
+      expect(parsed.repos[0]?.branches.find((b) => b.name === 'main')?.owner).toBeNull();
+    });
+
+    it('drops the owner once the session ends', async () => {
+      const io = {
+        stdin: () => Promise.resolve(JSON.stringify({ session_id: 'sess-43', cwd: linked })),
+        err: (t: string) => err.push(t),
+        env: { INTERLOCK_DATA_DIR: dataDir },
+        parentPid: process.pid,
+      };
+      await runHook(['start', '--kind', 'claude-code'], io);
+      await runHook(['end', '--kind', 'claude-code'], io);
+
+      await status('--data-dir', dataDir);
+      expect(stdout()).not.toContain('claude-code');
+    });
+
+    it('renders an external session id the agent chose without letting it through', async () => {
+      const rlo = String.fromCodePoint(0x202e);
+      await runHook(['start', '--kind', 'claude-code'], {
+        stdin: () => Promise.resolve(JSON.stringify({ session_id: `${rlo}evil`, cwd: linked })),
+        err: (t) => err.push(t),
+        env: { INTERLOCK_DATA_DIR: dataDir },
+        parentPid: process.pid,
+      });
+      await status('--data-dir', dataDir, '--json');
+      expect(stdout()).not.toContain(rlo);
+      expect(stdout()).toContain('\\u202e');
+    });
+
     it('does not tell someone to start a daemon that is already running', async () => {
       // A token the daemon will refuse. The remedy has to be about the token,
       // because starting the daemon is something they have already done.
@@ -357,6 +418,7 @@ describe('interlock status', () => {
           status: 404,
           body: { error: { code: 'REPO_NOT_FOUND', message: 'No such repository' } },
         },
+        '/api/repos/gone/sessions': { status: 200, body: { sessions: [] } },
       });
 
       expect(await status('--data-dir', dataDir)).toBe(70);
@@ -407,15 +469,23 @@ describe('interlock status', () => {
         discoveredAt: 'now',
         lastSeenAt: 'now',
       }));
+      const perRepo: Record<string, { status: number; body: unknown; delayMs?: number }> = {};
+      for (const repo of repos) {
+        perRepo[`/api/repos/${repo.id}/branches`] = {
+          status: 200,
+          body: { branches: [] },
+          delayMs: 100,
+        };
+        perRepo[`/api/repos/${repo.id}/sessions`] = {
+          status: 200,
+          body: { sessions: [] },
+          delayMs: 100,
+        };
+      }
       await serve({
         '/api/health': { status: 200, body: { protocolVersion: 1 } },
         '/api/repos': { status: 200, body: { repos } },
-        ...Object.fromEntries(
-          repos.map((repo) => [
-            `/api/repos/${repo.id}/branches`,
-            { status: 200, body: { branches: [] }, delayMs: 100 },
-          ]),
-        ),
+        ...perRepo,
       });
 
       expect(await status('--data-dir', dataDir)).toBe(0);
@@ -442,6 +512,54 @@ describe('interlock status', () => {
       expect(await status('--data-dir', dataDir)).toBe(70);
       expect(stderr()).toContain('The store could not be read');
       expect(stderr()).toContain('Check that the data directory is writable');
+    });
+  });
+
+  describe('interlock hook', () => {
+    const hookIo = (stdin: string, dir = dataDir): Parameters<typeof runHook>[1] => ({
+      stdin: () => Promise.resolve(stdin),
+      err: (t) => err.push(t),
+      env: { INTERLOCK_DATA_DIR: dir },
+      parentPid: process.pid,
+    });
+
+    it('exits 0 with no daemon, because a hook must never block an agent', async () => {
+      out = [];
+      err = [];
+      const code = await runHook(
+        ['start', '--kind', 'claude-code'],
+        hookIo(JSON.stringify({ session_id: 's', cwd: linked })),
+      );
+      expect(code).toBe(0);
+      // Said, though: silence would hide a misconfigured install for good.
+      expect(err.join('')).toContain('DAEMON_UNREACHABLE');
+    });
+
+    it('exits 0 on a payload it cannot read, and says so', async () => {
+      out = [];
+      err = [];
+      expect(await runHook(['start', '--kind', 'claude-code'], hookIo('not json'))).toBe(0);
+      expect(err.join('')).toContain('not JSON');
+      err = [];
+      expect(await runHook(['start', '--kind', 'claude-code'], hookIo('{}'))).toBe(0);
+      expect(err.join('')).toContain('session_id');
+    });
+
+    it("refuses bad arguments with 64, which is the one failure that is the install's", async () => {
+      out = [];
+      err = [];
+      expect(await runHook([], hookIo('{}'))).toBe(64);
+      expect(await runHook(['begin', '--kind', 'claude-code'], hookIo('{}'))).toBe(64);
+      expect(await runHook(['start'], hookIo('{}'))).toBe(64);
+      expect(await runHook(['start', '--kind', 'skynet'], hookIo('{}'))).toBe(64);
+      expect(await runHook(['start', '--kind=claude-code', '--extra'], hookIo('{}'))).toBe(64);
+    });
+
+    it('prints usage on --help', async () => {
+      out = [];
+      err = [];
+      expect(await runHook(['--help'], hookIo('{}'))).toBe(0);
+      expect(err.join('')).toContain('Usage: interlock hook');
     });
   });
 

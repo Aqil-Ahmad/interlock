@@ -1,5 +1,13 @@
 import { ulid } from '@interlock/shared';
-import type { BranchRef, BranchRefId, Repo, RepoId, SnapshotId } from '@interlock/shared';
+import type {
+  AgentSession,
+  AgentSessionId,
+  BranchRef,
+  BranchRefId,
+  Repo,
+  RepoId,
+  SnapshotId,
+} from '@interlock/shared';
 import { describe, expect, it } from 'vitest';
 import { branchState, renderJson, renderStatus, safeText } from './render.js';
 import type { RepoView } from './render.js';
@@ -135,7 +143,7 @@ describe('branchState', () => {
 
 describe('renderStatus', () => {
   const view = (branches: BranchRef[], overrides: Partial<Repo> = {}): RepoView[] => [
-    { repo: repo(overrides), branches },
+    { repo: repo(overrides), branches, sessions: [] },
   ];
 
   it('says so when nothing is watched, rather than printing an empty report', () => {
@@ -197,8 +205,8 @@ describe('renderStatus', () => {
 
   it('separates repositories rather than running them together', () => {
     const out = renderStatus([
-      { repo: repo({ rootPath: '/work/one' }), branches: [branch()] },
-      { repo: repo({ rootPath: '/work/two' }), branches: [branch()] },
+      { repo: repo({ rootPath: '/work/one' }), sessions: [], branches: [branch()] },
+      { repo: repo({ rootPath: '/work/two' }), sessions: [], branches: [branch()] },
     ]);
     expect(out).toContain('/work/one');
     expect(out).toContain('/work/two');
@@ -209,11 +217,72 @@ describe('renderStatus', () => {
   });
 });
 
+describe('the owning session', () => {
+  const session = (
+    branchRefId: BranchRefId,
+    overrides: Partial<AgentSession> = {},
+  ): AgentSession => ({
+    id: ulid<AgentSessionId>(),
+    repoId: ulid<RepoId>(),
+    kind: 'claude-code',
+    externalSessionId: 'sess-1',
+    branchRefId,
+    attribution: 'reported',
+    cwd: '/work/repo',
+    pid: 100,
+    startedAt: '2026-01-01T00:00:00.000Z',
+    lastActiveAt: '2026-01-01T00:00:00.000Z',
+    endedAt: null,
+    ...overrides,
+  });
+
+  it('names the agent beside the branch it drives', () => {
+    const owner = session(ulid<BranchRefId>());
+    const driven = branch({ name: 'feature', sessionId: owner.id });
+    const out = renderStatus([{ repo: repo(), branches: [driven, branch()], sessions: [owner] }]);
+    expect(out).toContain('feature');
+    expect(out).toMatch(/feature.*claude-code/u);
+    expect(out).not.toMatch(/main.*claude-code/u);
+  });
+
+  it('says when the branch was a guess rather than a report', () => {
+    const owner = session(ulid<BranchRefId>(), { attribution: 'inferred' });
+    const out = renderStatus([
+      { repo: repo(), branches: [branch({ sessionId: owner.id })], sessions: [owner] },
+    ]);
+    expect(out).toContain('claude-code (inferred)');
+  });
+
+  it('shows nothing for a branch whose session is not in the live list', () => {
+    // The store may still name a session the registry has since reaped.
+    const out = renderStatus([
+      { repo: repo(), branches: [branch({ sessionId: ulid<AgentSessionId>() })], sessions: [] },
+    ]);
+    expect(out).not.toContain('claude-code');
+    expect(out).not.toContain('inferred');
+  });
+
+  it('carries the owner into the JSON, with the id the agent chose', () => {
+    const owner = session(ulid<BranchRefId>(), { externalSessionId: 'abc' });
+    const parsed = JSON.parse(
+      renderJson([
+        { repo: repo(), branches: [branch({ sessionId: owner.id })], sessions: [owner] },
+      ]),
+    ) as { repos: { branches: { owner: unknown }[] }[] };
+    expect(parsed.repos[0]?.branches[0]?.owner).toStrictEqual({
+      kind: 'claude-code',
+      attribution: 'reported',
+      externalSessionId: 'abc',
+    });
+  });
+});
+
 describe('renderJson', () => {
   it('carries the same facts as the table', () => {
     const views = [
       {
         repo: repo(),
+        sessions: [],
         branches: [
           dirty({ staged: ['src/a.ts'], untracked: ['notes.md'] }),
           branch({ name: 'feature/gone', dirty: null }),
@@ -239,7 +308,7 @@ describe('renderJson', () => {
 
   it('leaves a path as it is on disk, since the consumer is not a terminal', () => {
     const parsed = JSON.parse(
-      renderJson([{ repo: repo(), branches: [dirty({ untracked: [`${ESC}x`] })] }]),
+      renderJson([{ repo: repo(), sessions: [], branches: [dirty({ untracked: [`${ESC}x`] })] }]),
     ) as {
       repos: { branches: { files: { untracked: string[] } | null }[] }[];
     };
@@ -251,7 +320,9 @@ describe('renderJson', () => {
     // block and every bidi control reach the output verbatim — and this is
     // piped to a terminal as often as it is parsed.
     const paths = [`${ESC}a`, `${CSI}b`, `${DEL}c`, `${RLO}d`, `${ALM}e`, `${LRM}f`];
-    const text = renderJson([{ repo: repo(), branches: [dirty({ untracked: paths })] }]);
+    const text = renderJson([
+      { repo: repo(), sessions: [], branches: [dirty({ untracked: paths })] },
+    ]);
 
     for (const raw of [ESC, CSI, DEL, RLO, ALM, LRM]) {
       expect(text, raw.codePointAt(0)?.toString(16)).not.toContain(raw);
@@ -266,7 +337,7 @@ describe('renderJson', () => {
     // different name, and a consumer wants one it can open.
     const paths = [`${ESC}a`, `${CSI}b`, `${DEL}c`, `${RLO}d`, `${ALM}e`];
     const parsed = JSON.parse(
-      renderJson([{ repo: repo(), branches: [dirty({ untracked: paths })] }]),
+      renderJson([{ repo: repo(), sessions: [], branches: [dirty({ untracked: paths })] }]),
     ) as { repos: { branches: { files: { untracked: string[] } | null }[] }[] };
 
     expect(parsed.repos[0]?.branches[0]?.files?.untracked).toStrictEqual(paths);

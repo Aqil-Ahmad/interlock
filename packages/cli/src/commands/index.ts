@@ -1,4 +1,5 @@
 import { notImplemented } from '@interlock/shared';
+import { hookCommand } from './hook.js';
 import { statusCommand } from './status.js';
 import type { Command } from './command.js';
 
@@ -10,6 +11,8 @@ import type { Command } from './command.js';
  */
 
 export type { Command } from './command.js';
+export { hookCommand, runHook } from './hook.js';
+export type { HookIo } from './hook.js';
 export { runStatus, statusCommand } from './status.js';
 export type { StatusIo } from './status.js';
 
@@ -19,6 +22,7 @@ const todo = (name: string): Command['run'] => {
 
 export const COMMANDS: readonly Command[] = [
   statusCommand,
+  hookCommand,
   {
     name: 'watch',
     summary: 'Follow findings live in the terminal',

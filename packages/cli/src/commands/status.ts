@@ -127,7 +127,13 @@ export async function runStatus(
     // a serial pass multiplies the worst case by the number of repositories
     // while the daemon answers all of them off one local socket pool.
     const views: RepoView[] = await Promise.all(
-      repos.map(async (repo) => ({ repo, branches: await client.branches(repo.id) })),
+      repos.map(async (repo) => {
+        const [branches, sessions] = await Promise.all([
+          client.branches(repo.id),
+          client.sessions(repo.id),
+        ]);
+        return { repo, branches, sessions };
+      }),
     );
     io.out(options.json ? renderJson(views) : renderStatus(views));
     // Whatever it found. A report that failed the build because it had
