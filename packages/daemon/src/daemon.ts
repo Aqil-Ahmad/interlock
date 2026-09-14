@@ -6,6 +6,7 @@ import type { DaemonRuntime, EventRecord, InterlockConfig, Logger } from '@inter
 import { createApiServer } from './api/index.js';
 import type { ApiServer } from './api/index.js';
 import { EventBus } from './bus/index.js';
+import { createSessionRegistry } from './hooks/index.js';
 import { publishRuntime, unpublishRuntime } from './runtime-file.js';
 import { openStore } from './store/index.js';
 import type { Store } from './store/index.js';
@@ -49,6 +50,14 @@ export interface Daemon {
 /** The SQLite file, alongside `shadows/` and the runtime file in the data dir. */
 const DATABASE_FILENAME = 'interlock.db';
 
+/**
+ * How often dead agent sessions are ended when nobody is reading them.
+ *
+ * The watcher's cadence, for the same reasoning: a pass is cheap — one signal
+ * per pid — and nothing downstream is waiting on it.
+ */
+const DEFAULT_REAP_INTERVAL_MS = 30_000;
+
 export function createDaemon(options: DaemonOptions): Daemon {
   const log = options.logger.child('daemon');
   const { config } = options;
@@ -57,6 +66,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
   let api: ApiServer | null = null;
   let watcher: Watcher | null = null;
   let runtime: DaemonRuntime | null = null;
+  /**
+   * Reaps agent sessions on the same cadence the watcher reconciles on.
+   *
+   * A read reaps too, so a `status` never shows a dead session; the timer is
+   * for the store's own view of a branch's owner, which nothing reads between
+   * commands and which would otherwise name a dead agent until someone asked.
+   */
+  let reaper: ReturnType<typeof setInterval> | null = null;
   /**
    * Appends, chained so the log stays in the order it was published.
    *
@@ -94,8 +111,23 @@ export function createDaemon(options: DaemonOptions): Daemon {
       const runner = options.runner ?? createGitRunner();
 
       try {
-        api = createApiServer({ config, store, logger: options.logger });
+        const sessions = createSessionRegistry({
+          store,
+          bus,
+          logger: options.logger,
+          staleAfterMs: config.sessions.staleAfterMs,
+        });
+        api = createApiServer({ config, store, sessions, logger: options.logger });
         const bound = await api.start();
+
+        const cadence = options.sweepIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
+        reaper = setInterval(() => {
+          void sessions.reap().catch((error: unknown) => {
+            log.warn('reaping sessions failed', {
+              reason: error instanceof Error ? error.message : String(error),
+            });
+          });
+        }, cadence);
 
         watcher = createWatcher({
           config,
@@ -151,6 +183,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // never advertises a daemon that has already dropped its port.
     await watcher?.stop();
     watcher = null;
+
+    if (reaper !== null) {
+      clearInterval(reaper);
+      reaper = null;
+    }
 
     await api?.stop();
     api = null;

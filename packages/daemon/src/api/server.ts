@@ -2,6 +2,8 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { INTERLOCK_PROTOCOL_VERSION, InterlockError, isInterlockError } from '@interlock/shared';
 import type { InterlockConfig, Logger, RepoId } from '@interlock/shared';
+import { parseSessionRegistration } from '../hooks/index.js';
+import type { SessionRegistry } from '../hooks/index.js';
 import type { Store } from '../store/index.js';
 import { bearerToken, ensureToken, tokenMatches } from './token.js';
 
@@ -35,6 +37,7 @@ export interface ApiServer {
 export interface ApiOptions {
   readonly config: InterlockConfig;
   readonly store: Store;
+  readonly sessions: SessionRegistry;
   readonly logger: Logger;
 }
 
@@ -53,12 +56,19 @@ const CLOSE_GRACE_MS = 2_000;
 const HEADERS_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * The most a hook payload may be. A registration is six short fields; a body
+ * past this is not one, and reading it into memory first is the thing the cap
+ * exists to prevent.
+ */
+const MAX_BODY_BYTES = 16 * 1024;
+
 /** Hostnames a loopback listener may legitimately be addressed by. */
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['127.0.0.1', 'localhost']);
 
 export function createApiServer(options: ApiOptions): ApiServer {
   const log = options.logger.child('api');
-  const { config, store } = options;
+  const { config, store, sessions } = options;
   const startedAt = new Date().toISOString();
 
   let server: Server | null = null;
@@ -75,11 +85,11 @@ export function createApiServer(options: ApiOptions): ApiServer {
   };
 
   const respond = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
-    // Nothing here reads a body, and an unread one keeps the socket busy past
-    // the response, which is what the drain then waits on.
-    request.resume();
-
     if (!sameOrigin(request)) {
+      // A body nobody reads keeps the socket busy past the response, which is
+      // what the drain then waits on. Every refusal below drains for the same
+      // reason; only the one route that reads a body does not.
+      request.resume();
       // A page in a browser can post to a loopback port, and it reaches it by a
       // name that resolves to 127.0.0.1. The token stops it being useful; this
       // stops it being reached. No CORS header is ever sent, so a browser cannot
@@ -91,6 +101,7 @@ export function createApiServer(options: ApiOptions): ApiServer {
     if (token === null || !authorized(request, token)) {
       // Before routing, so a 404 never tells an unauthenticated caller which
       // routes exist.
+      request.resume();
       response.setHeader('WWW-Authenticate', 'Bearer');
       send(response, 401, {
         error: { code: 'UNAUTHORIZED', message: 'A bearer token is required' },
@@ -98,22 +109,25 @@ export function createApiServer(options: ApiOptions): ApiServer {
       return;
     }
 
-    if (request.method !== 'GET') {
-      response.setHeader('Allow', 'GET');
-      send(response, 405, {
-        error: {
-          code: 'API_REQUEST_INVALID',
-          message: `${String(request.method)} is not allowed`,
-        },
-      });
-      return;
-    }
-
     try {
       await route(request, response);
     } catch (error) {
+      request.resume();
       fail(response, error, log);
     }
+  };
+
+  /** The one thing a route may say about a method it does not serve. */
+  const methodNotAllowed = (
+    request: IncomingMessage,
+    response: ServerResponse,
+    allowed: string,
+  ): void => {
+    request.resume();
+    response.setHeader('Allow', allowed);
+    send(response, 405, {
+      error: { code: 'API_REQUEST_INVALID', message: `${String(request.method)} is not allowed` },
+    });
   };
 
   const route = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -132,6 +146,25 @@ export function createApiServer(options: ApiOptions): ApiServer {
       });
     }
 
+    // The one route that writes, and the one that reads a body. Everything
+    // else answers `GET` alone, so nothing else becomes writable by accident.
+    if (matches(segments, ['api', 'sessions'])) {
+      if (request.method !== 'POST') {
+        methodNotAllowed(request, response, 'POST');
+        return;
+      }
+      const body = await readJsonBody(request, MAX_BODY_BYTES);
+      const session = await sessions.register(parseSessionRegistration(body));
+      send(response, 200, { session });
+      return;
+    }
+
+    if (request.method !== 'GET') {
+      methodNotAllowed(request, response, 'GET');
+      return;
+    }
+    request.resume();
+
     if (matches(segments, ['api', 'health'])) {
       send(response, 200, {
         status: 'ok',
@@ -149,7 +182,7 @@ export function createApiServer(options: ApiOptions): ApiServer {
 
     if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'repos') {
       const [, , id, tail] = segments;
-      if (tail === 'branches') {
+      if (tail === 'branches' || tail === 'sessions') {
         // Checked rather than assumed: `listBranchRefs` answers an empty list
         // for a repository that does not exist, which reads as "no branches"
         // instead of "no such repository".
@@ -160,7 +193,11 @@ export function createApiServer(options: ApiOptions): ApiServer {
             remedy: 'List repositories at /api/repos.',
           });
         }
-        send(response, 200, { branches: await store.listBranchRefs(id as RepoId) });
+        if (tail === 'branches') {
+          send(response, 200, { branches: await store.listBranchRefs(id as RepoId) });
+        } else {
+          send(response, 200, { sessions: await sessions.listLive(id as RepoId) });
+        }
         return;
       }
     }
@@ -283,6 +320,49 @@ function sameOrigin(request: IncomingMessage): boolean {
   // arrived on the port this listener holds.
   const name = (colon === -1 ? header : header.slice(0, colon)).toLowerCase();
   return LOOPBACK_HOSTS.has(name);
+}
+
+/**
+ * The request body as JSON, bounded.
+ *
+ * Counted as it arrives and refused the moment it passes the cap, so a client
+ * cannot make the daemon hold more than the cap before it is told no.
+ *
+ * @throws InterlockError `API_REQUEST_INVALID` for a body over the cap or one
+ *         that is not JSON.
+ */
+function readJsonBody(request: IncomingMessage, maxBytes: number): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let received = 0;
+    request.on('data', (chunk: Buffer) => {
+      received += chunk.length;
+      if (received > maxBytes) {
+        request.destroy();
+        reject(
+          new InterlockError('API_REQUEST_INVALID', 'The request body is too large', {
+            details: { maxBytes },
+            remedy: `Send at most ${String(maxBytes)} bytes.`,
+          }),
+        );
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch (error) {
+        reject(
+          new InterlockError('API_REQUEST_INVALID', 'The request body is not valid JSON', {
+            cause: error,
+            remedy: 'Send a JSON object.',
+          }),
+        );
+      }
+    });
+    request.on('error', reject);
+  });
 }
 
 /**
