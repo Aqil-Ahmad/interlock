@@ -90,7 +90,9 @@ function session(repoId: RepoId, overrides: Partial<AgentSession> = {}): AgentSe
     kind: 'claude-code',
     externalSessionId: 'ext-1',
     branchRefId: null,
+    attribution: 'reported',
     cwd: '/repos/wt-feature',
+    pid: 4242,
     startedAt: T.early,
     lastActiveAt: T.early,
     endedAt: null,
@@ -1095,5 +1097,23 @@ describe('store', () => {
       // it would sort after it and take the event with it.
       expect(await store.prune('2026-02-01T02:00:00.000+02:00')).toBe(0);
     });
+  });
+});
+
+describe('session liveness columns', () => {
+  it('round-trips pid and attribution, and reads old rows as reported with no pid', async () => {
+    const store = await openStore({ path: ':memory:' });
+    try {
+      const stored = await store.upsertRepo(repo());
+      await store.upsertSession(session(stored.id, { pid: 4242, attribution: 'inferred' }));
+      const [first] = await store.listSessions(stored.id);
+      expect(first?.pid).toBe(4242);
+      expect(first?.attribution).toBe('inferred');
+
+      await store.upsertSession(session(stored.id, { pid: null }));
+      expect((await store.listSessions(stored.id)).some((s) => s.pid === null)).toBe(true);
+    } finally {
+      await store.close();
+    }
   });
 });
