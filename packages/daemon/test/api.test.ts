@@ -60,6 +60,8 @@ describe('localhost API', () => {
       host?: string;
       body?: unknown;
       raw?: string;
+      /** Send `Content-Length`; without it the body is chunked and undeclared. */
+      declareLength?: boolean;
     } = {},
   ): Promise<{ status: number; headers: IncomingHttpHeaders; body: unknown }> => {
     const headers: Record<string, string> = {};
@@ -69,6 +71,9 @@ describe('localhost API', () => {
     if (init.host !== undefined) headers.Host = init.host;
     const payload = init.raw ?? (init.body === undefined ? undefined : JSON.stringify(init.body));
     if (payload !== undefined) headers['Content-Type'] = 'application/json';
+    if (payload !== undefined && init.declareLength === true) {
+      headers['Content-Length'] = String(Buffer.byteLength(payload));
+    }
 
     return new Promise((resolve, reject) => {
       const outgoing = request(
@@ -103,7 +108,14 @@ describe('localhost API', () => {
           ? resolve({ status: 0, headers: {}, body: null })
           : reject(error),
       );
-      outgoing.end(payload);
+      // `end(payload)` sets `Content-Length` on its own, so a body that must
+      // arrive undeclared — chunked — is written first and ended after.
+      if (payload !== undefined && init.declareLength === false) {
+        outgoing.write(payload);
+        outgoing.end();
+      } else {
+        outgoing.end(payload);
+      }
     });
   };
 
@@ -362,11 +374,26 @@ describe('localhost API', () => {
     expect(logs.filter((record) => record.level === 'error')).toStrictEqual([]);
   });
 
+  it('refuses a body it is told will be over the cap, with an answer', async () => {
+    // An honest client declares its size and gets a 400 it can read; only one
+    // that says nothing, or lies, is cut off mid-upload.
+    const declared = await call('/api/sessions', {
+      token: bound.token,
+      method: 'POST',
+      raw: JSON.stringify({ cwd: 'x'.repeat(20_000) }),
+      declareLength: true,
+    });
+    expect(declared.status).toBe(400);
+    expect(declared.body).toMatchObject({ error: { code: 'API_REQUEST_INVALID' } });
+    expect((declared.body as { error: { message: string } }).error.message).toContain('too large');
+  });
+
   it('refuses a body over the cap before reading it all', async () => {
     const huge = await call('/api/sessions', {
       token: bound.token,
       method: 'POST',
       raw: JSON.stringify({ cwd: 'x'.repeat(20_000) }),
+      declareLength: false,
     });
     // A reset, not a 400: the connection is dropped mid-upload, before the
     // body is whole. A 400 would mean it was read to the end and refused by

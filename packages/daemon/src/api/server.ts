@@ -332,6 +332,19 @@ function sameOrigin(request: IncomingMessage): boolean {
  *         that is not JSON.
  */
 function readJsonBody(request: IncomingMessage, maxBytes: number): Promise<unknown> {
+  // A client that says how much it will send, and says too much, is refused
+  // with an answer rather than a dropped connection. The count below is for
+  // one that says nothing, or lies.
+  const declared = Number(request.headers['content-length']);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    request.resume();
+    return Promise.reject(
+      new InterlockError('API_REQUEST_INVALID', 'The request body is too large', {
+        details: { maxBytes, declared },
+        remedy: `Send at most ${String(maxBytes)} bytes.`,
+      }),
+    );
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let received = 0;
