@@ -16,6 +16,16 @@ export type AgentKind = (typeof AGENT_KINDS)[number];
  * working directory the hook ran in. The advisor may say less about an inferred
  * one, which is why the difference is stored rather than collapsed.
  */
+/**
+ * Bounds on the two strings an agent chooses in a session hook.
+ *
+ * In `shared` because both sides of the wire check them: the daemon refuses a
+ * payload past them, and the client refuses locally first, so an oversized id
+ * is a message rather than a connection dropped mid-upload.
+ */
+export const MAX_SESSION_ID_LENGTH = 256;
+export const MAX_SESSION_PATH_LENGTH = 4_096;
+
 export const SESSION_ATTRIBUTIONS = ['reported', 'inferred'] as const;
 export type SessionAttribution = (typeof SESSION_ATTRIBUTIONS)[number];
 

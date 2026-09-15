@@ -1,6 +1,12 @@
 import { realpathSync } from 'node:fs';
 import { sep } from 'node:path';
-import { AGENT_KINDS, InterlockError, ulid } from '@interlock/shared';
+import {
+  AGENT_KINDS,
+  InterlockError,
+  MAX_SESSION_ID_LENGTH,
+  MAX_SESSION_PATH_LENGTH,
+  ulid,
+} from '@interlock/shared';
 import type {
   AgentKind,
   AgentSession,
@@ -77,10 +83,6 @@ export interface SessionRegistry {
 /** Fields a registration may carry, and nothing else. */
 const REGISTRATION_KEYS = ['event', 'kind', 'externalSessionId', 'cwd', 'pid', 'branch'] as const;
 
-/** Bounds on the two strings an agent chooses; a hook is not a place for a novel. */
-const MAX_ID_LENGTH = 256;
-const MAX_PATH_LENGTH = 4_096;
-
 /**
  * Check a hook payload against the schema.
  *
@@ -113,15 +115,15 @@ export function parseSessionRegistration(body: unknown): SessionRegistration {
   const externalSessionId = record.externalSessionId;
   if (typeof externalSessionId !== 'string' || externalSessionId === '') {
     problems.push('externalSessionId must be a non-empty string');
-  } else if (externalSessionId.length > MAX_ID_LENGTH) {
-    problems.push(`externalSessionId is longer than ${String(MAX_ID_LENGTH)} characters`);
+  } else if (externalSessionId.length > MAX_SESSION_ID_LENGTH) {
+    problems.push(`externalSessionId is longer than ${String(MAX_SESSION_ID_LENGTH)} characters`);
   }
   const cwd = record.cwd;
   if (typeof cwd !== 'string' || !cwd.startsWith('/')) {
     // Relative to what? The hook's process, which is not this one.
     problems.push('cwd must be an absolute path');
-  } else if (cwd.length > MAX_PATH_LENGTH) {
-    problems.push(`cwd is longer than ${String(MAX_PATH_LENGTH)} characters`);
+  } else if (cwd.length > MAX_SESSION_PATH_LENGTH) {
+    problems.push(`cwd is longer than ${String(MAX_SESSION_PATH_LENGTH)} characters`);
   }
   const pid = record.pid;
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
@@ -130,8 +132,8 @@ export function parseSessionRegistration(body: unknown): SessionRegistration {
   const branch = record.branch ?? null;
   if (branch !== null && (typeof branch !== 'string' || branch === '')) {
     problems.push('branch must be a non-empty string when present');
-  } else if (typeof branch === 'string' && branch.length > MAX_ID_LENGTH) {
-    problems.push(`branch is longer than ${String(MAX_ID_LENGTH)} characters`);
+  } else if (typeof branch === 'string' && branch.length > MAX_SESSION_ID_LENGTH) {
+    problems.push(`branch is longer than ${String(MAX_SESSION_ID_LENGTH)} characters`);
   }
 
   if (problems.length > 0) throw invalid(problems);

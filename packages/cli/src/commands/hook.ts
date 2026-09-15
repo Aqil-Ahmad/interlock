@@ -1,7 +1,14 @@
-import { AGENT_KINDS, InterlockError, dataDirFrom, isInterlockError } from '@interlock/shared';
+import {
+  AGENT_KINDS,
+  InterlockError,
+  MAX_SESSION_ID_LENGTH,
+  MAX_SESSION_PATH_LENGTH,
+  dataDirFrom,
+} from '@interlock/shared';
 import type { AgentKind } from '@interlock/shared';
 import { connectDaemon } from '../client/daemon-client.js';
 import type { Command } from './command.js';
+import { describeError } from './describe.js';
 
 /**
  * `interlock hook <event> --kind <agent>` — what an agent's hook runs.
@@ -24,8 +31,15 @@ type HookEvent = (typeof EVENTS)[number];
 const EXIT_OK = 0;
 const EXIT_USAGE = 64;
 
-/** The most stdin may carry; a hook payload is a few short fields. */
-const MAX_STDIN_BYTES = 64 * 1024;
+/**
+ * The most stdin may carry.
+ *
+ * Generous, because the payload is the agent's and not this command's: a
+ * `PostToolUse` carries the tool's input and its response, which for a file
+ * write is the file. Two fields are read out of it and each is bounded on its
+ * own, so what is posted on is always small whatever arrived.
+ */
+export const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 
 const USAGE = [
   'Usage: interlock hook <start|activity|end> --kind <agent> [--pid <agent pid>]',
@@ -41,31 +55,51 @@ const USAGE = [
 
 export interface HookIo {
   readonly stdin: () => Promise<string>;
+  /** Whether stdin is a terminal, in which case there is no payload coming. */
+  readonly stdinIsTty: boolean;
+  readonly out: (text: string) => void;
   readonly err: (text: string) => void;
   readonly env: Record<string, string | undefined>;
   /** The agent is the parent of the hook it runs. */
   readonly parentPid: number;
 }
 
-const readStdin = (): Promise<string> =>
-  new Promise((resolve, reject) => {
+/**
+ * A stream to a string, bounded.
+ *
+ * Exported so the bound is tested against a real stream rather than replaced
+ * by every test that stubs stdin.
+ */
+export function readBounded(stream: NodeJS.ReadableStream, maxBytes: number): Promise<string> {
+  return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let received = 0;
-    process.stdin.on('data', (chunk: Buffer) => {
+    stream.on('data', (piece: Buffer | string) => {
+      // stdin without an encoding set emits buffers; a stream built in a test
+      // may emit strings. Counted as bytes either way.
+      const chunk = Buffer.isBuffer(piece) ? piece : Buffer.from(piece, 'utf8');
       received += chunk.length;
-      if (received > MAX_STDIN_BYTES) {
-        process.stdin.destroy();
-        reject(new Error('hook payload too large'));
+      if (received > maxBytes) {
+        (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+        reject(
+          new InterlockError('API_REQUEST_INVALID', 'The hook payload is too large', {
+            details: { maxBytes },
+            remedy: `A hook payload may be at most ${String(maxBytes)} bytes.`,
+          }),
+        );
         return;
       }
       chunks.push(chunk);
     });
-    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    process.stdin.on('error', reject);
+    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    stream.on('error', reject);
   });
+}
 
 const processIo: HookIo = {
-  stdin: readStdin,
+  stdin: () => readBounded(process.stdin, MAX_STDIN_BYTES),
+  stdinIsTty: process.stdin.isTTY === true,
+  out: (text) => process.stdout.write(text),
   err: (text) => process.stderr.write(text),
   env: process.env,
   parentPid: process.ppid,
@@ -101,7 +135,15 @@ function parseArgs(args: readonly string[]): Options {
     if ((EVENTS as readonly string[]).includes(arg) && event === null) {
       event = arg as HookEvent;
     } else if (arg === '--pid' || arg.startsWith('--pid=')) {
-      const value = arg === '--pid' ? args[++index] : arg.slice('--pid='.length);
+      let value: string | undefined;
+      if (arg === '--pid') {
+        // The next argument is the value only if it is not itself a flag;
+        // otherwise `--pid --kind x` would eat `--kind` and then complain
+        // that it was missing.
+        value = args[index + 1]?.startsWith('-') === false ? args[++index] : undefined;
+      } else {
+        value = arg.slice('--pid='.length);
+      }
       // Not refused when it is not a number: an unexpanded `$PPID` is what an
       // agent that does not use a shell hands over, and the fallback covers it.
       const parsed = Number(value);
@@ -165,6 +207,20 @@ function payloadOf(text: string): { externalSessionId: string; cwd: string } {
       remedy: 'This command is meant to be run by an agent hook, which pipes its payload in.',
     });
   }
+  // The same bounds the daemon holds, applied here first: refused locally
+  // with a message rather than by a connection dropped mid-upload.
+  if (externalSessionId.length > MAX_SESSION_ID_LENGTH) {
+    throw new InterlockError('API_REQUEST_INVALID', 'The hook payload session_id is too long', {
+      details: { length: externalSessionId.length, max: MAX_SESSION_ID_LENGTH },
+      remedy: `session_id may be at most ${String(MAX_SESSION_ID_LENGTH)} characters.`,
+    });
+  }
+  if (cwd.length > MAX_SESSION_PATH_LENGTH) {
+    throw new InterlockError('API_REQUEST_INVALID', 'The hook payload cwd is too long', {
+      details: { length: cwd.length, max: MAX_SESSION_PATH_LENGTH },
+      remedy: `cwd may be at most ${String(MAX_SESSION_PATH_LENGTH)} characters.`,
+    });
+  }
   return { externalSessionId, cwd };
 }
 
@@ -174,12 +230,19 @@ export async function runHook(args: readonly string[], io: HookIo = processIo): 
   try {
     options = parseArgs(args);
   } catch (error) {
-    io.err(`${describe(error)}\n`);
+    io.err(`${describeError(error)}\n`);
     return EXIT_USAGE;
   }
   if (options.help) {
-    io.err(`${USAGE}\n`);
+    io.out(`${USAGE}\n`);
     return EXIT_OK;
+  }
+  if (io.stdinIsTty) {
+    // Waiting for a payload from a terminal is waiting for EOF nobody will
+    // send. Misuse, and the one failure after bad arguments that is not the
+    // agent's, so it exits as such.
+    io.err(`${USAGE}\n\nstdin is a terminal; this command reads its payload from a pipe.\n`);
+    return EXIT_USAGE;
   }
 
   try {
@@ -196,16 +259,9 @@ export async function runHook(args: readonly string[], io: HookIo = processIo): 
   } catch (error) {
     // Said, not fatal: the agent's work continues whether or not Interlock is
     // there to hear about it.
-    io.err(`interlock hook: ${describe(error)}\n`);
+    io.err(`interlock hook: ${describeError(error)}\n`);
   }
   return EXIT_OK;
-}
-
-function describe(error: unknown): string {
-  if (!isInterlockError(error)) return error instanceof Error ? error.message : String(error);
-  return error.remedy === undefined
-    ? `${error.code}: ${error.message}`
-    : `${error.code}: ${error.message}\n\n${error.remedy}`;
 }
 
 export const hookCommand: Command = {

@@ -11,7 +11,7 @@ import type { Command } from './command.js';
  */
 
 export type { Command } from './command.js';
-export { hookCommand, runHook } from './hook.js';
+export { MAX_STDIN_BYTES, hookCommand, readBounded, runHook } from './hook.js';
 export type { HookIo } from './hook.js';
 export { runStatus, statusCommand } from './status.js';
 export type { StatusIo } from './status.js';

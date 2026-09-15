@@ -3,13 +3,15 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { Readable } from 'node:stream';
 import { join } from 'node:path';
 import { createDaemon, openStore } from '@interlock/daemon';
 import type { Daemon } from '@interlock/daemon';
 import { createLogger, resolveConfig, runtimePath, tokenPath } from '@interlock/shared';
 import type { RepoId } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runHook } from '../src/commands/hook.js';
+import { MAX_STDIN_BYTES, readBounded, runHook } from '../src/commands/hook.js';
+import type { HookIo } from '../src/commands/hook.js';
 import { runStatus } from '../src/commands/status.js';
 import type { StatusIo } from '../src/commands/status.js';
 
@@ -230,6 +232,8 @@ describe('interlock status', () => {
       // real daemon, so the whole path is the one a user has.
       const code = await runHook(['start', '--kind', 'claude-code'], {
         stdin: () => Promise.resolve(JSON.stringify({ session_id: 'sess-42', cwd: linked })),
+        stdinIsTty: false,
+        out: (t) => out.push(t),
         err: (t) => err.push(t),
         env: { INTERLOCK_DATA_DIR: dataDir },
         parentPid: process.pid,
@@ -260,6 +264,8 @@ describe('interlock status', () => {
     it('drops the owner once the session ends', async () => {
       const io = {
         stdin: () => Promise.resolve(JSON.stringify({ session_id: 'sess-43', cwd: linked })),
+        stdinIsTty: false,
+        out: (t: string) => out.push(t),
         err: (t: string) => err.push(t),
         env: { INTERLOCK_DATA_DIR: dataDir },
         parentPid: process.pid,
@@ -275,6 +281,8 @@ describe('interlock status', () => {
       const rlo = String.fromCodePoint(0x202e);
       await runHook(['start', '--kind', 'claude-code'], {
         stdin: () => Promise.resolve(JSON.stringify({ session_id: `${rlo}evil`, cwd: linked })),
+        stdinIsTty: false,
+        out: (t) => out.push(t),
         err: (t) => err.push(t),
         env: { INTERLOCK_DATA_DIR: dataDir },
         parentPid: process.pid,
@@ -517,8 +525,10 @@ describe('interlock status', () => {
   });
 
   describe('interlock hook', () => {
-    const hookIo = (stdin: string, dir = dataDir): Parameters<typeof runHook>[1] => ({
+    const hookIo = (stdin: string, dir = dataDir): HookIo => ({
       stdin: () => Promise.resolve(stdin),
+      stdinIsTty: false,
+      out: (t) => out.push(t),
       err: (t) => err.push(t),
       env: { INTERLOCK_DATA_DIR: dir },
       parentPid: process.pid,
@@ -560,7 +570,87 @@ describe('interlock status', () => {
       out = [];
       err = [];
       expect(await runHook(['--help'], hookIo('{}'))).toBe(0);
-      expect(err.join('')).toContain('Usage: interlock hook');
+      // stdout, as `status --help` does: two commands in one binary agree.
+      expect(out.join('')).toContain('Usage: interlock hook');
+      expect(err.join('')).toBe('');
+    });
+
+    it('does not eat a following flag as the value of --pid', async () => {
+      out = [];
+      err = [];
+      // `--pid --kind claude-code` used to consume `--kind` and then complain
+      // that it was missing.
+      expect(await runHook(['start', '--pid', '--kind', 'claude-code'], hookIo('{}'))).toBe(0);
+      expect(err.join('')).not.toContain('--kind is required');
+    });
+
+    it('refuses a terminal on stdin rather than waiting for a payload that never comes', async () => {
+      out = [];
+      err = [];
+      const code = await runHook(['start', '--kind', 'claude-code'], {
+        ...hookIo('{}'),
+        stdinIsTty: true,
+        stdin: () => new Promise(() => undefined),
+      });
+      expect(code).toBe(64);
+      expect(err.join('')).toContain('terminal');
+    });
+
+    it('refuses an oversized session id locally, with a message rather than a reset', async () => {
+      out = [];
+      err = [];
+      const code = await runHook(
+        ['start', '--kind', 'claude-code'],
+        hookIo(JSON.stringify({ session_id: 'x'.repeat(60_000), cwd: linked })),
+      );
+      expect(code).toBe(0);
+      expect(err.join('')).toContain('session_id is too long');
+      expect(err.join('')).not.toContain('DAEMON_UNREACHABLE');
+    });
+
+    it('reads a payload larger than the daemon would accept, because only two fields are sent', async () => {
+      // What a `PostToolUse` carries after a big file write. The hook must not
+      // choke on it: the fields it forwards are small whatever arrived.
+      out = [];
+      err = [];
+      const payload = JSON.stringify({
+        session_id: 's',
+        cwd: linked,
+        tool_response: 'y'.repeat(200_000),
+      });
+      expect(await runHook(['start', '--kind', 'claude-code'], hookIo(payload))).toBe(0);
+      expect(err.join('')).toContain('DAEMON_UNREACHABLE');
+      expect(err.join('')).not.toContain('too large');
+    });
+
+    it('reads a real stream up to the cap and refuses past it', async () => {
+      // The bound lives on the stream, which every other test here replaces.
+      // A `PostToolUse` after a big file write is well under this; a payload
+      // that is not is not a hook payload.
+      const large = 'y'.repeat(2 * 1024 * 1024);
+      await expect(readBounded(Readable.from([large]), MAX_STDIN_BYTES)).resolves.toBe(large);
+      await expect(
+        readBounded(Readable.from(['a'.repeat(MAX_STDIN_BYTES + 1)]), MAX_STDIN_BYTES),
+      ).rejects.toThrow(/too large/u);
+      // And 64KB — the cap this used to have — is not enough for one.
+      expect(MAX_STDIN_BYTES).toBeGreaterThan(200_000);
+    });
+
+    it('tells a cwd outside every watched worktree from end to end', async () => {
+      await start();
+      out = [];
+      err = [];
+      const elsewhere = mkdtempSync(join(tmpdir(), 'interlock-elsewhere-'));
+      try {
+        const code = await runHook(
+          ['start', '--kind', 'claude-code'],
+          hookIo(JSON.stringify({ session_id: 's', cwd: elsewhere })),
+        );
+        expect(code).toBe(0);
+        expect(err.join('')).toContain('REPO_NOT_FOUND');
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
     });
 
     it('records the pid the shell expanded, and falls back when it did not', async () => {
@@ -587,6 +677,8 @@ describe('interlock status', () => {
       // What a shell hands over: the agent's pid, expanded. Recorded as is.
       await runHook(['start', '--kind', 'claude-code', '--pid', String(process.pid)], {
         stdin: () => Promise.resolve(JSON.stringify({ session_id: 'shell', cwd: linked })),
+        stdinIsTty: false,
+        out: (t) => out.push(t),
         err: (t) => err.push(t),
         env: { INTERLOCK_DATA_DIR: dataDir },
         parentPid: 424242,
@@ -597,12 +689,16 @@ describe('interlock status', () => {
       // literal. The parent of the hook is the best that is left.
       await runHook(['end', '--kind', 'claude-code', '--pid', String(process.pid)], {
         stdin: () => Promise.resolve(JSON.stringify({ session_id: 'shell', cwd: linked })),
+        stdinIsTty: false,
+        out: (t) => out.push(t),
         err: (t) => err.push(t),
         env: { INTERLOCK_DATA_DIR: dataDir },
         parentPid: 424242,
       });
       await runHook(['start', '--kind', 'claude-code', '--pid', '$PPID'], {
         stdin: () => Promise.resolve(JSON.stringify({ session_id: 'direct', cwd: linked })),
+        stdinIsTty: false,
+        out: (t) => out.push(t),
         err: (t) => err.push(t),
         env: { INTERLOCK_DATA_DIR: dataDir },
         parentPid: process.pid,
