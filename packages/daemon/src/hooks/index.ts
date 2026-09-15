@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { sep } from 'node:path';
 import { AGENT_KINDS, InterlockError, ulid } from '@interlock/shared';
 import type {
@@ -159,7 +160,7 @@ function invalid(problems: string[]): InterlockError {
  * is still a process, though not one an agent of this user should have. Both
  * the daemon and the agent run as the user, so the second does not arise.
  */
-function processExists(pid: number): boolean {
+export function processExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -187,7 +188,18 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
    * fires on every tool call and a `rev-parse` per call is the watcher's whole
    * idle budget spent on attribution.
    */
-  const worktreeOf = async (cwd: string): Promise<Worktree | null> => {
+  const worktreeOf = async (reported: string): Promise<Worktree | null> => {
+    // Canonical before comparing, as the runner and the watcher already do:
+    // the store holds what git reports, and on macOS `/var/…` is a symlink to
+    // `/private/var/…`, so the same directory compares as a different one and
+    // the session is silently never registered. A path that does not exist
+    // stays as it is and matches nothing, which is the right answer for it.
+    let cwd = reported;
+    try {
+      cwd = realpathSync(reported);
+    } catch {
+      // Left as reported.
+    }
     let best: Worktree | null = null;
     for (const repo of await store.listRepos()) {
       for (const branch of await store.listBranchRefs(repo.id)) {
@@ -347,8 +359,15 @@ export function renderHookScripts(kind: AgentKind): Record<string, string> {
       remedy: 'Only claude-code hooks are rendered.',
     });
   }
+  // `$PPID` is expanded by the shell the agent runs the command in, and is
+  // that shell's parent: the agent. Without it the hook would record the
+  // shell, which is gone the moment the hook returns.
   const command = (event: SessionEvent): unknown => [
-    { hooks: [{ type: 'command', command: `interlock hook ${event} --kind claude-code` }] },
+    {
+      hooks: [
+        { type: 'command', command: `interlock hook ${event} --kind claude-code --pid $PPID` },
+      ],
+    },
   ];
   const settings = {
     hooks: {
