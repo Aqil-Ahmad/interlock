@@ -4,9 +4,10 @@ import type { Server } from 'node:http';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createDaemon } from '@interlock/daemon';
+import { createDaemon, openStore } from '@interlock/daemon';
 import type { Daemon } from '@interlock/daemon';
 import { createLogger, resolveConfig, runtimePath, tokenPath } from '@interlock/shared';
+import type { RepoId } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runHook } from '../src/commands/hook.js';
 import { runStatus } from '../src/commands/status.js';
@@ -560,6 +561,55 @@ describe('interlock status', () => {
       err = [];
       expect(await runHook(['--help'], hookIo('{}'))).toBe(0);
       expect(err.join('')).toContain('Usage: interlock hook');
+    });
+
+    it('records the pid the shell expanded, and falls back when it did not', async () => {
+      await start();
+      await until(async () => {
+        await status('--data-dir', dataDir, '--json');
+        return (
+          (JSON.parse(stdout()) as { repos: { branches: unknown[] }[] }).repos[0]!.branches
+            .length >= 2
+        );
+      }, 'the daemon to reconcile');
+
+      const sessionsOf = async (): Promise<{ pid: number | null }[]> => {
+        await status('--data-dir', dataDir, '--json');
+        const parsed = JSON.parse(stdout()) as { repos: { id: string }[] };
+        const store = await openStore({ path: join(dataDir, 'interlock.db') });
+        try {
+          return await store.listSessions(parsed.repos[0]!.id as RepoId);
+        } finally {
+          await store.close();
+        }
+      };
+
+      // What a shell hands over: the agent's pid, expanded. Recorded as is.
+      await runHook(['start', '--kind', 'claude-code', '--pid', String(process.pid)], {
+        stdin: () => Promise.resolve(JSON.stringify({ session_id: 'shell', cwd: linked })),
+        err: (t) => err.push(t),
+        env: { INTERLOCK_DATA_DIR: dataDir },
+        parentPid: 424242,
+      });
+      expect((await sessionsOf()).map((s) => s.pid)).toContain(process.pid);
+
+      // What an agent that runs the command without a shell hands over: the
+      // literal. The parent of the hook is the best that is left.
+      await runHook(['end', '--kind', 'claude-code', '--pid', String(process.pid)], {
+        stdin: () => Promise.resolve(JSON.stringify({ session_id: 'shell', cwd: linked })),
+        err: (t) => err.push(t),
+        env: { INTERLOCK_DATA_DIR: dataDir },
+        parentPid: 424242,
+      });
+      await runHook(['start', '--kind', 'claude-code', '--pid', '$PPID'], {
+        stdin: () => Promise.resolve(JSON.stringify({ session_id: 'direct', cwd: linked })),
+        err: (t) => err.push(t),
+        env: { INTERLOCK_DATA_DIR: dataDir },
+        parentPid: process.pid,
+      });
+      const pids = (await sessionsOf()).map((s) => s.pid);
+      expect(pids.filter((pid) => pid === process.pid)).toHaveLength(2);
+      expect(pids).not.toContain(424242);
     });
   });
 

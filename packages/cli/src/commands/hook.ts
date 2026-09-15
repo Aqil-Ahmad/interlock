@@ -28,9 +28,11 @@ const EXIT_USAGE = 64;
 const MAX_STDIN_BYTES = 64 * 1024;
 
 const USAGE = [
-  'Usage: interlock hook <start|activity|end> --kind <agent>',
+  'Usage: interlock hook <start|activity|end> --kind <agent> [--pid <agent pid>]',
   '',
   'Report an agent session to the daemon. Reads the hook payload from stdin.',
+  'Pass --pid $PPID from the shell the agent runs the hook in; without it the',
+  'parent of this process is used, which is that shell rather than the agent.',
   '',
   `Agents: ${AGENT_KINDS.join(', ')}`,
   '',
@@ -72,19 +74,38 @@ const processIo: HookIo = {
 interface Options {
   readonly event: HookEvent;
   readonly kind: AgentKind;
+  /**
+   * The agent's process, as the hook's shell saw it, or `null` to fall back
+   * to this process's parent.
+   *
+   * Agent tools run a hook command through a shell — `sh -c "…"` — so this
+   * process's parent is the shell, which exits the moment the hook returns;
+   * a session recorded against it is dead within milliseconds and reaped at
+   * the next read, with a `session.ended` per tool call. `$PPID` expanded by
+   * that shell is the shell's own parent, which is the agent. An agent that
+   * runs the command directly never expands it, and the literal falls back.
+   */
+  readonly pid: number | null;
   readonly help: boolean;
 }
 
 function parseArgs(args: readonly string[]): Options {
   if (args.includes('--help') || args.includes('-h')) {
-    return { event: 'activity', kind: 'unknown', help: true };
+    return { event: 'activity', kind: 'unknown', pid: null, help: true };
   }
   let event: HookEvent | null = null;
   let kind: AgentKind | null = null;
+  let pid: number | null = null;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if ((EVENTS as readonly string[]).includes(arg) && event === null) {
       event = arg as HookEvent;
+    } else if (arg === '--pid' || arg.startsWith('--pid=')) {
+      const value = arg === '--pid' ? args[++index] : arg.slice('--pid='.length);
+      // Not refused when it is not a number: an unexpanded `$PPID` is what an
+      // agent that does not use a shell hands over, and the fallback covers it.
+      const parsed = Number(value);
+      if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
     } else if (arg === '--kind') {
       const value = args[++index];
       if (value === undefined || !(AGENT_KINDS as readonly string[]).includes(value)) {
@@ -103,7 +124,7 @@ function parseArgs(args: readonly string[]): Options {
   }
   if (event === null) throw usage(`The event must be one of ${EVENTS.join(', ')}`);
   if (kind === null) throw usage('--kind is required');
-  return { event, kind, help: false };
+  return { event, kind, pid, help: false };
 }
 
 function usage(message: string): InterlockError {
@@ -169,7 +190,7 @@ export async function runHook(args: readonly string[], io: HookIo = processIo): 
       kind: options.kind,
       externalSessionId: payload.externalSessionId,
       cwd: payload.cwd,
-      pid: io.parentPid,
+      pid: options.pid ?? io.parentPid,
       branch: null,
     });
   } catch (error) {
