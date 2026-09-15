@@ -21,6 +21,6 @@
   },
   "devDependencies": {
     "@interlock/daemon": "workspace:*",
-    "@types/node": "^26.4.0"
+    "@types/node": "^26.5.0"
   }
 }
