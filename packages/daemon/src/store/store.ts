@@ -350,13 +350,15 @@ class SqliteStore implements Store {
       deleteBranchRef: db.prepare('DELETE FROM branch_refs WHERE id = ?'),
 
       upsertSession: db.prepare(`
-        INSERT INTO agent_sessions (id, repo_id, kind, external_session_id, branch_ref_id, cwd, started_at, last_active_at, ended_at)
-        VALUES (:id, :repo_id, :kind, :external_session_id, :branch_ref_id, :cwd, :started_at, :last_active_at, :ended_at)
+        INSERT INTO agent_sessions (id, repo_id, kind, external_session_id, branch_ref_id, attribution, cwd, pid, started_at, last_active_at, ended_at)
+        VALUES (:id, :repo_id, :kind, :external_session_id, :branch_ref_id, :attribution, :cwd, :pid, :started_at, :last_active_at, :ended_at)
         ON CONFLICT (id) DO UPDATE SET
           kind                = excluded.kind,
           external_session_id = excluded.external_session_id,
           branch_ref_id       = excluded.branch_ref_id,
+          attribution         = excluded.attribution,
           cwd                 = excluded.cwd,
+          pid                 = excluded.pid,
           last_active_at      = excluded.last_active_at,
           ended_at            = excluded.ended_at`),
       listSessions: db.prepare(

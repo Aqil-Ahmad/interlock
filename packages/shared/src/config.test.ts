@@ -72,6 +72,11 @@ function problemsFrom(source: string): string[] {
 }
 
 describe('validateConfig', () => {
+  it('bounds the session heartbeat timeout', () => {
+    const problems = validateConfig({ ...DEFAULT_CONFIG, sessions: { staleAfterMs: 5 } });
+    expect(problems).toContain('sessions.staleAfterMs must be >= 1000');
+  });
+
   it('refuses a relative data dir, as it refuses a relative repository', () => {
     const problems = validateConfig({ ...DEFAULT_CONFIG, dataDir: 'relative/data' });
     expect(problems).toContain('dataDir must be absolute: relative/data');
@@ -329,6 +334,15 @@ describe('parseConfigFile', () => {
     expect(problems).toHaveLength(1);
     expect(problems[0]).toContain('`repo`');
     expect(problems[0]).toContain('repos');
+  });
+
+  it('reads the sessions section like any other', () => {
+    expect(
+      parseConfigFile(JSON.stringify({ sessions: { staleAfterMs: 1_000 } }), PATH),
+    ).toStrictEqual({
+      sessions: { staleAfterMs: 1_000 },
+    });
+    expect(problemsOf(JSON.stringify({ sessions: { stale: 1 } }))[0]).toContain('`stale`');
   });
 
   it('refuses an unknown key inside a section', () => {

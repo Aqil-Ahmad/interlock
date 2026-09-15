@@ -25,6 +25,7 @@ export interface InterlockConfig {
   readonly analyzers: AnalyzersConfig;
   readonly sandbox: SandboxConfig;
   readonly mcp: McpConfig;
+  readonly sessions: SessionsConfig;
   readonly logLevel: LogLevel;
 }
 
@@ -81,6 +82,15 @@ export interface SandboxConfig {
   readonly network: false;
 }
 
+export interface SessionsConfig {
+  /**
+   * How long an agent session may go without a hook before it is presumed
+   * gone. A pid check catches a process that died; this catches one that is
+   * alive and doing nothing, and a reused pid that passes the first check.
+   */
+  readonly staleAfterMs: number;
+}
+
 export interface McpConfig {
   readonly enabled: boolean;
   readonly port: number;
@@ -116,6 +126,7 @@ export const DEFAULT_CONFIG: InterlockConfig = {
     network: false,
   },
   mcp: { enabled: true, port: 47318, maxWarningsPerHour: 10 },
+  sessions: { staleAfterMs: 5 * 60_000 },
   logLevel: 'info',
 };
 
@@ -362,7 +373,7 @@ export function dataDirFrom(env: Readonly<Record<string, string | undefined>>): 
  * Read off the defaults rather than written down again, so this is the same
  * schema `validateConfig` checks values against and not a second one.
  */
-const CONFIG_SECTIONS = ['daemon', 'scheduler', 'analyzers', 'sandbox', 'mcp'] as const;
+const CONFIG_SECTIONS = ['daemon', 'scheduler', 'analyzers', 'sandbox', 'mcp', 'sessions'] as const;
 type ConfigSection = (typeof CONFIG_SECTIONS)[number];
 
 /**
@@ -567,6 +578,7 @@ export function resolveConfig(input: DeepPartial<InterlockConfig> = {}): Interlo
     analyzers: { ...DEFAULT_CONFIG.analyzers, ...input.analyzers },
     sandbox: { ...DEFAULT_CONFIG.sandbox, ...input.sandbox, network: false },
     mcp: { ...DEFAULT_CONFIG.mcp, ...input.mcp },
+    sessions: { ...DEFAULT_CONFIG.sessions, ...input.sessions },
   };
 
   const problems = validateConfig(config);
@@ -673,6 +685,13 @@ export function validateConfig(config: InterlockConfig): string[] {
     'mcp.maxWarningsPerHour',
     'must be >= 0',
     (n) => n >= 0,
+    problems,
+  );
+  requireNumber(
+    config.sessions.staleAfterMs,
+    'sessions.staleAfterMs',
+    'must be >= 1000',
+    (n) => n >= 1_000,
     problems,
   );
 

@@ -9,13 +9,15 @@
  *   GET  /api/health                      → daemon liveness and protocol version
  *   GET  /api/repos                       → watched repos
  *   GET  /api/repos/:id/branches          → in-flight branches and dirty state
+ *   GET  /api/repos/:id/sessions          → live agent sessions
+ *   POST /api/sessions                    → an agent hook reporting a session
  *   GET  /api/repos/:id/findings          → open findings, ranked
  *   GET  /api/findings/:id                → finding with full evidence
  *   POST /api/repos/:id/check             → force-check a pair
  *   GET  /api/repos/:id/order             → recommended merge order
  *   WS   /ws                              → live event stream for the dashboard
  *
- * The first three are served. The rest describe the shape being built toward and
+ * The first five are served. The rest describe the shape being built toward and
  * are not routes yet: nothing produces findings, a merge order or a check, and a
  * route answering an empty list for them would say "no conflicts" rather than
  * "not built".

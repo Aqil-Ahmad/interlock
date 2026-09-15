@@ -3,6 +3,7 @@ import { connectDaemon } from '../client/daemon-client.js';
 import { renderJson, renderStatus } from '../render.js';
 import type { RepoView } from '../render.js';
 import type { Command } from './command.js';
+import { describeError } from './describe.js';
 
 /**
  * `interlock status` — what is in flight right now.
@@ -111,7 +112,7 @@ export async function runStatus(
   try {
     options = parseArgs(args, io.env);
   } catch (error) {
-    io.err(`${describe(error)}\n`);
+    io.err(`${describeError(error)}\n`);
     return EXIT_USAGE;
   }
 
@@ -127,32 +128,24 @@ export async function runStatus(
     // a serial pass multiplies the worst case by the number of repositories
     // while the daemon answers all of them off one local socket pool.
     const views: RepoView[] = await Promise.all(
-      repos.map(async (repo) => ({ repo, branches: await client.branches(repo.id) })),
+      repos.map(async (repo) => {
+        const [branches, sessions] = await Promise.all([
+          client.branches(repo.id),
+          client.sessions(repo.id),
+        ]);
+        return { repo, branches, sessions };
+      }),
     );
     io.out(options.json ? renderJson(views) : renderStatus(views));
     // Whatever it found. A report that failed the build because it had
     // something to report would be used once and then piped to `true`.
     return EXIT_OK;
   } catch (error) {
-    io.err(`${describe(error)}\n`);
+    io.err(`${describeError(error)}\n`);
     return isInterlockError(error) && error.code === 'DAEMON_UNREACHABLE'
       ? EXIT_UNAVAILABLE
       : EXIT_SOFTWARE;
   }
-}
-
-/**
- * The code, the message and, when there is one, the remedy.
- *
- * The code leads because a stable one is the whole reason it exists — a caller
- * is meant to react to it without matching on prose, and a failure that prints
- * only the prose leaves matching on prose as the only option. The remedy is the
- * part a person can act on and is printed verbatim.
- */
-function describe(error: unknown): string {
-  if (!isInterlockError(error)) return error instanceof Error ? error.message : String(error);
-  const line = `${error.code}: ${error.message}`;
-  return error.remedy === undefined ? line : `${line}\n\n${error.remedy}`;
 }
 
 export const statusCommand: Command = {

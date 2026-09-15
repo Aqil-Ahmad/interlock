@@ -620,26 +620,75 @@ status` must not stop the process exiting, so the drain has a deadline and
   the problem on stderr, proven by running it; and the daemon and the CLI read
   `INTERLOCK_DATA_DIR` through the same function.
 
-- [ ] **Agent session hooks**
-      **Files:** `packages/daemon/src/hooks/`
+- [x] **Agent session hooks**
+      **Files:** `packages/daemon/src/hooks/`, `packages/daemon/src/api/`, `packages/daemon/src/store/migrations/`, `packages/shared/src/models/agent-session.ts`, `packages/cli/src/commands/`
       **What:** `registerSession`, `renderHookScripts` — map an agent session to
       the branch it is driving.
 
   Hook input is untrusted: it arrives from a process Interlock does not control.
-  Validate it against the schema and reject anything unexpected. Fall back to
-  best-effort detection when hooks are absent, and mark those sessions as
-  inferred rather than reported, because attribution quality changes what the
-  advisor is allowed to claim.
+  Validate it against the schema and reject anything unexpected — unknown keys
+  included, for the reason the config parser refuses them. Attribution quality
+  changes what the advisor is allowed to claim, so a session carries whether its
+  branch was **reported** by the hook or **inferred** from its working directory.
 
-  Reaping needs a stated mechanism, because agent processes exit in ways that
-  never fire a hook: check PID liveness on read, and expire any session whose
-  last heartbeat is older than a configured timeout. Neither alone is enough — a
-  PID can be reused, and a wedged process still holds its PID.
+  **This is the first write through the API.** The API answers 405 to anything
+  but `GET`, and a hook is a `POST`. So this task adds body reading with a size
+  cap, one route, and the schema check — and nothing else becomes writable. The
+  route is `POST /api/sessions`, taking one shape for every event: `start`,
+  `activity` and `end` all create-or-update, because the first event that finds
+  its worktree is the one that registers, and a `SessionStart` that arrived
+  before a sweep listed the worktree must not be the only chance.
 
-  **Done when:** a session registers and `interlock status` shows which agent
-  owns which branch; a malformed payload is rejected without crashing the
-  daemon; a session whose process was killed is gone within the timeout; and a
-  reused PID does not resurrect a dead session.
+  **The token never goes into a hook script.** The stub takes the daemon URL and
+  the token and renders them into a file — a file that lives in the repository,
+  which the agents read and commit. So the hook is not a script at all: it is
+  `interlock hook <event> --kind <agent>`, a CLI command that reads the hook
+  payload from stdin, finds the daemon the way `status` does, and posts. The
+  token stays in the data dir, the port is read from the runtime file, and
+  `renderHookScripts` renders the settings fragment that names that command.
+  Claude Code's format is known and rendered; other agents' are not, and are
+  `interlock init`'s to add when it lands.
+
+  **Which repository, without git.** A hook carries `cwd`. It is matched
+  against the worktrees the store already knows, longest prefix first, which
+  names the repository and — when the hook did not say — the branch, marked
+  inferred. No git runs per hook event: `PreToolUse` fires on every tool call.
+  A `cwd` outside every watched worktree is refused as `REPO_NOT_FOUND`; a
+  session for a repository nobody watches has nothing to attribute.
+
+  **Liveness needs a pid, and the model has none.** The CLI passes its parent's
+  — the agent's — and the session records it. Two checks, because neither is
+  enough: `kill(pid, 0)` says whether the process exists, and a heartbeat older
+  than `sessions.staleAfterMs` says whether it is doing anything. A killed
+  process is gone at the next read; a wedged one goes at the timeout; a reused
+  pid passes the first check and fails the second. And a session, once ended,
+  stays ended: reaping writes `endedAt`, and nothing resurrects a row that has
+  one — a later hook from the same session id is a new session. Reaping runs on
+  read and on the sweep's cadence, so the store's own derivation of a branch's
+  owner — the most recently active session that has not ended — stays truthful
+  without learning about pids.
+
+  `pid` and `attribution` are new columns, which is migration 002. The
+  `sessions.staleAfterMs` timeout is a new config section; the parser reads its
+  sections off the defaults and picks it up.
+
+  **What `status` shows.** `GET /api/repos/:id/sessions` lists live sessions;
+  the command joins them on the branch's `sessionId` and renders the agent's
+  kind beside the branch, with `inferred` when the branch was. The kind is an
+  enum; the external session id is a string the agent chose, and is rendered
+  through the same escaping as a path.
+
+  **Done when:** a session registers through `interlock hook` against a real
+  daemon and `interlock status` shows which agent owns which branch; a malformed
+  payload — wrong type, unknown key, relative `cwd`, a `cwd` outside every
+  watched worktree, a body over the cap — is refused with a code and does not
+  crash the daemon; a session whose process was killed is gone at the next read;
+  a session with a live pid and a stale heartbeat is gone at the timeout; a
+  reused pid does not resurrect an ended session; the settings fragment names
+  no token and no port; and every branch of the schema check is asserted.
+  **Constraints:** hard rule 3 — the route is behind the same token as every
+  other; hard rule 4 — nothing from the payload reaches a terminal or an agent
+  unescaped. A session is a claim the agent makes about itself, never proof.
 
 - [x] **Enforce the single git call site**
       **Files:** `packages/core/test/`

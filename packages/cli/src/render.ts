@@ -1,4 +1,4 @@
-import type { BranchRef, Repo } from '@interlock/shared';
+import type { AgentSession, BranchRef, Repo } from '@interlock/shared';
 
 /**
  * Turning what the daemon reports into something a terminal can show.
@@ -97,6 +97,22 @@ export function branchState(branch: BranchRef): BranchState {
 export interface RepoView {
   readonly repo: Repo;
   readonly branches: readonly BranchRef[];
+  /** Live agent sessions, joined onto branches by `sessionId`. */
+  readonly sessions: readonly AgentSession[];
+}
+
+/**
+ * Who is driving a branch, as far as anyone has said.
+ *
+ * `inferred` is shown because it changes what may be claimed: a session whose
+ * branch was worked out from where its hook ran is a guess about the branch,
+ * and reads as one.
+ */
+function ownerOf(branch: BranchRef, sessions: readonly AgentSession[]): string | null {
+  if (branch.sessionId === null) return null;
+  const session = sessions.find((candidate) => candidate.id === branch.sessionId);
+  if (session === undefined) return null;
+  return session.attribution === 'inferred' ? `${session.kind} (inferred)` : session.kind;
 }
 
 /** The touched files of a branch, grouped as git groups them. */
@@ -148,7 +164,11 @@ export function renderStatus(views: readonly RepoView[], options: RenderOptions 
       // "nothing changed" where the truth is "not known". A clean branch says
       // nothing about a count for the same reason: there is nothing to count.
       const suffix = count === 0 ? '' : `  ${String(count)} file${count === 1 ? '' : 's'}`;
-      lines.push(`  ${safeText(branch.name).padEnd(width)}  ${state}${suffix}`);
+      const owner = ownerOf(branch, view.sessions);
+      // The kind is an enum; only the label around it is free text, and that
+      // is this program's own.
+      const driving = owner === null ? '' : `  · ${owner}`;
+      lines.push(`  ${safeText(branch.name).padEnd(width)}  ${state}${suffix}${driving}`);
 
       if (state === 'unknown') {
         lines.push(`  ${' '.repeat(width)}  worktree could not be read`);
@@ -197,6 +217,7 @@ export function renderJson(views: readonly RepoView[]): string {
             state: branchState(branch),
             worktreePath: branch.worktreePath,
             fileCount: branch.dirty === null ? null : fileCount(branch),
+            owner: ownerJson(branch, view.sessions),
             files:
               branch.dirty === null
                 ? null
@@ -212,6 +233,20 @@ export function renderJson(views: readonly RepoView[]): string {
       2,
     ),
   )}\n`;
+}
+
+/** The owning session's facts, for a consumer that is not a person. */
+function ownerJson(
+  branch: BranchRef,
+  sessions: readonly AgentSession[],
+): { kind: string; attribution: string; externalSessionId: string | null } | null {
+  const session = sessions.find((candidate) => candidate.id === branch.sessionId);
+  if (session === undefined) return null;
+  return {
+    kind: session.kind,
+    attribution: session.attribution,
+    externalSessionId: session.externalSessionId,
+  };
 }
 
 /**

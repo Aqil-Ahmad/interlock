@@ -16,10 +16,13 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLogger, resolveConfig, tokenPath, ulid } from '@interlock/shared';
-import type { InterlockConfig, LogRecord, RepoId } from '@interlock/shared';
+import type { BranchRefId, InterlockConfig, LogRecord, RepoId } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApiServer, ensureToken } from '../src/api/index.js';
 import type { ApiServer, Bound } from '../src/api/index.js';
+import { EventBus } from '../src/bus/index.js';
+import { createSessionRegistry } from '../src/hooks/index.js';
+import type { SessionRegistry } from '../src/hooks/index.js';
 import { openStore } from '../src/store/index.js';
 import type { Store } from '../src/store/index.js';
 import { rejection } from './support/rejection.js';
@@ -40,6 +43,7 @@ describe('localhost API', () => {
   let store: Store;
   let api: ApiServer;
   let bound: Bound;
+  let sessions: SessionRegistry;
   let logs: LogRecord[];
   let agent: Agent;
 
@@ -50,13 +54,26 @@ describe('localhost API', () => {
    */
   const call = (
     path: string,
-    init: { token?: string | null; method?: string; host?: string } = {},
+    init: {
+      token?: string | null;
+      method?: string;
+      host?: string;
+      body?: unknown;
+      raw?: string;
+      /** Send `Content-Length`; without it the body is chunked and undeclared. */
+      declareLength?: boolean;
+    } = {},
   ): Promise<{ status: number; headers: IncomingHttpHeaders; body: unknown }> => {
     const headers: Record<string, string> = {};
     if (init.token !== null && init.token !== undefined) {
       headers.Authorization = `Bearer ${init.token}`;
     }
     if (init.host !== undefined) headers.Host = init.host;
+    const payload = init.raw ?? (init.body === undefined ? undefined : JSON.stringify(init.body));
+    if (payload !== undefined) headers['Content-Type'] = 'application/json';
+    if (payload !== undefined && init.declareLength === true) {
+      headers['Content-Length'] = String(Buffer.byteLength(payload));
+    }
 
     return new Promise((resolve, reject) => {
       const outgoing = request(
@@ -83,8 +100,22 @@ describe('localhost API', () => {
           });
         },
       );
-      outgoing.on('error', reject);
-      outgoing.end();
+      // A body past the cap is destroyed mid-send, which the client sees as a
+      // reset rather than a response; that is a refusal too. Only while a body
+      // is being sent — a reset on a plain GET is a failure the test asked for.
+      outgoing.on('error', (error: NodeJS.ErrnoException) =>
+        payload !== undefined && (error.code === 'ECONNRESET' || error.code === 'EPIPE')
+          ? resolve({ status: 0, headers: {}, body: null })
+          : reject(error),
+      );
+      // `end(payload)` sets `Content-Length` on its own, so a body that must
+      // arrive undeclared — chunked — is written first and ended after.
+      if (payload !== undefined && init.declareLength === false) {
+        outgoing.write(payload);
+        outgoing.end();
+      } else {
+        outgoing.end(payload);
+      }
     });
   };
 
@@ -96,11 +127,10 @@ describe('localhost API', () => {
     // for every connection would hang on.
     agent = new Agent({ keepAlive: true });
     store = await openStore({ path: ':memory:' });
-    api = createApiServer({
-      config,
-      store,
-      logger: createLogger('test', { level: 'trace', sink: (record) => logs.push(record) }),
-    });
+    const logger = createLogger('test', { level: 'trace', sink: (record) => logs.push(record) });
+    const bus = new EventBus({ logger });
+    sessions = createSessionRegistry({ store, bus, logger, staleAfterMs: 60_000 });
+    api = createApiServer({ config, store, sessions, logger });
     bound = await api.start();
   });
 
@@ -269,6 +299,107 @@ describe('localhost API', () => {
     expect(response.status).toBe(400);
     expect(response.body).toMatchObject({ error: { code: 'API_REQUEST_INVALID' } });
     expect(logs.filter((record) => record.level === 'error')).toStrictEqual([]);
+  });
+
+  it('serves one POST route, and only for the session hook', async () => {
+    // Everything else stays GET-only, so nothing becomes writable by accident.
+    expect((await call('/api/repos', { token: bound.token, method: 'POST' })).status).toBe(405);
+    const get = await call('/api/sessions', { token: bound.token });
+    expect(get.status).toBe(405);
+    expect(get.headers.allow).toBe('POST');
+  });
+
+  it('registers a session from a hook payload and lists it back', async () => {
+    const repoId = ulid<RepoId>();
+    const now = new Date().toISOString();
+    const repo = await store.upsertRepo({
+      id: repoId,
+      rootPath: '/work/repo',
+      defaultBranch: 'main',
+      shadowPath: join(dataDir, 'shadows', repoId),
+      config: {},
+      discoveredAt: now,
+      lastSeenAt: now,
+    });
+    await store.upsertBranchRef({
+      id: ulid<BranchRefId>(),
+      repoId: repo.id,
+      ref: 'refs/heads/main',
+      name: 'main',
+      headSha: 'a'.repeat(40),
+      worktreePath: '/work/repo',
+      dirty: null,
+      sessionId: null,
+      firstSeenAt: now,
+      updatedAt: now,
+    });
+
+    const posted = await call('/api/sessions', {
+      token: bound.token,
+      method: 'POST',
+      body: {
+        event: 'start',
+        kind: 'claude-code',
+        externalSessionId: 'sess-1',
+        cwd: '/work/repo/src',
+        pid: process.pid,
+        branch: null,
+      },
+    });
+    expect(posted.status).toBe(200);
+    expect(posted.body).toMatchObject({
+      session: { kind: 'claude-code', attribution: 'inferred' },
+    });
+
+    const listed = await call(`/api/repos/${repo.id}/sessions`, { token: bound.token });
+    expect(listed.status).toBe(200);
+    expect(listed.body).toMatchObject({ sessions: [{ externalSessionId: 'sess-1' }] });
+  });
+
+  it('refuses a malformed hook payload with a code, and keeps serving', async () => {
+    const bad = await call('/api/sessions', {
+      token: bound.token,
+      method: 'POST',
+      body: { event: 'start', kind: 'skynet', extra: true },
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.body).toMatchObject({ error: { code: 'API_REQUEST_INVALID' } });
+    expect((bad.body as { error: { message: string } }).error.message).toContain('`extra`');
+
+    const notJson = await call('/api/sessions', { token: bound.token, method: 'POST', raw: '{' });
+    expect(notJson.status).toBe(400);
+
+    // Still up, and nothing written.
+    expect((await call('/api/health', { token: bound.token })).status).toBe(200);
+    expect(logs.filter((record) => record.level === 'error')).toStrictEqual([]);
+  });
+
+  it('refuses a body it is told will be over the cap, with an answer', async () => {
+    // An honest client declares its size and gets a 400 it can read; only one
+    // that says nothing, or lies, is cut off mid-upload.
+    const declared = await call('/api/sessions', {
+      token: bound.token,
+      method: 'POST',
+      raw: JSON.stringify({ cwd: 'x'.repeat(20_000) }),
+      declareLength: true,
+    });
+    expect(declared.status).toBe(400);
+    expect(declared.body).toMatchObject({ error: { code: 'API_REQUEST_INVALID' } });
+    expect((declared.body as { error: { message: string } }).error.message).toContain('too large');
+  });
+
+  it('refuses a body over the cap before reading it all', async () => {
+    const huge = await call('/api/sessions', {
+      token: bound.token,
+      method: 'POST',
+      raw: JSON.stringify({ cwd: 'x'.repeat(20_000) }),
+      declareLength: false,
+    });
+    // A reset, not a 400: the connection is dropped mid-upload, before the
+    // body is whole. A 400 would mean it was read to the end and refused by
+    // the schema instead — which the schema would do, for a different reason.
+    expect(huge.status).toBe(0);
+    expect((await call('/api/health', { token: bound.token })).status).toBe(200);
   });
 
   it('refuses to start twice on one instance', async () => {

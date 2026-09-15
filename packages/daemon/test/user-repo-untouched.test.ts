@@ -104,8 +104,11 @@ describe('the daemon never modifies a user repository', () => {
     // id is read before the write, not after: a sweep quick enough to land in
     // between would make "changed since" true before anything was waited for.
     const stampedBefore = (await branches()).find((b) => b.name === 'feature')?.dirty?.snapshotId;
-    writeFileSync(join(linked, 'a.txt'), 'edited again\n');
+    // Rewritten on every poll: macOS drops filesystem events under load, and
+    // one dropped event with no timer behind it is a test that hangs. The diff
+    // below still names exactly one file, however often it was written.
     await until(async () => {
+      writeFileSync(join(linked, 'a.txt'), `edited again ${String(Date.now())}\n`);
       const feature = (await branches()).find((b) => b.name === 'feature');
       const stamped = feature?.dirty?.snapshotId ?? null;
       return stamped !== null && stamped !== stampedBefore;

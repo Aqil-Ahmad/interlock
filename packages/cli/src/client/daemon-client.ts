@@ -6,7 +6,7 @@ import {
   runtimePath,
   tokenPath,
 } from '@interlock/shared';
-import type { BranchRef, Repo } from '@interlock/shared';
+import type { AgentSession, BranchRef, Repo } from '@interlock/shared';
 
 /**
  * The CLI's half of the localhost API.
@@ -28,6 +28,10 @@ export interface DaemonClient {
   repos(): Promise<Repo[]>;
   /** Branches in one repository, with their dirty state and touched files. */
   branches(repoId: Repo['id']): Promise<BranchRef[]>;
+  /** Agent sessions the daemon believes are live in one repository. */
+  sessions(repoId: Repo['id']): Promise<AgentSession[]>;
+  /** Report an agent session event. The one thing a client writes. */
+  registerSession(registration: unknown): Promise<AgentSession>;
 }
 
 /**
@@ -65,11 +69,16 @@ export async function connectDaemon(dataDir: string): Promise<DaemonClient> {
   const token = readToken(dataDir);
   const origin = `http://127.0.0.1:${String(port)}`;
 
-  const request = async <T>(path: string): Promise<T> => {
+  const request = async <T>(path: string, body?: unknown): Promise<T> => {
     let response: Response;
     try {
       response = await fetch(`${origin}${path}`, {
-        headers: { authorization: `Bearer ${token}` },
+        method: body === undefined ? 'GET' : 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
@@ -108,6 +117,14 @@ export async function connectDaemon(dataDir: string): Promise<DaemonClient> {
     async branches(repoId: Repo['id']): Promise<BranchRef[]> {
       const encoded = encodeURIComponent(repoId);
       return (await request<{ branches: BranchRef[] }>(`/api/repos/${encoded}/branches`)).branches;
+    },
+    async sessions(repoId: Repo['id']): Promise<AgentSession[]> {
+      const encoded = encodeURIComponent(repoId);
+      return (await request<{ sessions: AgentSession[] }>(`/api/repos/${encoded}/sessions`))
+        .sessions;
+    },
+    async registerSession(registration: unknown): Promise<AgentSession> {
+      return (await request<{ session: AgentSession }>('/api/sessions', registration)).session;
     },
   };
 }

@@ -40,7 +40,8 @@ export function runMigrations(db: DatabaseSync, logger: Logger): number {
       // loser wait for the winner and then re-apply, which every migration here
       // is required to tolerate.
       db.exec('BEGIN IMMEDIATE');
-      db.exec(migration.up);
+      if (typeof migration.up === 'string') db.exec(migration.up);
+      else migration.up(db);
       // A pragma takes no bound parameter. The value is this module's own
       // integer rather than anything a caller supplies.
       db.exec(`PRAGMA user_version = ${String(migration.version)}`);
