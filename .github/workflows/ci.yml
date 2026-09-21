@@ -51,7 +51,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 24 is the floor declared in `engines`; 26 is what development runs on.
+        # 24 is the floor declared in `engines` and floats, since a floor is a
+        # claim about a line rather than a build. 26 is what development runs
+        # on and is read from `.node-version`, so a required check runs the
+        # build a developer has rather than the newest one GitHub has.
         # macOS earns one cell rather than a full axis: it is where path
         # canonicalisation differs — `/var` is a symlink to `/private/var` and
         # git resolves it — and where the watcher will use FSEvents. Nothing
@@ -61,15 +64,26 @@ jobs:
             node: '24'
           - os: ubuntu-latest
             node: '26'
+            pinned: true
             coverage: true
           - os: macos-latest
             node: '26'
+            pinned: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
+      # One `with` cannot carry both a version and a version file, so the
+      # pinned cells read the file and the floor cell names its line.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ matrix.pinned }}
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ !matrix.pinned }}
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm

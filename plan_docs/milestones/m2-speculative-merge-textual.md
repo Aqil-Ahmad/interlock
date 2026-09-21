@@ -22,6 +22,37 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
 
 ## Tasks
 
+- [ ] **Watcher survives Node ≥ 26.9's recursive watcher on Linux**
+      **Files:** `packages/daemon/src/watcher/worktree-watcher.ts`, `packages/daemon/src/main.ts`
+      **What:** a watched worktree that becomes unreadable must not take the daemon down.
+
+  Node 26.9.0 rewrote `lib/internal/fs/recursive_watch.js`, and its
+  `#onFolderEvent` calls `lstatSync` on a path inside the directory an event
+  named with only `ENOENT` suppressed — so a directory that just became
+  unreadable throws `EACCES` from inside Node's own callback, past every
+  `'error'` listener, and the process dies. Reproduced against 26.4.0 (emits
+  `'error'`, survives) and 26.9.0 (uncaught, dies); the reproducer and the
+  line are in `log.md` under 2026-09-21. CI is pinned to `.node-version` so the
+  required check does not see it; users on a newer Node do.
+
+  Two shapes, and the second is the real one. A process-level
+  `uncaughtException` handler in `main.ts` matching this exact signature —
+  `EACCES` from `recursive_watch` — logs and continues, and is a workaround for
+  a named upstream bug that goes when the bug does. Owning the recursion in
+  the watcher — one `fs.watch` per directory, added as directories appear and
+  dropped as they go, with the ignore rules applied to what is walked — is
+  what makes the daemon independent of Node's recursive implementation on
+  Linux, which has had more than one of these. On Linux Node's own recursive
+  watcher does exactly that walk anyway, so the cost is the same and the
+  errors are ours to handle. File the regression upstream either way.
+
+  **Done when:** the twelve-line reproducer from `log.md`, run against the
+  daemon's watcher rather than `fs.watch`, survives on Node 26.9.0 on Linux;
+  the unreadable-worktree test in `packages/cli/test/status.test.ts` passes
+  ten times running on that Node; and the workaround, if that is the shape
+  taken, names the Node version it exists for and is asserted to be reached.
+  **Constraints:** hard rule 5 — the test that trips this is correct and stays.
+
 - [ ] **Shadow clone lifecycle**
       **Files:** `packages/core/src/git/shadow.ts`
       **What:** `ensureShadow` — one clone per user repo under the data dir, sharing the origin's object store.
