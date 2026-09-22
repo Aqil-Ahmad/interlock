@@ -148,6 +148,16 @@ describe('ensureShadow', () => {
     expect(shadowRefs(shadow.rootPath).some((ref) => ref.startsWith('refs/heads/'))).toBe(false);
   });
 
+  it('imports no tags', async () => {
+    git('tag', 'v1.0');
+    const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
+
+    // Fetch follows tags reachable from what it fetched unless told not to, and
+    // a tag is a global name: two repositories' `v1.0` are different commits,
+    // and nothing here resolves one.
+    expect(shadowRefs(shadow.rootPath).filter((ref) => ref.startsWith('refs/tags/'))).toEqual([]);
+  });
+
   it('drops a branch the user deleted', async () => {
     git('branch', 'feature');
     const shadow = await ensureShadow(repo, { runner, dataDir, repoId });

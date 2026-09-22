@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { InterlockError, notImplemented } from '@interlock/shared';
@@ -45,7 +45,10 @@ const SHADOW_CONFIG: readonly (readonly [string, string])[] = [
   ['user.email', 'interlock@interlock.invalid'],
   // Auto-maintenance detaches a background process that holds
   // `objects/maintenance.lock` after the command that started it returns, and
-  // this clone's objects are the user's through alternates.
+  // this clone's objects are the user's through alternates. The runner passes
+  // the same pair as `-c` on every invocation, and the overlap is deliberate:
+  // a flag covers what Interlock runs, while config in the repository covers
+  // git run against this clone by anyone else.
   ['maintenance.auto', 'false'],
   ['gc.auto', '0'],
 ];
@@ -161,15 +164,16 @@ async function sharedObjectDirOf(repo: UserRepo, runner: GitRunner): Promise<str
  * directory left behind by a crash mid-creation, one that is not a bare
  * repository, and one borrowing a different object store — which is a clone of
  * something else wearing this repository's id.
+ *
+ * Asking git covers the absent case as well, since `-C` into a directory that
+ * is not there fails before the question is put. A separate existence check
+ * would only spend the process it saves once in a repository's life.
  */
 async function isUsableShadow(
   shadow: ShadowRepo,
   objectsDir: string,
   runner: GitRunner,
 ): Promise<boolean> {
-  // Asked before git, so the ordinary first call costs no process at all.
-  if (!existsSync(join(shadow.rootPath, 'HEAD'))) return false;
-
   const bare = await runner.run(shadow, ['rev-parse', '--is-bare-repository']);
   if (bare.exitCode !== 0 || bare.stdout.trim() !== 'true') return false;
 
