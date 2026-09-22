@@ -364,9 +364,43 @@ function watchTree(
       watcher.close();
       return;
     }
+    // One directory losing read permission blinds that directory and nothing
+    // else: the watch keeps delivering events for every sibling, so dropping
+    // the target to polling would trade a working watcher for a timer over one
+    // unreadable folder. The change is still announced, and cannot be named —
+    // what is inside the directory is precisely what cannot be read.
+    if (isUnreadableDescendant(error, path)) {
+      log.warn('watched directory is unreadable; its contents are invisible', {
+        path: error.path,
+      });
+      onName(null);
+      return;
+    }
     onFatal(error);
   });
   return watcher;
+}
+
+/**
+ * An access failure on something strictly inside the watched tree.
+ *
+ * The watched path itself is excluded deliberately. A root nobody can read
+ * delivers nothing, so keeping that watch open would leave a watcher that
+ * reports silence while claiming to work; the target has to fall back to
+ * polling instead. An error carrying no path cannot be placed at all, and is
+ * treated the same way.
+ *
+ * `EACCES` alone, because that is what a directory losing read permission
+ * actually reports. A wider rule would quietly keep watching for failures
+ * nothing here has seen, and the safe direction for an unrecognised one is
+ * polling.
+ */
+function isUnreadableDescendant(error: NodeJS.ErrnoException, watched: string): boolean {
+  if (error.code !== 'EACCES' || typeof error.path !== 'string') return false;
+  // The separator makes this a whole-segment test: a sibling named
+  // `<watched>.bak` shares the prefix without being inside it.
+  const prefix = `${watched}${sep}`;
+  return error.path.startsWith(prefix) && error.path.length > prefix.length;
 }
 
 function stopWatchers(entry: WatchedTarget): void {
