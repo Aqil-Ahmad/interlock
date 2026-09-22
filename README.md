@@ -86,6 +86,11 @@ scripts/         setup, benchmarks
 
 Node ≥ 24, pnpm 11, git ≥ 2.30, Docker for the semantic analyzers.
 
+On Linux, not Node 26.9.0. Its recursive directory watcher throws `EACCES` from
+inside Node's own event callback when a watched directory becomes unreadable —
+an unmounted volume, a permission change — and nothing outside Node can catch
+it, so the daemon stops. Node 26.8 and earlier are unaffected, as is macOS.
+
 ## License
 
 Dual-licensed: [AGPL-3.0-only](LICENSE_AGPL) by default, commercial terms for
