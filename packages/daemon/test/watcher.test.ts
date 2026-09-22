@@ -526,6 +526,32 @@ describe('worktree watcher', () => {
     }
   });
 
+  it('degrades on a budget failure even when it names a directory inside the tree', async () => {
+    const { factory, emitters } = fakeWatchers();
+    const blinded = createWorktreeWatcher({
+      onSignal: (signal) => signals.push(signal),
+      debounceMs: DEBOUNCE_MS,
+      pollIntervalMs: 30,
+      watchFactory: factory,
+    });
+
+    try {
+      blinded.watch({ worktreePath: root, gitDir: join(root, '.git') });
+      const budget: NodeJS.ErrnoException = new Error('ENOSPC: watch limit reached');
+      budget.code = 'ENOSPC';
+      // Where the budget ran out is not what ran out. An exhausted machine-wide
+      // limit reads as a local problem if only the path is consulted, and the
+      // watchers that did start are living on borrowed descriptors.
+      budget.path = join(root, 'feature');
+      emitters[0]?.emit('error', budget);
+      await settle(150);
+
+      expect(blinded.isDegraded(root)).toBe(true);
+    } finally {
+      blinded.close();
+    }
+  });
+
   it('degrades on an access failure beside the worktree rather than inside it', async () => {
     const { factory, emitters } = fakeWatchers();
     const blinded = createWorktreeWatcher({
