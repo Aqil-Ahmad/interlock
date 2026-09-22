@@ -25,6 +25,7 @@ import {
   touchedPaths,
 } from '../src/index.js';
 import type { GitRunner, UserRepo } from '../src/index.js';
+import { ensureShadow } from '../src/git/shadow.js';
 import { captureState, describeDiff, diffState, isClean } from './support/repo-state.js';
 import type { RepoState } from './support/repo-state.js';
 
@@ -88,6 +89,9 @@ describe('user repositories are never modified', () => {
   const cycle = async (root: string): Promise<{ diffed: number; excused: number }> => {
     const handle: UserRepo = await openUserRepo(root, { runner });
     const repo = await describeRepo(handle, { runner, dataDir });
+    // Reads the user repository over git's own local transport, which is the
+    // one path here where git runs a second process inside it.
+    await ensureShadow(handle, { runner, dataDir, repoId: repo.id });
     const branches = await listBranchRefs(handle, repo.id, { runner });
     expect(branches.length).toBeGreaterThan(0);
     let diffed = 0;

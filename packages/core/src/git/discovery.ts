@@ -22,6 +22,7 @@ import type {
   BranchRefId,
 } from '@interlock/shared';
 import { assertRevision, runRequired } from './repo-handle.js';
+import { shadowPathFor } from './shadow.js';
 import type { GitRunner, UserRepo } from './repo-handle.js';
 
 /**
@@ -282,10 +283,6 @@ function configProblem(path: string, message: string, code: string | null = null
     details: { path, code },
     remedy: `Replace ${path} with a readable JSON file, or delete it to fall back to the global configuration.`,
   });
-}
-
-function shadowPathFor(id: RepoId, dataDir: string): string {
-  return join(dataDir, 'shadows', id);
 }
 
 interface WorktreeEntry {
