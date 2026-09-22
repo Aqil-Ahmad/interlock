@@ -242,6 +242,32 @@ describe('ensureShadow', () => {
       expect(shadowRefs(shadow.rootPath)).toContain('refs/remotes/user/main');
     });
 
+    it('rebuilds a clone whose config says it is no longer bare', async () => {
+      const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
+      // `--is-bare-repository` answers from config, so a clone can stop being
+      // bare without moving a file — and `git worktree add` behaves differently
+      // against one that is not.
+      gitIn(shadow.rootPath, 'config', 'core.bare', 'false');
+
+      await ensureShadow(repo, { runner, dataDir, repoId });
+
+      expect(gitIn(shadow.rootPath, 'rev-parse', '--is-bare-repository').trim()).toBe('true');
+    });
+
+    it('refuses to delete outside the data dir when the id escapes its directory', async () => {
+      const outside = join(base, 'outside');
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, 'precious.txt'), "not Interlock's\n");
+      // The id is a branded string, and a branded string is a claim rather than
+      // a guarantee once one has been through the API and back.
+      const escaping = '../../outside' as RepoId;
+
+      const error = await rejection(ensureShadow(repo, { runner, dataDir, repoId: escaping }));
+
+      expect(error.code).toBe('SHADOW_UNAVAILABLE');
+      expect(existsSync(join(outside, 'precious.txt'))).toBe(true);
+    });
+
     it('refuses a repository that is not on disk', async () => {
       const gone: UserRepo = {
         kind: 'user',

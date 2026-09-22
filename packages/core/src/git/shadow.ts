@@ -214,12 +214,10 @@ function discard(shadowPath: string, dataDir: string): void {
 
 async function create(shadow: ShadowRepo, objectsDir: string, runner: GitRunner): Promise<void> {
   // `mkdir` masks the mode it is given with the umask, so a directory this call
-  // created is set again rather than trusted. Both levels, since `shadows/`
-  // itself may be what is new.
-  for (const dir of [dirname(shadow.rootPath), shadow.rootPath]) {
-    if (mkdirSync(dir, { recursive: true, mode: SHADOW_DIR_MODE }) !== undefined) {
-      chmodSync(dir, SHADOW_DIR_MODE);
-    }
+  // created is set again rather than trusted. `shadows/` is created by the same
+  // call and takes the same mode, since it holds every clone.
+  if (mkdirSync(shadow.rootPath, { recursive: true, mode: SHADOW_DIR_MODE }) !== undefined) {
+    chmodSync(shadow.rootPath, SHADOW_DIR_MODE);
   }
 
   // Named rather than left to git's built-in default, which prints advice about
