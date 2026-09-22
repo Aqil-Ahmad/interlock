@@ -268,6 +268,29 @@ describe('ensureShadow', () => {
       expect(existsSync(join(outside, 'precious.txt'))).toBe(true);
     });
 
+    it('rebuilds a bare clone that borrows nothing at all', async () => {
+      const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
+      // A creation interrupted after `init` and before the alternates file:
+      // a real repository that can reach none of the user's history.
+      rmSync(join(shadow.rootPath, 'objects', 'info', 'alternates'));
+
+      await ensureShadow(repo, { runner, dataDir, repoId });
+
+      expect(alternatesOf(shadow.rootPath)).toBe(realpathSync(join(dir, '.git', 'objects')));
+    });
+
+    it('refuses a repository whose object store is gone', async () => {
+      rmSync(join(dir, '.git', 'objects'), { recursive: true, force: true });
+
+      const error = await rejection(ensureShadow(repo, { runner, dataDir, repoId }));
+
+      // Git's own discovery requires `objects/` and `refs/`, so it refuses the
+      // directory before anything here asks it a question — which is why
+      // resolving the object store is a typed-error boundary rather than a
+      // check that fires.
+      expect(error.code).toBe('GIT_COMMAND_FAILED');
+    });
+
     it('refuses a repository that is not on disk', async () => {
       const gone: UserRepo = {
         kind: 'user',

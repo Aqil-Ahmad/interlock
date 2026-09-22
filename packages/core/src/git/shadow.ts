@@ -111,13 +111,13 @@ export async function ensureShadow(repo: UserRepo, options: ShadowOptions): Prom
  *
  * Canonical because the alternates file records a path git resolves later, and
  * on macOS `/var` is a symlink to `/private/var` — two names for one directory
- * that compare as different. Absolute because it is handed to `fetch` as a
- * remote, where a value beginning with `-` would be read as an option.
+ * that compare as different. It is also what makes the path safe to hand
+ * `fetch` as a remote, where a value beginning with `-` would be read as an
+ * option: `realpath` answers absolutely or not at all.
  */
 function originPathOf(repo: UserRepo): string {
-  let canonical: string;
   try {
-    canonical = realpathSync(repo.rootPath);
+    return realpathSync(repo.rootPath);
   } catch (error) {
     throw new InterlockError('REPO_NOT_FOUND', 'The repository to mirror is not on disk', {
       cause: error,
@@ -125,13 +125,6 @@ function originPathOf(repo: UserRepo): string {
       remedy: 'Point Interlock at a repository that exists, or remove it from the watched set.',
     });
   }
-  if (!isAbsolute(canonical)) {
-    throw new InterlockError('REPO_NOT_FOUND', 'The repository to mirror has no absolute path', {
-      details: { rootPath: repo.rootPath },
-      remedy: 'Pass an absolute path to the repository.',
-    });
-  }
-  return canonical;
 }
 
 /**
@@ -141,6 +134,10 @@ function originPathOf(repo: UserRepo): string {
  * directory is `<main>/.git/worktrees/<name>` and holds no objects of its own:
  * `--git-path objects` resolves to the shared store for one, and answers
  * relative to the repository root for an ordinary checkout.
+ *
+ * Resolution failing is not a path git leaves reachable — its own discovery
+ * refuses a repository with no `objects/` before answering — so the catch is
+ * what keeps an unforeseen one a typed error instead of a bare `ENOENT`.
  */
 async function sharedObjectDirOf(repo: UserRepo, runner: GitRunner): Promise<string> {
   const result = await runRequired(runner, repo, ['rev-parse', '--git-path', 'objects']);
