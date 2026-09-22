@@ -70,11 +70,36 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
   paragraph is gone, and the required CI cells run a Node that has the fix.
   **Constraints:** hard rule 5 — the test that trips this is correct and stays.
 
-- [ ] **Shadow clone lifecycle**
+- [x] **Shadow clone lifecycle**
       **Files:** `packages/core/src/git/shadow.ts`
       **What:** `ensureShadow` — one clone per user repo under the data dir, sharing the origin's object store.
-      **Done when:** a second call returns the existing shadow rather than re-cloning, and the shadow's objects are shared, not copied.
-      **Constraints:** `ensureShadow` is the only way to obtain a `ShadowRepo`, and a `ShadowRepo` is the only thing mutating functions accept. Keep it that way — the type split is what makes a write to a user repo a compile error.
+
+  Bare, because nothing here needs a checkout and the per-pair worktrees come
+  later from `git worktree add`. Sharing is `objects/info/alternates` naming the
+  user's object directory, asked of git as `rev-parse --git-path objects` rather
+  than joined by hand: a linked worktree's git dir is
+  `<main>/.git/worktrees/<name>` and holds no objects, and that one command
+  resolves both shapes. The user's branches are fetched with `--prune` into
+  `refs/remotes/user/*`, leaving `refs/heads/*` free for the speculative refs
+  this clone exists to carry.
+
+  The clone takes a `repoId` rather than deriving a path of its own, so the
+  location discovery recorded and the location this creates cannot disagree.
+  Identity (`user.name`, `user.email`) is set in the clone's config because
+  there is no other channel — the runner strips inherited `GIT_*`, neutralises
+  global config and refuses a caller's `-c` — and `commit-tree` needs one.
+
+  An existing directory is rebuilt rather than repaired when it is not a bare
+  repository or borrows a different object store; both are cheaper to recreate
+  than to reason about. The rebuild is a recursive delete, so it refuses any
+  path that is not a direct child of `<dataDir>/shadows/` — which is what a
+  malformed id reaching it would produce.
+
+  **Done when:** a second call returns the existing shadow rather than
+  re-cloning, and the shadow's objects are shared, not copied.
+  **Constraints:** `ensureShadow` is the only way to obtain a `ShadowRepo`, and
+  a `ShadowRepo` is the only thing mutating functions accept. Keep it that way —
+  the type split is what makes a write to a user repo a compile error.
 
 - [ ] **Snapshot commits**
       **Files:** `packages/core/src/git/worktree.ts`
