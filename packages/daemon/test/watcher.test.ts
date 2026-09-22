@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import type { FSWatcher } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, sep } from 'node:path';
 import { createLogger } from '@interlock/shared';
 import type { LogRecord } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -442,6 +442,185 @@ describe('worktree watcher', () => {
       expect(signals).toEqual([]);
     } finally {
       vanishing.close();
+    }
+  });
+
+  it('keeps watching the rest of a worktree when one directory becomes unreadable', async () => {
+    const { factory, emitters } = fakeWatchers();
+    const blinded = createWorktreeWatcher({
+      onSignal: (signal) => signals.push(signal),
+      debounceMs: DEBOUNCE_MS,
+      pollIntervalMs: 30,
+      watchFactory: factory,
+    });
+
+    try {
+      blinded.watch({ worktreePath: root, gitDir: join(root, '.git') });
+      const unreadable: NodeJS.ErrnoException = new Error('EACCES: permission denied, scandir');
+      unreadable.code = 'EACCES';
+      unreadable.path = join(root, 'feature');
+      emitters[0]?.emit('error', unreadable);
+      await settle(150);
+
+      expect(blinded.isDegraded(root)).toBe(false);
+      // The directory is invisible; everything beside it is not, and the watch
+      // that proves it is the one still open.
+      signals.length = 0;
+      emitters[0]?.emit('change', 'change', 'src/a.ts');
+      await settle();
+      expect(signals.map((signal) => signal.paths)).toEqual([['src/a.ts']]);
+    } finally {
+      blinded.close();
+    }
+  });
+
+  it('announces an unreadable directory as a change it cannot name', async () => {
+    const { factory, emitters } = fakeWatchers();
+    const blinded = createWorktreeWatcher({
+      onSignal: (signal) => signals.push(signal),
+      debounceMs: DEBOUNCE_MS,
+      pollIntervalMs: 30,
+      watchFactory: factory,
+    });
+
+    try {
+      blinded.watch({ worktreePath: root, gitDir: join(root, '.git') });
+      const unreadable: NodeJS.ErrnoException = new Error('EACCES: permission denied, scandir');
+      unreadable.code = 'EACCES';
+      unreadable.path = join(root, 'feature');
+      emitters[0]?.emit('error', unreadable);
+      await settle();
+
+      // Silence would leave the worktree reported as whatever it was before it
+      // stopped being readable, which is the one answer known to be wrong.
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.kind).toBe('worktree');
+      expect(signals[0]?.paths).toEqual([]);
+    } finally {
+      blinded.close();
+    }
+  });
+
+  it('degrades when the watched root itself cannot be read', async () => {
+    const { factory, emitters } = fakeWatchers();
+    const blinded = createWorktreeWatcher({
+      onSignal: (signal) => signals.push(signal),
+      debounceMs: DEBOUNCE_MS,
+      pollIntervalMs: 30,
+      watchFactory: factory,
+    });
+
+    try {
+      blinded.watch({ worktreePath: root, gitDir: join(root, '.git') });
+      const unreadable: NodeJS.ErrnoException = new Error('EACCES: permission denied, scandir');
+      unreadable.code = 'EACCES';
+      // Not a directory inside the tree: the tree. Nothing will ever arrive on
+      // this watch again, so keeping it is a watcher that reports silence.
+      unreadable.path = root;
+      emitters[0]?.emit('error', unreadable);
+      await settle(150);
+
+      expect(blinded.isDegraded(root)).toBe(true);
+    } finally {
+      blinded.close();
+    }
+  });
+
+  it('degrades on a budget failure even when it names a directory inside the tree', async () => {
+    const { factory, emitters } = fakeWatchers();
+    const blinded = createWorktreeWatcher({
+      onSignal: (signal) => signals.push(signal),
+      debounceMs: DEBOUNCE_MS,
+      pollIntervalMs: 30,
+      watchFactory: factory,
+    });
+
+    try {
+      blinded.watch({ worktreePath: root, gitDir: join(root, '.git') });
+      const budget: NodeJS.ErrnoException = new Error('ENOSPC: watch limit reached');
+      budget.code = 'ENOSPC';
+      // Where the budget ran out is not what ran out. An exhausted machine-wide
+      // limit reads as a local problem if only the path is consulted, and the
+      // watchers that did start are living on borrowed descriptors.
+      budget.path = join(root, 'feature');
+      emitters[0]?.emit('error', budget);
+      await settle(150);
+
+      expect(blinded.isDegraded(root)).toBe(true);
+    } finally {
+      blinded.close();
+    }
+  });
+
+  it('degrades on an access failure beside the worktree rather than inside it', async () => {
+    const { factory, emitters } = fakeWatchers();
+    const blinded = createWorktreeWatcher({
+      onSignal: (signal) => signals.push(signal),
+      debounceMs: DEBOUNCE_MS,
+      pollIntervalMs: 30,
+      watchFactory: factory,
+    });
+
+    try {
+      blinded.watch({ worktreePath: root, gitDir: join(root, '.git') });
+      const unreadable: NodeJS.ErrnoException = new Error('EACCES: permission denied, scandir');
+      unreadable.code = 'EACCES';
+      // Shares every character of the worktree path and is a different
+      // directory. Containment is a question about whole segments.
+      unreadable.path = `${root}.bak`;
+      emitters[0]?.emit('error', unreadable);
+      await settle(150);
+
+      expect(blinded.isDegraded(root)).toBe(true);
+    } finally {
+      blinded.close();
+    }
+  });
+
+  it('degrades on an access failure naming the worktree with a trailing separator', async () => {
+    const { factory, emitters } = fakeWatchers();
+    const blinded = createWorktreeWatcher({
+      onSignal: (signal) => signals.push(signal),
+      debounceMs: DEBOUNCE_MS,
+      pollIntervalMs: 30,
+      watchFactory: factory,
+    });
+
+    try {
+      blinded.watch({ worktreePath: root, gitDir: join(root, '.git') });
+      const unreadable: NodeJS.ErrnoException = new Error('EACCES: permission denied, scandir');
+      unreadable.code = 'EACCES';
+      // Still the root, spelled with nothing after the separator.
+      unreadable.path = `${root}${sep}`;
+      emitters[0]?.emit('error', unreadable);
+      await settle(150);
+
+      expect(blinded.isDegraded(root)).toBe(true);
+    } finally {
+      blinded.close();
+    }
+  });
+
+  it('degrades on an access failure that names no path', async () => {
+    const { factory, emitters } = fakeWatchers();
+    const blinded = createWorktreeWatcher({
+      onSignal: (signal) => signals.push(signal),
+      debounceMs: DEBOUNCE_MS,
+      pollIntervalMs: 30,
+      watchFactory: factory,
+    });
+
+    try {
+      blinded.watch({ worktreePath: root, gitDir: join(root, '.git') });
+      const unreadable: NodeJS.ErrnoException = new Error('EACCES: permission denied');
+      unreadable.code = 'EACCES';
+      emitters[0]?.emit('error', unreadable);
+      await settle(150);
+
+      // Unplaceable, so it cannot be ruled harmless to one directory.
+      expect(blinded.isDegraded(root)).toBe(true);
+    } finally {
+      blinded.close();
     }
   });
 

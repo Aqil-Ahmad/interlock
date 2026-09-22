@@ -22,35 +22,52 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
 
 ## Tasks
 
-- [ ] **Watcher survives Node ≥ 26.9's recursive watcher on Linux**
-      **Files:** `packages/daemon/src/watcher/worktree-watcher.ts`, `packages/daemon/src/main.ts`
-      **What:** a watched worktree that becomes unreadable must not take the daemon down.
+- [x] **An unreadable directory blinds only that directory**
+      **Files:** `packages/daemon/src/watcher/worktree-watcher.ts`
+      **What:** one directory losing read permission must not cost the whole worktree its watch.
 
-  Node 26.9.0 rewrote `lib/internal/fs/recursive_watch.js`, and its
+  An `EACCES` from anywhere under a watched tree degraded the entire target to
+  polling, trading a live watcher for a timer over one folder. Verified on
+  Linux that the watch keeps delivering events for every sibling after such an
+  error, so the reaction was heavier than the failure: the error is now scoped
+  to the directory it names, and the target keeps its watch.
+
+  The change is still announced, and unnamed — what is inside the directory is
+  exactly what cannot be read, so the sweep asks git rather than guessing.
+  Scoping requires a path, and only `EACCES`: an error carrying none, one
+  naming the watched root, one naming a sibling that merely shares its prefix,
+  and a machine-wide budget failure that happens to name a path inside the
+  tree all still degrade the target.
+
+  **Done when:** an unreadable subdirectory leaves the worktree watched and
+  named events still arriving, on a real tree on Linux; the watched root itself
+  becoming unreadable still falls back to polling.
+
+- [ ] **Drop the Node recursive-watcher constraint**
+      **Files:** `README.md`, `.github/workflows/ci.yml`, `.node-version`
+      **What:** remove the documented Node version limit once upstream is fixed.
+
+  Node 26.9.0 rewrote `lib/internal/fs/recursive_watch.js`; its
   `#onFolderEvent` calls `lstatSync` on a path inside the directory an event
-  named with only `ENOENT` suppressed — so a directory that just became
+  named with only `ENOENT` suppressed, so a directory that just became
   unreadable throws `EACCES` from inside Node's own callback, past every
-  `'error'` listener, and the process dies. Reproduced against 26.4.0 (emits
-  `'error'`, survives) and 26.9.0 (uncaught, dies); the reproducer and the
-  line are in `log.md` under 2026-09-21. CI is pinned to `.node-version` so the
-  required check does not see it; users on a newer Node do.
+  `'error'` listener, and the process dies. Measured across the line: 26.4.0,
+  26.5.1, 26.6.0, 26.7.0 and 26.8.2 survive; 26.9.0 does not, and is the
+  newest 26.x. Not worked around — there are no users to protect, a workaround
+  would be a permanent shape carried for a temporary bug, and the one thing
+  that reliably prevented the crash was closing the watch, which is the very
+  over-reaction the task above removes. Recorded in `README.md` instead.
 
-  Two shapes, and the second is the real one. A process-level
-  `uncaughtException` handler in `main.ts` matching this exact signature —
-  `EACCES` from `recursive_watch` — logs and continues, and is a workaround for
-  a named upstream bug that goes when the bug does. Owning the recursion in
-  the watcher — one `fs.watch` per directory, added as directories appear and
-  dropped as they go, with the ignore rules applied to what is walked — is
-  what makes the daemon independent of Node's recursive implementation on
-  Linux, which has had more than one of these. On Linux Node's own recursive
-  watcher does exactly that walk anyway, so the cost is the same and the
-  errors are ours to handle. File the regression upstream either way.
+  The durable alternative, if upstream stalls and this starts costing real
+  users: own the recursion on Linux — one `fs.watch` per directory, added as
+  directories appear and dropped as they go, ignore rules applied to what is
+  walked. That also stops `node_modules` being watched at all, which Node's
+  recursive watcher does today whatever the ignore rules say, so it earns its
+  place on cost rather than on this bug. It is a rewrite of the most
+  load-bearing subsystem in the daemon and wants its own measurements.
 
-  **Done when:** the twelve-line reproducer from `log.md`, run against the
-  daemon's watcher rather than `fs.watch`, survives on Node 26.9.0 on Linux;
-  the unreadable-worktree test in `packages/cli/test/status.test.ts` passes
-  ten times running on that Node; and the workaround, if that is the shape
-  taken, names the Node version it exists for and is asserted to be reached.
+  **Done when:** the regression is filed upstream and fixed, the `README.md`
+  paragraph is gone, and the required CI cells run a Node that has the fix.
   **Constraints:** hard rule 5 — the test that trips this is correct and stays.
 
 - [ ] **Shadow clone lifecycle**
