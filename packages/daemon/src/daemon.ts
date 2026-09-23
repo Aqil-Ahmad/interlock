@@ -4,6 +4,8 @@ import type { GitRunner } from '@interlock/core';
 import { INTERLOCK_PROTOCOL_VERSION, notImplemented } from '@interlock/shared';
 import type { DaemonRuntime, EventRecord, InterlockConfig, Logger } from '@interlock/shared';
 import { createApiServer } from './api/index.js';
+import { holdDataDir } from './data-dir.js';
+import type { DataDirHold } from './data-dir.js';
 import type { ApiServer } from './api/index.js';
 import { EventBus } from './bus/index.js';
 import { createSessionRegistry } from './hooks/index.js';
@@ -18,8 +20,8 @@ import type { Watcher } from './watcher/index.js';
  * are wired together. Everything else takes its collaborators as arguments,
  * which keeps the rest of the codebase testable without a running system.
  *
- * Startup order matters — store (migrations must succeed) → bus → API →
- * watcher → scheduler. Shutdown is the reverse and must abort in-flight runs
+ * Startup order matters — data-dir hold → store (migrations must succeed) →
+ * bus → API → watcher → scheduler. Shutdown is the reverse and must abort in-flight runs
  * and dispose shadow worktrees, or the next start inherits stale locks.
  */
 
@@ -62,6 +64,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const log = options.logger.child('daemon');
   const { config } = options;
 
+  let hold: DataDirHold | null = null;
   let store: Store | null = null;
   let api: ApiServer | null = null;
   let watcher: Watcher | null = null;
@@ -104,13 +107,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
     },
 
     async start(): Promise<void> {
-      if (store !== null) throw new Error('the daemon is already started');
+      if (hold !== null) throw new Error('the daemon is already started');
 
-      store = await openStore({ path: join(config.dataDir, DATABASE_FILENAME), logger: log });
+      // First, so a second daemon is turned away before it touches anything
+      // the first one owns — the store's migrations included.
+      hold = holdDataDir(config.dataDir, log);
       const bus = new EventBus({ logger: options.logger, onRecord: append });
       const runner = options.runner ?? createGitRunner();
 
       try {
+        store = await openStore({ path: join(config.dataDir, DATABASE_FILENAME), logger: log });
         const sessions = createSessionRegistry({
           store,
           bus,
@@ -216,6 +222,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       unpublishRuntime(config.dataDir, log);
       runtime = null;
     }
+
+    // Last: until everything above has let go, the directory is still in use.
+    hold?.release();
+    hold = null;
     log.info('daemon stopped');
   }
 }

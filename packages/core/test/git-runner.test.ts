@@ -447,6 +447,45 @@ describe('git runner against a real repository', () => {
     }
   });
 
+  it("keeps the user's global config from the git processes git starts itself", async () => {
+    // A fetch from a path runs `upload-pack` inside the source repository as a
+    // child of the fetch, and `uploadpack.packObjectsHook` runs a program from
+    // there — honoured only from global or system config. The runner's
+    // environment has to reach the child, not just the process it spawned. A
+    // fresh repository without alternates, so the fetch actually needs a pack.
+    const home = mkdtempSync(join(tmpdir(), 'interlock-home-'));
+    const spy = join(home, 'spy.sh');
+    const marker = join(home, 'hook-fired');
+    writeFileSync(spy, `#!/bin/sh\ntouch '${marker}'\nexec "$@"\n`);
+    chmodSync(spy, 0o755);
+    writeFileSync(join(home, '.gitconfig'), `[uploadpack]\n\tpackObjectsHook = ${spy}\n`);
+    const target = mkdtempSync(join(tmpdir(), 'interlock-fetch-'));
+    execFileSync('git', ['init', '-q', '--bare', target], { stdio: 'pipe' });
+    const shadow: ShadowRepo = {
+      kind: 'shadow',
+      rootPath: target,
+      gitDir: target,
+      originPath: dir,
+    };
+
+    vi.stubEnv('HOME', home);
+    try {
+      const result = await runner.run(shadow, [
+        'fetch',
+        '-q',
+        dir,
+        '+refs/heads/*:refs/remotes/u/*',
+      ]);
+
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
   it('writes to a shadow repository without running its hooks', async () => {
     // The write path exists for this, and nothing else exercises it: a guard
     // that refused everything rather than only user repos would pass the rest
