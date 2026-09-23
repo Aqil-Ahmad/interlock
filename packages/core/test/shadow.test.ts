@@ -211,6 +211,123 @@ describe('ensureShadow', () => {
     });
   });
 
+  describe('object format', () => {
+    let wide: string;
+    let wideRepo: UserRepo;
+
+    beforeEach(() => {
+      wide = join(base, 'sha256');
+      execFileSync('git', ['init', '-q', '--object-format=sha256', '-b', 'main', wide], {
+        stdio: 'pipe',
+      });
+      gitIn(wide, 'config', 'user.name', 'Interlock Test');
+      gitIn(wide, 'config', 'user.email', 'test@example.invalid');
+      gitIn(wide, 'config', 'maintenance.auto', 'false');
+      gitIn(wide, 'config', 'gc.auto', '0');
+      writeFileSync(join(wide, 'a.txt'), 'one\n');
+      gitIn(wide, 'add', '-A');
+      gitIn(wide, 'commit', '-qm', 'one');
+      wideRepo = { kind: 'user', rootPath: wide, gitDir: join(wide, '.git') };
+    });
+
+    it('mirrors a sha256 repository in its own format', async () => {
+      const shadow = await ensureShadow(wideRepo, { runner, dataDir, repoId });
+
+      // git refuses to fetch across formats, so a clone made in the default
+      // one could never be refreshed from this repository at all.
+      expect(gitIn(shadow.rootPath, 'rev-parse', '--show-object-format').trim()).toBe('sha256');
+      expect(gitIn(shadow.rootPath, 'rev-parse', 'refs/remotes/user/main').trim()).toMatch(
+        /^[0-9a-f]{64}$/u,
+      );
+      expect(objectCount(join(shadow.rootPath, 'objects'))).toBe(0);
+    });
+
+    it('rebuilds a clone left in the wrong format rather than failing on it forever', async () => {
+      // The exact state an earlier build left behind: bare, borrowing the right
+      // store, and unable to fetch from it. Every check but the format passes.
+      const shadowPath = shadowPathFor(repoId, dataDir);
+      mkdirSync(shadowPath, { recursive: true });
+      execFileSync('git', ['init', '-q', '--bare', '--object-format=sha1', shadowPath], {
+        stdio: 'pipe',
+      });
+      writeFileSync(
+        join(shadowPath, 'objects', 'info', 'alternates'),
+        `${realpathSync(join(wide, '.git', 'objects'))}\n`,
+      );
+
+      const shadow = await ensureShadow(wideRepo, { runner, dataDir, repoId });
+
+      expect(gitIn(shadow.rootPath, 'rev-parse', '--show-object-format').trim()).toBe('sha256');
+    });
+
+    it('refuses a format it does not know rather than passing it to init', async () => {
+      // No git in use produces one today, so the answer is rewritten: this is
+      // the git that ships a third hash function before this code learns it.
+      const future: GitRunner = {
+        run: async (target, args, options) => {
+          const result = await runner.run(target, args, options);
+          return args.includes('--show-object-format') && target.kind === 'user'
+            ? { ...result, stdout: result.stdout.replace(/^sha1/u, 'sha512') }
+            : result;
+        },
+      };
+
+      const error = await rejection(ensureShadow(repo, { runner: future, dataDir, repoId }));
+
+      expect(error.code).toBe('TOOLCHAIN_UNSUPPORTED');
+      expect(existsSync(shadowPathFor(repoId, dataDir))).toBe(false);
+    });
+  });
+
+  describe('concurrent callers', () => {
+    it('build one clone between them, and all of them get it', async () => {
+      const { runner: spy, calls } = recording();
+
+      const shadows = await Promise.all(
+        [1, 2, 3, 4].map(() => ensureShadow(repo, { runner: spy, dataDir, repoId })),
+      );
+
+      // Interleaved, these deleted each other's half-built clone: most failed
+      // on `init` or `config` in a directory another call had just removed.
+      expect(calls.filter((argv) => argv[0] === 'init')).toHaveLength(1);
+      expect(calls.filter((argv) => argv[0] === 'fetch')).toHaveLength(1);
+      for (const shadow of shadows) expect(shadow).toEqual(shadows[0]);
+    });
+
+    it('starts a fresh refresh once the joined one has settled', async () => {
+      await Promise.all([1, 2].map(() => ensureShadow(repo, { runner, dataDir, repoId })));
+      writeFileSync(join(dir, 'b.txt'), 'two\n');
+      git('add', '-A');
+      git('commit', '-qm', 'two');
+
+      const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
+
+      // A settled refresh handed to every later caller would pin the shadow to
+      // the moment of its first call.
+      expect(gitIn(shadow.rootPath, 'log', '--oneline', '-1', 'refs/remotes/user/main')).toContain(
+        'two',
+      );
+    });
+
+    it('lets a later call retry after a joined one failed', async () => {
+      const late = join(base, 'late');
+      const lateRepo: UserRepo = { kind: 'user', rootPath: late, gitDir: join(late, '.git') };
+      const failed = await Promise.allSettled(
+        [1, 2].map(() => ensureShadow(lateRepo, { runner, dataDir, repoId })),
+      );
+      expect(failed.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+
+      execFileSync('git', ['init', '-q', '-b', 'main', late], { stdio: 'pipe' });
+      gitIn(late, 'config', 'user.name', 'Interlock Test');
+      gitIn(late, 'config', 'user.email', 'test@example.invalid');
+      gitIn(late, 'commit', '-q', '--allow-empty', '-m', 'one');
+
+      const shadow = await ensureShadow(lateRepo, { runner, dataDir, repoId });
+
+      expect(shadowRefs(shadow.rootPath)).toContain('refs/remotes/user/main');
+    });
+  });
+
   describe('recovery', () => {
     it('rebuilds a directory a crash left behind', async () => {
       const shadowPath = shadowPathFor(repoId, dataDir);
