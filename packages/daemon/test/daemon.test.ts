@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -293,6 +294,29 @@ describe('daemon', () => {
     // The first is untouched: still serving, and still the one advertised.
     expect(JSON.parse(readFileSync(runtimePath(dataDir), 'utf8'))).toStrictEqual(first);
     expect((await call<{ repos: Repo[] }>('/api/repos', token())).status).toBe(200);
+  });
+
+  it('turns a second daemon away before it opens the store the first is using', async () => {
+    await daemon.start();
+    // A store the second daemon cannot open tells the two orders apart: turned
+    // away first, it never tries; opened first, it fails on the file instead.
+    // Only the first order keeps a newer build from migrating a database that
+    // an older daemon is still running on.
+    const database = join(dataDir, 'interlock.db');
+    chmodSync(database, 0o000);
+    try {
+      const second = createDaemon({
+        config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
+        logger: createLogger('test', { level: 'error', sink: () => undefined }),
+      });
+
+      const error = await rejection(second.start());
+
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(error.message).toMatch(/another daemon/iu);
+    } finally {
+      chmodSync(database, 0o600);
+    }
   });
 
   it('hands the directory to the next daemon once the first has stopped', async () => {
