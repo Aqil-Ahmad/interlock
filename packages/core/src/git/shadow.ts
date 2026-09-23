@@ -295,9 +295,10 @@ function discard(shadowPath: string, dataDir: string): void {
 }
 
 async function create(shadow: ShadowRepo, source: Source, runner: GitRunner): Promise<void> {
-  // `mkdir` masks the mode it is given with the umask, so a directory this call
-  // created is set again rather than trusted. `shadows/` is created by the same
-  // call and takes the same mode, since it holds every clone.
+  // `mkdir` masks the mode it is given with the umask, so the clone's directory
+  // is set again rather than trusted. `shadows/`, when this call creates it too,
+  // has only the requested mode: 0700 survives any umask that leaves owner bits
+  // alone, and one that does not would stop `git init` below regardless.
   if (mkdirSync(shadow.rootPath, { recursive: true, mode: SHADOW_DIR_MODE }) !== undefined) {
     chmodSync(shadow.rootPath, SHADOW_DIR_MODE);
   }
