@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, normalize, sep } from 'node:path';
-import { InterlockError, notImplemented } from '@interlock/shared';
+import { InterlockError } from '@interlock/shared';
 import { assertObjectId, runRequired } from './repo-handle.js';
 import type { GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
 import { parseStatus } from './status.js';
@@ -65,6 +65,15 @@ export interface SnapshotOptions {
    * index of a large repository is not small.
    */
   readonly tempDir?: string;
+  /**
+   * Write the snapshot's objects into this shadow rather than the repository.
+   *
+   * Without it the tree lands in the user's object database with nothing
+   * referencing it, where their `gc --prune` can reap it — including after a
+   * commit in the shadow has come to point at it. Anything that will be merged
+   * has to be captured with it.
+   */
+  readonly objectStore?: ShadowRepo;
 }
 
 export interface WorktreeSnapshot {
@@ -76,6 +85,15 @@ export interface WorktreeSnapshot {
    * state for the worktree to match.
    */
   readonly clean: boolean;
+  /**
+   * The commit `HEAD` named when the capture began, or null where it is unborn.
+   *
+   * The tree is this commit plus the uncommitted work, so it is the only
+   * correct parent for the tree: a branch that has moved since would make the
+   * new commit's work look reverted. Recorded here because it cannot be
+   * recovered later — by then `HEAD` may name something else.
+   */
+  readonly headSha: string | null;
   /**
    * How the capture was actually taken. A scoped request reports `whole-tree`
    * when its base tree was no longer reachable, which tells a caller holding a
@@ -114,16 +132,21 @@ export async function captureDirtyState(
   // The worktree is where the files are; the git directory is the main
   // repository's, so redirecting the index is checked against both.
   const worktree: UserRepo = { kind: 'user', rootPath: worktreePath, gitDir: repo.gitDir };
-  const { runner } = options;
+  const runner = intoStore(options.runner, options.objectStore);
   const scope = options.scope ?? { kind: 'whole-tree' };
   const tempDir = options.tempDir ?? tmpdir();
 
-  const headTree = await resolveTree(worktree, runner, 'HEAD^{tree}');
+  // The tree is read off the commit rather than off `HEAD` a second time, so
+  // the two describe one moment even if the branch moves in between.
+  const headSha = await resolveObject(worktree, runner, 'HEAD^{commit}');
+  const headTree =
+    headSha === null ? null : await resolveObject(worktree, runner, `${headSha}^{tree}`);
   // Stamped when the tree is written rather than when the capture began: it
   // describes what was read, and reading takes time a watcher may care about.
   const asSnapshot = (treeOid: string, takenAs: SnapshotScope['kind']): WorktreeSnapshot => ({
     treeOid,
     clean: headTree !== null && treeOid === headTree,
+    headSha,
     takenAs,
     capturedAt: new Date().toISOString(),
   });
@@ -135,7 +158,7 @@ export async function captureDirtyState(
     // snapshot, not a reason to fail.
     assertObjectId(scope.baseTreeOid, 'baseTreeOid');
     assertInsideWorktree(scope.paths);
-    const base = await resolveTree(worktree, runner, `${scope.baseTreeOid}^{tree}`);
+    const base = await resolveObject(worktree, runner, `${scope.baseTreeOid}^{tree}`);
     if (base !== null) {
       return asSnapshot(await extendTree(worktree, runner, tempDir, base, scope.paths), 'scoped');
     }
@@ -145,13 +168,27 @@ export async function captureDirtyState(
 }
 
 /**
- * Resolve a revision to a tree, or `null` when it does not resolve.
+ * A runner whose every call uses one object store.
+ *
+ * A capture writes blobs, then a tree built from them, then may read that tree
+ * back as the next capture's base; all of it has to happen in the same store,
+ * or a later step looks for an object an earlier one put somewhere else.
+ */
+function intoStore(runner: GitRunner, objectStore: ShadowRepo | undefined): GitRunner {
+  if (objectStore === undefined) return runner;
+  return {
+    run: (repo, args, runOptions = {}) => runner.run(repo, args, { ...runOptions, objectStore }),
+  };
+}
+
+/**
+ * Resolve a revision to an object id, or `null` when it does not resolve.
  *
  * `rev-parse --verify` answers with an exit code rather than a message, which
  * is what makes this usable as a test: git's wording for a missing object has
  * changed between versions and matching on it would be a version dependency.
  */
-async function resolveTree(
+async function resolveObject(
   worktree: UserRepo,
   runner: GitRunner,
   revision: string,
@@ -366,22 +403,90 @@ export function* chunkPaths(paths: readonly string[]): Generator<string[]> {
 }
 
 /**
- * Materialise a snapshot as a commit **in the shadow repo only**, so the
- * speculative merge has two real commits to work with.
+ * A snapshot turned into something a merge can take.
  *
- * Where the object-lifetime problem gets settled. A capture writes its tree
- * into the user's object database, where nothing references it, so `git gc
- * --prune=now` can collect it between the capture and the merge that needs it.
- * The base-tree fallback covers the next capture and not this: by then the
- * objects are simply gone. Transferring them into the shadow promptly is what
- * removes the window, and a missing object at merge time is retryable — take
- * the snapshot again — rather than an infrastructure failure, which is a
- * constraint on how the store records one.
+ * Two ids, and only one of them is an identity. `commit-tree` stamps the
+ * current time, so the same tree committed twice is two commits: anything that
+ * asks "have I seen this state before" — never analysing a pair twice, a cached
+ * verdict — keys on `treeOid`.
  */
-export function commitSnapshotInShadow(
-  _shadow: ShadowRepo,
-  _snapshotTreeSha: string,
-  _options: { readonly runner: GitRunner },
-): Promise<string> {
-  return notImplemented('commitSnapshotInShadow');
+export interface SnapshotCommit {
+  /** The worktree's content, and the key. */
+  readonly treeOid: string;
+  /**
+   * A commit in the shadow whose tree is `treeOid`: what a merge is given. For a
+   * clean snapshot, the commit it was taken against, since nothing is
+   * uncommitted to add.
+   */
+  readonly commitSha: string;
+}
+
+/**
+ * Materialise a snapshot as a commit in the shadow, so uncommitted work can be
+ * merged like committed work.
+ *
+ * Takes the snapshot rather than a tree and a ref, because the parent has to be
+ * the commit the tree was captured against — recorded in the snapshot — and a
+ * ref read now may name something newer. Parented on that, the commit's own
+ * changes are exactly the uncommitted work; parented on a branch that has since
+ * moved, they would include that branch's new commits in reverse.
+ *
+ * The snapshot has to have been captured with this shadow as its object store,
+ * or its tree sits unreferenced in the user's database and their `gc` can reap
+ * it from under the commit made here. Either object missing now is
+ * `SNAPSHOT_STALE`: most often the shadow was rebuilt since the capture, and
+ * capturing again is the whole remedy.
+ */
+export async function commitSnapshotInShadow(
+  shadow: ShadowRepo,
+  snapshot: WorktreeSnapshot,
+  options: { readonly runner: GitRunner },
+): Promise<SnapshotCommit> {
+  const { runner } = options;
+  const { treeOid, headSha } = snapshot;
+  assertObjectId(treeOid, 'treeOid');
+  if (headSha !== null) {
+    assertObjectId(headSha, 'headSha');
+    // Checked on the clean path too: what is returned is handed to a merge, and
+    // a commit the shadow cannot read fails there, further from the cause.
+    await requireObject(shadow, runner, headSha, 'commit');
+  }
+
+  // Nothing is uncommitted, so the commit that already has this tree is the
+  // answer, and a second one would be a new id for the same content.
+  if (snapshot.clean && headSha !== null) return { treeOid, commitSha: headSha };
+
+  await requireObject(shadow, runner, treeOid, 'tree');
+  const parent = headSha === null ? [] : ['-p', headSha];
+  const commit = await runRequired(runner, shadow, [
+    'commit-tree',
+    ...parent,
+    '-m',
+    'Interlock snapshot',
+    treeOid,
+  ]);
+  const commitSha = commit.stdout.trim();
+  assertObjectId(commitSha, 'commitSha');
+  return { treeOid, commitSha };
+}
+
+/**
+ * Refuse an object the shadow cannot read, or one of the wrong kind.
+ *
+ * The kind is part of the question — `<oid>^{tree}` — because `cat-file -e`
+ * alone accepts any object, and a blob id passed as a tree would fail later in
+ * `commit-tree` with a message about git rather than about the snapshot.
+ */
+async function requireObject(
+  shadow: ShadowRepo,
+  runner: GitRunner,
+  oid: string,
+  kind: 'commit' | 'tree',
+): Promise<void> {
+  const found = await runner.run(shadow, ['cat-file', '-e', `${oid}^{${kind}}`]);
+  if (found.exitCode === 0) return;
+  throw new InterlockError('SNAPSHOT_STALE', `The snapshot's ${kind} is not in the shadow`, {
+    details: { oid, kind },
+    remedy: 'Capture the worktree again, into this shadow, and commit the new snapshot.',
+  });
 }

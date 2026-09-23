@@ -4,6 +4,39 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-24 — review of the snapshot rework: nothing broken, three taken
+
+- **The alternates chain holds, and is now pinned.** A user repository that itself borrows its objects — `clone --shared` or `--reference`, holding no history of its own — makes every read go shadow → user store → upstream. Checked through the real code before anything else, with the user's alternates written absolute and then relative: parents correct, the user's store at zero objects throughout, the snapshot in the shadow. git resolves a relative link against the store holding the file, not the one asking. The test pins that assumption rather than a branch of this code, the way the git-version tests do.
+- **`resolveTree` became `resolveObject`.** Its doc had already been widened to cover the commit it now also resolves; the name had not.
+- **The object-store check says what it does not guard.** A handle marked `shadow` that names another repository passes both the kind and the containment check; handles come from `ensureShadow` alone, so that is a caller bug, and the check is for a handle mangled in transit rather than forged. One clause.
+- **Not taken, with the reviewer:** the extra `cat-file` on the clean path is justified as written; concurrent `commit-tree` calls in one shadow are append-only and safe by construction; the daemon's captures are already a constraint on the Scheduler task.
+
+## 2026-09-23 — snapshot commits, reworked on the same branch
+
+- **The first implementation parented every snapshot in the untouched cycle on nothing, and no test could see it.** The parent was looked up by ref name in the shadow and a failed lookup was read as "unborn"; the cycle passed `refs/heads/<branch>`, which the shadow does not have — user branches live at `refs/remotes/user/*` — so every commit it made was a root commit. A lookup that cannot fail loudly is the same shape as returning an empty result for a missing implementation.
+- **The parent is the commit the snapshot was captured against, and `WorktreeSnapshot` now records it.** It held only whether the tree matched `HEAD`, so no implementation could get "a branch moved between capture and commit" right: parented on the new head, the commit's changes include that branch's new work in reverse, and a merge would carry deletions nobody made. `headSha` is recorded at capture, null where `HEAD` is unborn, and answers a detached `HEAD` with no ref to look up. `commitSnapshotInShadow` takes the snapshot rather than a tree and a ref, so the two cannot come from different moments.
+- **The head tree is read off that commit, not off `HEAD` a second time.** Pinned with a runner that commits the uncommitted work the instant after `HEAD` is resolved: read twice, the tree matches the new commit, the snapshot is called clean, and the clean path returns a commit whose tree is not the snapshot's.
+- **Option (b) replaced option (a).** Checking the tree exists at commit time protects that instant only; the tree stays unreferenced in the user's store under a commit that points at it, for their `gc` to reap before the merge. The runner gains `objectStore`, taking a `ShadowRepo` and nothing else, and `captureDirtyState` passes it through: verified that the user's object count does not move, `read-tree HEAD` still reads through the shadow's alternates, and `gc --prune=now` in the user repository leaves the snapshot readable. A capture into the shadow writes nothing under the user's `.git` at all, not even objects. The runner refuses a store that is not a shadow — checked at run time, since a handle survives `JSON.parse` and its type does not — one inside the repository, and one with no object directory.
+- **A missing object is `SNAPSHOT_STALE`, a new code, not `GIT_COMMAND_FAILED` with `infra`.** Infrastructure means the environment is broken; this means capture again, and the most ordinary cause is a shadow rebuilt since the capture. The doc comment had named `OBJECT_NOT_FOUND`, a code that does not exist. The check asks for the object's kind, so a blob passed as a tree is stale rather than a `commit-tree` failure, and it runs on the clean path too, since that path hands back a commit without making one.
+- **No ref per snapshot, for a different reason than the first entry gave.** Nothing collects the shadow — `gc.auto` and auto-maintenance are off in its config and on every runner call — so an unreferenced commit there lives until something collects deliberately. That collector is the pool's, and its task now says pool-slot commits and queued snapshot commits are roots. The Scheduler task now says the daemon's captures need `objectStore` before any reaches a merge: the watcher still captures into the user's store, which is fine for change detection and not for merging.
+- **Tests.** One slept 1.1 seconds to assert two commits of one tree differ — whether they do depends on the clock, which is why neither is the key; it now asserts the key. Added the headline case — two worktrees, the same line edited on each, captured, committed, and `git merge-tree` reporting `CONFLICT (content)` with the user's refs unchanged — plus parent, branch moved, detached, unborn, clean running no `commit-tree`, the user's `gc` between capture and commit, all four hostile paths, a rebuilt shadow, a missing head, a wrong kind and malformed ids.
+- **17 mutations, 17 caught**, with the harness now refusing to start unless the unmutated suite passes — the check that would have stopped last round's 8 of 8 against a file that did not parse.
+
+## 2026-09-23 — commitSnapshotInShadow: design decisions
+
+- **Superseded above — chose Option A for object visibility.** Snapshot trees stay in the user's object
+  database (written by captureDirtyState, unreferenced). commitSnapshotInShadow checks
+  reachability first and surfaces a missing tree as GIT_COMMAND_FAILED (infra) — typed, retryable,
+  with a remedy telling the caller to re-snapshot. Option B would require modifying
+  captureDirtyState and the objects/ allowance in user-repo-untouched, which is the
+  most load-bearing constraint in the codebase.
+- **Clean snapshots return the HEAD commit directly.** A tree matching HEAD exactly
+  produces no commit-tree call — wasClean is true and commitSha is the branch head.
+  The scheduler keys on treeOid, not commitSha, so this is safe for deduplication.
+- **Kept, for a different reason recorded above — no snapshot refs created.** refs/interlock/snapshots/* would require a deletion
+  path and complicate the shadow cleanup logic. The reachability check at commit time
+  handles the GC hazard without adding ref management.
+
 ## 2026-09-22 — the Node watcher bug is documented, and the bug beside it was ours
 
 - **Decided: no workaround for Node's regression.** There are no users to protect, and a process-level `uncaughtException` handler is a permanent shape carried for a temporary upstream bug. Recorded in `README.md` as a version constraint instead, beside `git >= 2.30`, and the milestone task became "remove that paragraph when upstream fixes it".

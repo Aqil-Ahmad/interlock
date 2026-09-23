@@ -101,10 +101,45 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
   a `ShadowRepo` is the only thing mutating functions accept. Keep it that way —
   the type split is what makes a write to a user repo a compile error.
 
-- [ ] **Snapshot commits**
-      **Files:** `packages/core/src/git/worktree.ts`
+- [x] **Snapshot commits**
+      **Files:** `packages/core/src/git/worktree.ts`, `packages/core/src/git/repo-handle.ts`
       **What:** `commitSnapshotInShadow` — turn an M1 dirty-state tree into a real commit inside the shadow, so uncommitted work can be merged.
-      **Done when:** a conflict between two sets of uncommitted changes is detectable before either side has committed anything. This is the capability that makes Interlock different from a merge queue.
+
+  Snapshot objects are written into the shadow's store, not the user's. The
+  runner gains one capability beside `indexFile` — `objectStore`, which takes a
+  `ShadowRepo` and nothing else, so objects can only be redirected into
+  something `ensureShadow` produced — and `captureDirtyState` passes it through.
+  The shadow borrows the user's objects through alternates, so seeding from
+  `HEAD` still reads; everything the capture writes lands where the user's
+  `gc` cannot reach it, and nothing at all is written under the user's `.git`.
+  A missing-object check at commit time would only protect the instant of the
+  commit, leaving the tree unreferenced under a commit that points at it.
+
+  The parent is the commit the snapshot was captured against, not whatever a
+  branch ref says when the commit is made: the tree is that commit plus the
+  uncommitted work, and parenting it on a branch that has since moved would
+  make the new commit's changes look reverted. `WorktreeSnapshot` records that
+  commit (`headSha`, null when `HEAD` is unborn), which also answers a detached
+  `HEAD` without a ref to look up. The function takes the snapshot rather than
+  a tree and a ref name, so the parent cannot be supplied from a different
+  moment than the tree.
+
+  The result carries the tree, which is the identity, and the commit, which is
+  what a merge takes; the same tree committed twice yields two commits. A clean
+  snapshot returns its `headSha` and runs no `commit-tree`. A tree or parent the
+  shadow cannot read is `SNAPSHOT_STALE` — not infrastructure, and answered by
+  taking the snapshot again — which is what a shadow rebuilt between capture
+  and commit produces.
+
+  No ref per snapshot: nothing collects the shadow, since `gc.auto` and
+  auto-maintenance are off in its config and on every runner invocation. What
+  eventually collects it is the pool's garbage collector, and that task has to
+  treat pool-slot commits as roots.
+
+  **Done when:** two worktrees on different branches, each with uncommitted
+  edits to the same line, are captured into the shadow and committed, and `git
+merge-tree` over the two commits reports the conflict — with neither side
+  having committed anything, and the user repository byte-identical afterwards.
 
 - [ ] **Pairwise merge with `merge-tree`**
       **Files:** `packages/core/src/merge/speculative-merge.ts`
@@ -122,13 +157,13 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
       **Files:** `packages/core/src/git/shadow.ts`
       **What:** an LRU pool of persistent per-pair worktrees under the data dir, default size 4, configurable. A pair enters only after the overlap filter marks it worth watching. Update a slot by delta: `merge-tree --write-tree` → `commit-tree` → `reset --hard` inside that pair's worktree, so only changed files are rewritten. See ADR-0005.
       **Done when:** a second check of the same pair rewrites only the files that differ and is measurably faster than the first; `.tsbuildinfo` survives between checks of a slot; eviction is logged with its cost; and an aborted run leaves the slot usable rather than half-written.
-      **Constraints:** pool worktrees keep a **detached HEAD** so no branch ref moves. `reset --hard` is a mutating command and is permitted here only because pool worktrees belong to the shadow clone — the runtime `isMutatingCommand` check and `user-repo-untouched.test.ts` both still apply unchanged. If either branch or the merge touches `package.json` or the lockfile, mark the pair `deps-dirty` and route to a slow install path, or skip the semantic check and say why; the symlinked `node_modules` is wrong for that pair and typechecking against it produces confident nonsense.
+      **Constraints:** pool worktrees keep a **detached HEAD** so no branch ref moves. `reset --hard` is a mutating command and is permitted here only because pool worktrees belong to the shadow clone — the runtime `isMutatingCommand` check and `user-repo-untouched.test.ts` both still apply unchanged. Garbage collection in the shadow treats commits held by pool slots, and snapshot commits a queued check still needs, as roots — nothing references them by ref. If either branch or the merge touches `package.json` or the lockfile, mark the pair `deps-dirty` and route to a slow install path, or skip the semantic check and say why; the symlinked `node_modules` is wrong for that pair and typechecking against it produces confident nonsense.
 
 - [ ] **Scheduler v1**
       **Files:** `packages/daemon/src/scheduler/`
       **What:** decide which pairs get merged, and which clean merges are worth a semantic check. Debounce, mark pairs stale when a branch moves, abort superseded runs, cap concurrency. Rank candidates by file overlap first, then symbol overlap.
       **Done when:** with 5 branches under continuous edit, work stays inside the CPU budget, no pair is analysed twice for the same snapshot pair, and both the escalation rate and the pool eviction rate are reported.
-      **Constraints:** this is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason. **Prefer re-checking a hot pooled pair over rotating a new one in.** Stickiness is a cost control of the same rank as overlap filtering, because every eviction discards incremental compiler state and the next check of that pair pays the cold cost again — round-robin fairness across pairs is the worst available strategy.
+      **Constraints:** the daemon's snapshots have to be captured with `objectStore` set to the repository's shadow before any of them reaches a merge; captured without it, as the watcher does today, the tree sits unreferenced in the user's store for their `gc` to reap. This is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason. **Prefer re-checking a hot pooled pair over rotating a new one in.** Stickiness is a cost control of the same rank as overlap filtering, because every eviction discards incremental compiler state and the next check of that pair pays the cold cost again — round-robin fairness across pairs is the worst available strategy.
 
 - [ ] **Analyzer result caching**
       **Files:** `packages/daemon/src/store/`

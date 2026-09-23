@@ -16,6 +16,7 @@ import type { SnapshotId } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   captureDirtyState,
+  commitSnapshotInShadow,
   createGitRunner,
   describeRepo,
   extractChangeSet,
@@ -91,7 +92,7 @@ describe('user repositories are never modified', () => {
     const repo = await describeRepo(handle, { runner, dataDir });
     // Reads the user repository over git's own local transport, which is the
     // one path here where git runs a second process inside it.
-    await ensureShadow(handle, { runner, dataDir, repoId: repo.id });
+    const shadow = await ensureShadow(handle, { runner, dataDir, repoId: repo.id });
     const branches = await listBranchRefs(handle, repo.id, { runner });
     expect(branches.length).toBeGreaterThan(0);
     let diffed = 0;
@@ -111,6 +112,17 @@ describe('user repositories are never modified', () => {
           scope: { kind: 'scoped', paths, baseTreeOid: whole.treeOid },
         });
         expect(scoped.treeOid).toBe(whole.treeOid);
+
+        // Into the shadow as well, the way anything merged is captured, and on
+        // to a commit there. Both write; the hasher below is what shows neither
+        // writes here. The same content, so the same tree, whichever store.
+        const intoShadow = await captureDirtyState(branch.worktreePath, handle, {
+          runner,
+          objectStore: shadow,
+        });
+        expect(intoShadow.treeOid).toBe(whole.treeOid);
+        await commitSnapshotInShadow(shadow, intoShadow, { runner });
+
         snapshot = { id: ulid<SnapshotId>(), treeOid: whole.treeOid };
       }
 

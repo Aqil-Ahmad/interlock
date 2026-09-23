@@ -347,6 +347,22 @@ export interface GitRunOptions {
    * sanitisation this runner exists to guarantee.
    */
   readonly indexFile?: string;
+  /**
+   * Write objects into this shadow's store rather than the repository's own.
+   *
+   * A snapshot of uncommitted work writes blobs and a tree, and in the user's
+   * object database they are unreferenced — their `gc --prune` reaps them, from
+   * under whatever commit in the shadow points at them. Redirected here they
+   * land where nothing of the user's can reach, and nothing is written under
+   * the user's git directory at all.
+   *
+   * A `ShadowRepo` rather than a path, so objects can only be sent somewhere
+   * `ensureShadow` produced. Reads still reach the repository's own objects,
+   * because the shadow borrows them through alternates — which is also why the
+   * store has to be this repository's shadow: another one fails on the first
+   * object it cannot find, rather than writing somewhere wrong.
+   */
+  readonly objectStore?: ShadowRepo;
   readonly timeoutMs?: number;
 }
 
@@ -378,7 +394,10 @@ const DEFAULT_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
  * shell exporting `GIT_DIR` or `GIT_INDEX_FILE` would otherwise silently
  * redirect every command the daemon runs, including the ones that write.
  */
-function buildEnv(indexFile: string | undefined): NodeJS.ProcessEnv {
+function buildEnv(
+  indexFile: string | undefined,
+  objectStore: ShadowRepo | undefined,
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     // Windows matches variable names case-insensitively, so `git_dir` reaches
@@ -415,6 +434,7 @@ function buildEnv(indexFile: string | undefined): NodeJS.ProcessEnv {
   env.GIT_PAGER = '';
 
   if (indexFile !== undefined) env.GIT_INDEX_FILE = indexFile;
+  if (objectStore !== undefined) env.GIT_OBJECT_DIRECTORY = objectDirectoryOf(objectStore);
 
   return env;
 }
@@ -451,6 +471,40 @@ function indexRedirectionProblem(
     const real = realPathOf(inside);
     if (real === null) return `${inside} could not be resolved`;
     if (isWithin(real, target)) return `indexFile resolves inside ${inside}`;
+  }
+  return null;
+}
+
+function objectDirectoryOf(shadow: ShadowRepo): string {
+  return join(shadow.gitDir, 'objects');
+}
+
+/**
+ * Why an object-store redirection is unacceptable, or `null` when it is fine.
+ *
+ * The kind is checked at run time as well as by the type, because a handle can
+ * arrive through `JSON.parse` and a type does not survive one. And the store has
+ * to lie outside the repository: a data directory configured inside a checkout
+ * would otherwise put the shadow there, and "nothing is written in the user's
+ * repository" is the property this capability exists to give.
+ *
+ * Neither check tells one repository's shadow from another's, and a handle
+ * marked `shadow` that names some other repository passes both. Handles are
+ * minted by `ensureShadow` alone, so that is a caller bug rather than an
+ * attack; the check guards against a handle mangled in transit, not forged.
+ */
+function objectStoreProblem(repo: AnyRepo, objectStore: ShadowRepo): string | null {
+  if ((objectStore as { kind: string }).kind !== 'shadow') {
+    return 'objectStore must be a shadow repository';
+  }
+  const target = realPathOf(objectDirectoryOf(objectStore));
+  if (target === null) return 'objectStore has no object directory';
+  if (repo.kind !== 'user') return null;
+
+  for (const inside of protectedDirsOf(repo)) {
+    const real = realPathOf(inside);
+    if (real === null) return `${inside} could not be resolved`;
+    if (isWithin(real, target)) return `objectStore resolves inside ${inside}`;
   }
   return null;
 }
@@ -570,6 +624,23 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
         }
       }
 
+      if (runOptions.objectStore !== undefined) {
+        const rejection = objectStoreProblem(repo, runOptions.objectStore);
+        if (rejection !== null) {
+          return Promise.reject(
+            new InterlockError(
+              'GIT_COMMAND_REFUSED',
+              `Refused \`git ${subcommand ?? ''}\` with a redirected object store: ${rejection}`,
+              {
+                details: { rootPath: repo.rootPath, command: subcommand },
+                remedy:
+                  'Pass the ShadowRepo ensureShadow returned for this repository, kept outside it.',
+              },
+            ),
+          );
+        }
+      }
+
       if (usesReservedGlobalFlag(args)) {
         return Promise.reject(
           new InterlockError(
@@ -621,7 +692,7 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
           gitPath,
           argv,
           {
-            env: buildEnv(runOptions.indexFile),
+            env: buildEnv(runOptions.indexFile, runOptions.objectStore),
             timeout: timeoutMs,
             maxBuffer,
             windowsHide: true,

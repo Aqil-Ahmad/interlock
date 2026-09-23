@@ -486,6 +486,124 @@ describe('git runner against a real repository', () => {
     }
   });
 
+  describe('an object store redirected into a shadow', () => {
+    let store: string;
+    let shadow: ShadowRepo;
+
+    /** Objects a store holds by itself, not through its alternates. */
+    const own = (objects: string): string[] =>
+      execFileSync('find', [objects, '-type', 'f', '-not', '-path', `${objects}/info/*`], {
+        encoding: 'utf8',
+      })
+        .split('\n')
+        .filter(Boolean)
+        .sort();
+
+    beforeEach(() => {
+      // What `ensureShadow` builds, made by hand so this suite tests the runner
+      // alone: bare, borrowing the user's objects through alternates.
+      store = mkdtempSync(join(tmpdir(), 'interlock-store-'));
+      execFileSync('git', ['init', '-q', '--bare', store], { stdio: 'pipe' });
+      writeFileSync(
+        join(store, 'objects', 'info', 'alternates'),
+        `${realpathSync(join(dir, '.git', 'objects'))}\n`,
+      );
+      shadow = { kind: 'shadow', rootPath: store, gitDir: store, originPath: dir };
+    });
+
+    afterEach(() => {
+      rmSync(store, { recursive: true, force: true });
+    });
+
+    it('writes into the shadow and nothing into the repository', async () => {
+      writeFileSync(join(dir, 'b.txt'), 'uncommitted\n');
+      const before = own(join(dir, '.git', 'objects'));
+
+      const written = await runner.run(repo, ['hash-object', '-w', '--', 'b.txt'], {
+        objectStore: shadow,
+      });
+
+      expect(written.exitCode).toBe(0);
+      const oid = written.stdout.trim();
+      // Where the object went is the whole capability: the user's `gc` can reap
+      // anything unreferenced in their store, and cannot reach this one.
+      expect(own(join(dir, '.git', 'objects'))).toEqual(before);
+      expect(own(join(store, 'objects')).some((path) => path.endsWith(oid.slice(2)))).toBe(true);
+    });
+
+    it('still reads what the repository already holds', async () => {
+      // The redirected store replaces the repository's for reads too, so a
+      // capture seeded from `HEAD` works only because the shadow borrows it.
+      const tree = await runner.run(repo, ['rev-parse', '--verify', 'HEAD^{tree}'], {
+        objectStore: shadow,
+      });
+      const listed = await runner.run(repo, ['ls-tree', '--name-only', tree.stdout.trim()], {
+        objectStore: shadow,
+      });
+
+      expect(listed.stdout.trim()).toBe('a.txt');
+    });
+
+    it('refuses a handle that only claims to be a shadow', async () => {
+      // A handle can arrive through `JSON.parse`, and the type does not survive
+      // one. Another user's repository, so the containment check has nothing to
+      // object to: only the kind stands between this and a write into it.
+      const other = mkdtempSync(join(tmpdir(), 'interlock-other-'));
+      execFileSync('git', ['init', '-q', other], { stdio: 'pipe' });
+      const impostor = {
+        kind: 'user',
+        rootPath: other,
+        gitDir: join(other, '.git'),
+        originPath: dir,
+      } as unknown as ShadowRepo;
+
+      try {
+        const error = await rejection(
+          runner.run(repo, ['hash-object', '-w', '--', 'a.txt'], { objectStore: impostor }),
+        );
+        expect(error.code).toBe('GIT_COMMAND_REFUSED');
+        expect(error.message).toContain('must be a shadow');
+      } finally {
+        rmSync(other, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses a store that sits inside the repository', async () => {
+      // A data directory configured inside a checkout would put the shadow
+      // there, and writing into it is writing into the user's repository.
+      const inside = join(dir, 'nested-store');
+      execFileSync('git', ['init', '-q', '--bare', inside], { stdio: 'pipe' });
+      const nested: ShadowRepo = {
+        kind: 'shadow',
+        rootPath: inside,
+        gitDir: inside,
+        originPath: dir,
+      };
+
+      const error = await rejection(
+        runner.run(repo, ['hash-object', '-w', '--', 'a.txt'], { objectStore: nested }),
+      );
+
+      expect(error.code).toBe('GIT_COMMAND_REFUSED');
+      expect(error.message).toContain('inside');
+    });
+
+    it('refuses a store with no object directory', async () => {
+      const missing: ShadowRepo = {
+        kind: 'shadow',
+        rootPath: join(store, 'absent'),
+        gitDir: join(store, 'absent'),
+        originPath: dir,
+      };
+
+      const error = await rejection(
+        runner.run(repo, ['hash-object', '-w', '--', 'a.txt'], { objectStore: missing }),
+      );
+
+      expect(error.code).toBe('GIT_COMMAND_REFUSED');
+    });
+  });
+
   it('writes to a shadow repository without running its hooks', async () => {
     // The write path exists for this, and nothing else exercises it: a guard
     // that refused everything rather than only user repos would pass the rest

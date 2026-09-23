@@ -9,6 +9,11 @@
  * code asked for something the safety rules forbid, so it is a bug here rather
  * than a broken environment or a property of the repository under analysis.
  *
+ * `SNAPSHOT_STALE` is not infrastructure either: an object a snapshot names is
+ * no longer in the shadow — the shadow was rebuilt since the capture, or the
+ * commit it was taken against has been collected. Nothing is broken, and the
+ * answer is to capture again.
+ *
  * `API_REQUEST_INVALID` is the daemon saying it cannot serve the request as
  * asked — an unknown route, a method it does not answer, a path it cannot
  * decode. It is separate from `UNAUTHORIZED` because a client reacts to the two
@@ -29,6 +34,7 @@ export const INTERLOCK_ERROR_CODES = [
   'GIT_COMMAND_FAILED',
   'GIT_COMMAND_REFUSED',
   'SHADOW_UNAVAILABLE',
+  'SNAPSHOT_STALE',
   'MERGE_FAILED',
   'SANDBOX_UNAVAILABLE',
   'SANDBOX_TIMEOUT',

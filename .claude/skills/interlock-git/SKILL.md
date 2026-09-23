@@ -79,6 +79,18 @@ Writing objects into the user's object database is fine — it is append-only an
 `git gc` reclaims anything unreferenced. Writing `.git/index`, moving refs,
 stashing or changing config is not, ever.
 
+A snapshot that will be merged is captured with `objectStore` set to the
+repository's shadow. The runner then points `GIT_OBJECT_DIRECTORY` at the
+shadow's store, which borrows the user's objects through alternates, so reads
+still work and every write lands where the user's `gc` cannot reach it.
+Captured without it, the tree is unreferenced in the user's store and can be
+collected from under a commit in the shadow that points at it.
+
+A snapshot commit's parent is the commit the snapshot was captured against —
+`WorktreeSnapshot.headSha` — never whatever a ref names when the commit is made.
+Parented on a branch that has moved since, the commit's changes include that
+branch's new work in reverse.
+
 Always remove the temp index on the error path too. Prefer `try/finally` over
 cleanup at the end of the happy path.
 
