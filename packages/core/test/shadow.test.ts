@@ -171,6 +171,34 @@ describe('ensureShadow', () => {
     expect(shadowRefs(shadow.rootPath)).not.toContain('refs/remotes/user/feature');
   });
 
+  it('picks up a branch created since the last call', async () => {
+    const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
+    git('branch', 'later');
+
+    await ensureShadow(repo, { runner, dataDir, repoId });
+
+    expect(shadowRefs(shadow.rootPath)).toContain('refs/remotes/user/later');
+  });
+
+  it('recovers when the user collects an object only the shadow still names', async () => {
+    git('checkout', '-qb', 'feature');
+    writeFileSync(join(dir, 'f.txt'), 'only on feature\n');
+    git('add', '-A');
+    git('commit', '-qm', 'feature');
+    git('checkout', '-q', 'main');
+    const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
+
+    // The user's `gc` cannot know the shadow borrows its objects, so a branch
+    // deleted between refreshes leaves the shadow naming a commit that is gone.
+    git('branch', '-D', 'feature');
+    git('reflog', 'expire', '--expire=now', '--all');
+    git('gc', '-q', '--prune=now');
+
+    await ensureShadow(repo, { runner, dataDir, repoId });
+
+    expect(shadowRefs(shadow.rootPath)).toEqual(['refs/remotes/user/main']);
+  });
+
   describe('a linked worktree', () => {
     let linked: string;
 
@@ -356,6 +384,17 @@ describe('ensureShadow', () => {
       // Reachability is the point: a clone pointed at the wrong store answers
       // about a repository nobody asked about.
       expect(alternatesOf(shadow.rootPath)).toBe(realpathSync(join(dir, '.git', 'objects')));
+    });
+
+    it('replaces a file sitting where the clone belongs', async () => {
+      const shadowPath = shadowPathFor(repoId, dataDir);
+      mkdirSync(join(dataDir, 'shadows'), { recursive: true });
+      writeFileSync(shadowPath, 'not a directory');
+
+      const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
+
+      expect(statSync(shadow.rootPath).isDirectory()).toBe(true);
+      expect(shadowRefs(shadow.rootPath)).toContain('refs/remotes/user/main');
     });
 
     it('rebuilds a clone that is not bare', async () => {
