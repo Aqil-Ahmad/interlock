@@ -63,6 +63,12 @@ export interface DataDirHold {
  * file outlives a `kill -9`, and taking over a stale one has two failure modes
  * this does not: a reused pid that keeps a dead daemon's claim alive, and two
  * starting daemons that both judge the file stale and both take it.
+ *
+ * The file stays behind after a clean stop, and that means nothing: the claim
+ * is the open connection, not the file. Removing it on release would reopen the
+ * race the lock exists to close — a daemon that opened the file the moment this
+ * one closed it would be left holding a name the next one recreates, and two
+ * daemons would each hold a lock on a different file.
  */
 export function holdDataDir(path: string, logger: Logger): DataDirHold {
   ensureDataDir(path, logger);
@@ -81,7 +87,8 @@ export function holdDataDir(path: string, logger: Logger): DataDirHold {
     db.exec('COMMIT');
   } catch (error) {
     db.close();
-    if ((error as { errcode?: number }).errcode === SQLITE_BUSY) {
+    const errcode = (error as { errcode?: number }).errcode;
+    if (errcode === SQLITE_BUSY) {
       throw new InterlockError('CONFIG_INVALID', 'Another daemon is using this data directory', {
         cause: error,
         details: { dataDir: path },
@@ -89,7 +96,14 @@ export function holdDataDir(path: string, logger: Logger): DataDirHold {
           'Stop the daemon already running against it, or set INTERLOCK_DATA_DIR to a different directory.',
       });
     }
-    throw error;
+    // Anything else means the file is not a lock this code can take — most
+    // often not a database at all. Not deleted here: whether another daemon
+    // is running is exactly what cannot be known when the lock will not open.
+    throw new InterlockError('CONFIG_INVALID', 'The data directory lock could not be taken', {
+      cause: error,
+      details: { dataDir: path, errcode: errcode ?? null },
+      remedy: `If no Interlock daemon is running, delete ${lockPath} and start again.`,
+    });
   }
   return {
     release(): void {

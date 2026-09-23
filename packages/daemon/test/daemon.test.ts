@@ -319,6 +319,21 @@ describe('daemon', () => {
     }
   });
 
+  it('refuses a lock file it cannot open with a remedy, and leaves the file alone', async () => {
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    const lock = join(dataDir, 'daemon.lock');
+    writeFileSync(lock, 'not a database, and long enough to be read as a header\n'.repeat(20));
+
+    const error = await rejection(daemon.start());
+
+    expect(error.code).toBe('CONFIG_INVALID');
+    expect(error.remedy).toContain(lock);
+    // Whether another daemon is running cannot be known when the lock will not
+    // open, so the file is not the start's to delete.
+    expect(existsSync(lock)).toBe(true);
+    expect(daemon.runtime).toBeNull();
+  });
+
   it('hands the directory to the next daemon once the first has stopped', async () => {
     await daemon.start();
     await daemon.stop();
