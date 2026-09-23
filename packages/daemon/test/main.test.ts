@@ -38,6 +38,23 @@ interface Run {
 describe('interlockd', () => {
   let base: string;
   let dataDir: string;
+  /**
+   * Daemon pids to kill if a test fails before stopping them.
+   *
+   * `spawn` returns the pid of `tsx`, and the daemon is its child. A signal
+   * `tsx` can relay reaches the daemon; `SIGKILL` cannot, so killing the
+   * wrapper outright orphans a daemon that keeps its data directory held.
+   */
+  const strays = new Set<number>();
+
+  /** The daemon's own pid, from the file it publishes once it is up. */
+  const publishedPid = (): number | null => {
+    try {
+      return (JSON.parse(readFileSync(runtimePath(dataDir), 'utf8')) as DaemonRuntime).pid;
+    } catch {
+      return null;
+    }
+  };
 
   /** The daemon, as a process, with the environment the test chooses. */
   const daemon = (): ReturnType<typeof spawn> =>
@@ -71,6 +88,14 @@ describe('interlockd', () => {
   });
 
   afterEach(() => {
+    for (const pid of strays) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // Already gone, which is the ordinary case.
+      }
+    }
+    strays.clear();
     rmSync(base, { recursive: true, force: true });
   });
 
@@ -110,6 +135,57 @@ describe('interlockd', () => {
     expect(record.remedy).toContain('INTERLOCK_DATA_DIR');
     expect(record.remedy).not.toContain('memory');
     expect(existsSync(join(ROOT, 'relative-data'))).toBe(false);
+  }, 30_000);
+
+  it('lets a new daemon take the directory from one that was killed outright', async () => {
+    writeFileSync(configPath(dataDir), JSON.stringify({ repos: [], daemon: { port: 0 } }));
+    const first = daemon();
+    const firstDone = finished(first);
+    await until(() => publishedPid() !== null, 'the first daemon to start');
+    const killed = publishedPid()!;
+    strays.add(killed);
+
+    // Whatever claim it held has to die with it: a lock that outlived a
+    // `kill -9` would leave the directory unusable until someone deleted a file.
+    process.kill(killed, 'SIGKILL');
+    await firstDone;
+
+    const second = daemon();
+    const secondDone = finished(second);
+    // The first left its runtime file behind, so wait for a different pid
+    // rather than for the file.
+    await until(() => {
+      const pid = publishedPid();
+      return pid !== null && pid !== killed;
+    }, 'the second daemon to take over');
+    strays.add(publishedPid()!);
+
+    second.kill('SIGTERM');
+    expect((await secondDone).code).toBe(0);
+  }, 30_000);
+
+  it('turns away a second daemon on the same directory and leaves the first running', async () => {
+    writeFileSync(configPath(dataDir), JSON.stringify({ repos: [], daemon: { port: 0 } }));
+    const first = daemon();
+    const firstDone = finished(first);
+    await until(() => publishedPid() !== null, 'the first daemon to start');
+    const holder = publishedPid()!;
+    strays.add(holder);
+
+    const run = await finished(daemon());
+
+    expect(run.code).toBe(1);
+    const record = JSON.parse(run.stderr.trim().split('\n').at(-1) ?? '{}') as {
+      code?: string;
+      remedy?: string;
+    };
+    expect(record.code).toBe('CONFIG_INVALID');
+    expect(record.remedy).toContain('INTERLOCK_DATA_DIR');
+    // Refused before it could publish anything over the first one's file.
+    expect(publishedPid()).toBe(holder);
+
+    first.kill('SIGTERM');
+    expect((await firstDone).code).toBe(0);
   }, 30_000);
 
   it('watches the repositories the config names, and stops cleanly on SIGTERM', async () => {

@@ -274,6 +274,43 @@ describe('daemon', () => {
     expect(again.message).toMatch(/already in use/u);
   });
 
+  it('turns away a second daemon on the same data directory, whatever port it asks for', async () => {
+    await daemon.start();
+    const first = daemon.runtime;
+    // Port 0 again, so the port cannot be what stops it: two daemons on two
+    // ports would otherwise both run, each building shadows the other deletes.
+    const second = createDaemon({
+      config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
+      logger: createLogger('test', { level: 'error', sink: () => undefined }),
+    });
+
+    const error = await rejection(second.start());
+
+    expect(error.code).toBe('CONFIG_INVALID');
+    expect(error.message).toMatch(/another daemon/iu);
+    expect(error.remedy).toContain('INTERLOCK_DATA_DIR');
+    expect(second.runtime).toBeNull();
+    // The first is untouched: still serving, and still the one advertised.
+    expect(JSON.parse(readFileSync(runtimePath(dataDir), 'utf8'))).toStrictEqual(first);
+    expect((await call<{ repos: Repo[] }>('/api/repos', token())).status).toBe(200);
+  });
+
+  it('hands the directory to the next daemon once the first has stopped', async () => {
+    await daemon.start();
+    await daemon.stop();
+    const next = createDaemon({
+      config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
+      logger: createLogger('test', { level: 'error', sink: () => undefined }),
+    });
+
+    try {
+      await next.start();
+      expect(next.runtime?.port).toBeGreaterThan(0);
+    } finally {
+      await next.stop();
+    }
+  });
+
   it('reports purge as unimplemented rather than deleting nothing quietly', async () => {
     const error = await rejection(daemon.purge());
     expect(error.code).toBe('NOT_IMPLEMENTED');
