@@ -81,8 +81,10 @@ interface Source {
  * sees refs as of the refresh it joined, which is the staleness every caller
  * already has between calls.
  *
- * Per process. Two daemons sharing a data directory are not serialised here —
- * that belongs to the data directory, once, not to every repository inside it.
+ * Per process, which is enough because one process is all a data directory
+ * ever has: the daemon holds the directory for its whole run and a second one
+ * is turned away at start. Serialising across processes here as well would
+ * guard the same thing twice, per repository.
  */
 const inFlight = new Map<string, Promise<ShadowRepo>>();
 
