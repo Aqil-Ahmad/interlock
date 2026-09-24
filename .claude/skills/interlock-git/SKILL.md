@@ -152,6 +152,17 @@ This matters more than it looks. Interlock analyses N(N-1)/2 pairs continuously,
 and a worktree checkout per pair is the difference between fitting a laptop CPU
 budget and not.
 
+Run it as `git --attr-source=<commitA> merge-tree --write-tree -z
+--merge-base=<base> <A> <B>`. A bare clone has no worktree to read
+`.gitattributes` from, so without `--attr-source` every attribute that shapes a
+merge is silently dropped and the shadow disagrees with the user's real merge.
+That form needs git 2.41; older git answers it with exit 129, which is the
+capability check — a probe for `--write-tree` passes on 2.38 and 2.39, which
+cannot run it. A conflicted merge still writes a tree with markers in it, so
+conflict regions come from `cat-file` on that tree, never from a checkout, and
+the message types come from the `-z` token field, never the prose. A binary
+conflict is reported as `CONFLICT (binary)` and `CONFLICT (contents)` both.
+
 **`merge-tree` is not a semantic filter.** It answers "do these two conflict
 textually", and a semantic conflict is by definition a merge that came out
 clean — so it walks straight through. Every clean merge is still a typecheck

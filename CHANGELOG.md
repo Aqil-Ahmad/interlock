@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- git 2.41 or later is required. Speculative merges run `git merge-tree` against a supplied merge base, reading the repository's attributes from a commit, which older git cannot do; with an older one the daemon reports the toolchain as unsupported rather than a failed merge. macOS's bundled git is 2.39.
+
 ### Added
 
 - One daemon per data directory. A second daemon started against a directory another is already using refuses to start and says so, whatever port it was given; the first keeps running. The claim is released when the daemon exits, including when it is killed outright, so a crash never leaves the directory unusable.

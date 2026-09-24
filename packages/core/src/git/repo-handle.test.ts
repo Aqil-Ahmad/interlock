@@ -62,6 +62,10 @@ describe('isMutatingCommand', () => {
     expect(isMutatingCommand(['-C', '/repo', 'merge', 'feature'])).toBe(true);
     expect(isMutatingCommand(['-c', 'user.name=x', 'commit'])).toBe(true);
     expect(isMutatingCommand(['--git-dir', '/repo/.git', 'status'])).toBe(false);
+    // Its value is a revision, which read as the subcommand would classify a
+    // read as an unknown — and so mutating — verb, or a write as a read.
+    expect(isMutatingCommand(['--attr-source', 'HEAD', 'status'])).toBe(false);
+    expect(isMutatingCommand(['--attr-source', 'HEAD', 'commit'])).toBe(true);
   });
 
   it('allows read-only plumbing', () => {

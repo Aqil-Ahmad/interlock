@@ -32,7 +32,7 @@ const SHADOWS_DIR = 'shadows';
 const USER_REFS_PREFIX = 'refs/remotes/user/';
 
 /**
- * Identity for commits this clone will author.
+ * Configuration the clone has to carry, brought into line on every refresh.
  *
  * Set in the repository's own config because it cannot be passed any other way:
  * the runner strips inherited `GIT_*` variables, neutralises global and system
@@ -50,6 +50,10 @@ const SHADOW_CONFIG: readonly (readonly [string, string])[] = [
   // git run against this clone by anyone else.
   ['maintenance.auto', 'false'],
   ['gc.auto', '0'],
+  // A conflict region `merge-tree` writes then carries the base text beside
+  // both sides, which is what tells two additions next to each other from two
+  // edits of the same line.
+  ['merge.conflictStyle', 'diff3'],
 ];
 
 /**
@@ -146,6 +150,7 @@ async function refresh(
     discard(shadowPath, options.dataDir);
     await create(shadow, source, options.runner);
   }
+  await syncConfig(shadow, options.runner);
 
   await runRequired(options.runner, shadow, [
     'fetch',
@@ -311,14 +316,34 @@ async function create(shadow: ShadowRepo, source: Source, runner: GitRunner): Pr
     `--object-format=${source.objectFormat}`,
     '--initial-branch=main',
   ]);
-  for (const [key, value] of SHADOW_CONFIG) {
-    await runRequired(runner, shadow, ['config', key, value]);
-  }
 
   // Written last: it is what makes the directory this repository's shadow, so a
   // run that dies before this leaves something `isUsableShadow` rebuilds rather
   // than a clone that silently borrows nothing.
   writeFileSync(alternatesFileOf(shadow.rootPath), `${source.objectsDir}\n`);
+}
+
+/**
+ * Bring the clone's config to what this build expects, writing only what differs.
+ *
+ * On every refresh rather than once at creation. A key added after a clone was
+ * made would otherwise never reach it: the clone passes every other check, and
+ * only an unrelated rebuild would apply it. Read in one call, so a clone that is
+ * already in order costs one process.
+ */
+async function syncConfig(shadow: ShadowRepo, runner: GitRunner): Promise<void> {
+  const listed = await runRequired(runner, shadow, ['config', '--local', '--list', '-z']);
+  const current = new Map<string, string>();
+  for (const entry of listed.stdout.split('\0')) {
+    const newline = entry.indexOf('\n');
+    if (newline !== -1) current.set(entry.slice(0, newline), entry.slice(newline + 1));
+  }
+  for (const [key, value] of SHADOW_CONFIG) {
+    // git lists section and key names in lower case, whatever they were set as.
+    if (current.get(key.toLowerCase()) !== value) {
+      await runRequired(runner, shadow, ['config', key, value]);
+    }
+  }
 }
 
 /** A disposable checkout inside the shadow clone, used for one merge attempt. */

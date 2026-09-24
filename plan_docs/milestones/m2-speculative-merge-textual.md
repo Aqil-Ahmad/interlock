@@ -141,11 +141,56 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
 merge-tree` over the two commits reports the conflict — with neither side
   having committed anything, and the user repository byte-identical afterwards.
 
-- [ ] **Pairwise merge with `merge-tree`**
+- [x] **Pairwise merge with `merge-tree`**
       **Files:** `packages/core/src/merge/speculative-merge.ts`
       **What:** merge two commits with `git merge-tree --write-tree` inside the shadow. Returns the merged tree id when clean, and the conflicted paths with their stages when not. No worktree, no checkout.
-      **Done when:** a clean pair returns a tree id and a conflicting pair returns its conflicted paths; neither creates a working directory; and the timing per pair is recorded in `log.md`.
-      **Constraints:** a conflict is a result, not an error — throw only when the merge could not be attempted at all. `merge-tree` needs git 2.38+; detect and report `TOOLCHAIN_UNSUPPORTED` on older git rather than silently falling back.
+
+  The result is a tree and the conflict data, and nothing is materialised: the
+  declared result carried a `ShadowWorktree` for the caller to dispose, which is
+  the per-pair checkout this approach exists to avoid. A conflicted merge still
+  writes a tree, with markers in the conflicted files, so conflict regions are
+  read out of that tree's blobs — never a checkout. The shadow sets
+  `merge.conflictStyle=diff3`, which `merge-tree` honours, so each region carries
+  its base text: that is what tells two additions beside each other from two
+  edits of the same line.
+
+  Output is parsed in its `-z` form, and the informational section is parsed
+  too — it carries a stable type token per message (`CONFLICT (contents)`,
+  `CONFLICT (binary)`, `CONFLICT (rename/rename)`, …) beside the prose, and the
+  classifier keys on the token. A binary conflict is reported as both `contents`
+  and `binary`, so a region is only parsed for a path that is the first and not
+  the second.
+
+  The base is supplied, which needs git 2.40, and attributes are read from
+  `commitA` with `--attr-source`, which needs 2.41: a bare clone has no
+  worktree to read `.gitattributes` from, and without it `binary`, merge drivers
+  and `conflict-marker-size` are silently ignored — a pair conflicts in the
+  shadow that merges cleanly for real. 2.38 accepts `--write-tree` and refuses
+  both, so a check for the subcommand or for `--write-tree` passes on a git that
+  cannot do this. The
+  check is the merge itself — git answers a form it does not understand with
+  exit 129, which is `TOOLCHAIN_UNSUPPORTED` — so nothing is paid per pair on a
+  git that works. Supplied rather than rediscovered because a Finding names the
+  merge base as evidence, and a merge git ran against a base of its own choosing
+  — a virtual one, on criss-cross history — would not match it. Two commits with
+  no common ancestor never arrive: `mergeBase` answers null for them and the
+  request has nowhere to put a null.
+
+  Exit 0 is clean, 1 is conflicted, 129 unsupported. Anything else first asks
+  whether all three commits are in the shadow — a missing one is
+  `SNAPSHOT_STALE`, answered by capturing again — and otherwise is
+  `MERGE_FAILED`. git's stderr names paths and branches, which is repository
+  content, and stays out of the error as it does everywhere else.
+
+  **Done when:** a clean pair returns a tree id and a conflicting pair returns
+  its conflicted paths, stages, typed messages and conflict regions read from
+  the merged tree; the cases that have broken real tools are covered — binary,
+  file against symlink, directory against file, rename against rename, a
+  submodule, a newline in a path, and a clean merge touching thousands of files;
+  nothing is written under the user's repository, per the untouched cycle; and
+  the median time per pair on a real repository is in `log.md`.
+  **Constraints:** a conflict is a result, not an error. No classifier, analyzer
+  wiring or store writes — this task ends at a returned result.
 
 - [ ] **Textual conflict classification**
       **Files:** `packages/core/src/merge/conflict-classifier.ts`, `packages/core/src/analyzers/textual.ts`

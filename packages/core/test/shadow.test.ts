@@ -492,6 +492,32 @@ describe('ensureShadow', () => {
     expect(statSync(join(dataDir, 'shadows')).mode & 0o777).toBe(0o700);
   });
 
+  it('brings the config of a clone made by an earlier build into line', async () => {
+    const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
+    // A key added since the clone was made, and one removed from under it: the
+    // clone passes every usability check either way, so only the refresh can
+    // put them right.
+    gitIn(shadow.rootPath, 'config', 'merge.conflictStyle', 'merge');
+    gitIn(shadow.rootPath, 'config', '--unset', 'user.name');
+
+    await ensureShadow(repo, { runner, dataDir, repoId });
+
+    expect(gitIn(shadow.rootPath, 'config', 'merge.conflictStyle').trim()).toBe('diff3');
+    expect(gitIn(shadow.rootPath, 'config', 'user.name').trim()).toBe('Interlock');
+  });
+
+  it('writes no config to a clone that already has it', async () => {
+    await ensureShadow(repo, { runner, dataDir, repoId });
+    const { runner: spy, calls } = recording();
+
+    await ensureShadow(repo, { runner: spy, dataDir, repoId });
+
+    // One read, and no writes: the check a refresh pays on every call.
+    expect(calls.filter((argv) => argv[0] === 'config')).toEqual([
+      ['config', '--local', '--list', '-z'],
+    ]);
+  });
+
   it('can author a commit, which needs an identity nothing else can supply', async () => {
     const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
     const tree = gitIn(shadow.rootPath, 'rev-parse', 'refs/remotes/user/main^{tree}').trim();

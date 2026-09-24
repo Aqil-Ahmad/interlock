@@ -84,7 +84,12 @@ scripts/         setup, benchmarks
 
 ## Requirements
 
-Node ≥ 24, pnpm 11, git ≥ 2.30, Docker for the semantic analyzers.
+Node ≥ 24, pnpm 11, git ≥ 2.41, Docker for the semantic analyzers.
+
+Every speculative merge runs `git merge-tree` against a given base, with the
+repository's attributes read from a commit rather than a checkout — flags from
+git 2.40 and 2.41. macOS ships 2.39 at `/usr/bin/git`; install a newer one —
+Homebrew's, for instance — and put it first on `PATH`.
 
 On Linux, not Node 26.9.0. Its recursive directory watcher throws `EACCES` from
 inside Node's own event callback when a watched directory becomes unreadable —

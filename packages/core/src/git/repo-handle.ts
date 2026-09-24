@@ -79,6 +79,11 @@ const GLOBAL_FLAGS: ReadonlyMap<
   ['--namespace', { takesValue: true, reserved: true }],
   ['--exec-path', { takesValue: true, reserved: true }],
   ['--config-env', { takesValue: true, reserved: true }],
+  // Chooses the tree attributes are read from. Not reserved: it cannot reach
+  // another repository, and every attribute that runs something — a filter, a
+  // custom merge or diff driver — needs a definition in config, which a shadow
+  // does not have and the runner neutralises everywhere else.
+  ['--attr-source', { takesValue: true, reserved: false }],
 ]);
 
 /**
@@ -857,6 +862,16 @@ export function assertRevision(revision: string, field: string): void {
 }
 
 /**
+ * Whether a string has the shape of an object id.
+ *
+ * For checking what git printed, where a malformed id means the output did not
+ * parse — a different failure from a caller passing one in.
+ */
+export function isObjectId(value: string): boolean {
+  return OBJECT_ID.test(value);
+}
+
+/**
  * Refuse anything that is not an object id before git is asked to resolve it.
  *
  * Revisions are positional arguments, and `--` separates them from paths rather
@@ -865,7 +880,7 @@ export function assertRevision(revision: string, field: string): void {
  * storage, which makes their shape an assumption rather than a guarantee.
  */
 export function assertObjectId(oid: string, field: string): void {
-  if (!OBJECT_ID.test(oid)) {
+  if (!isObjectId(oid)) {
     throw new InterlockError('GIT_COMMAND_REFUSED', `${field} is not an object id`, {
       // Not the value: it arrives from a caller, may be anything, and this
       // error reaches the API and the agents. The field name says enough.
