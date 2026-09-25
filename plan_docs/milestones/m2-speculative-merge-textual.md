@@ -192,7 +192,7 @@ merge-tree` over the two commits reports the conflict — with neither side
   **Constraints:** a conflict is a result, not an error. No classifier, analyzer
   wiring or store writes — this task ends at a returned result.
 
-- [ ] **Textual conflict classification**
+- [x] **Textual conflict classification**
       **Files:** `packages/core/src/merge/conflict-classifier.ts`, `packages/core/src/analyzers/textual.ts`
       **What:** turn `merge-tree`'s conflict output into Findings — one per conflicted path — carrying each branch's hunk spans in that branch's own file, and wire `textualAnalyzer.analyze` to produce them.
 

@@ -196,6 +196,18 @@ The symlink is only valid while dependencies match. If either branch changed
 install — or it skips the semantic check and says why. Silently typechecking
 against the wrong dependency tree produces confident nonsense.
 
+What a conflict looks like in that output, checked against git 2.55, since
+the classifier keys on it:
+
+- add/add is `CONFLICT (contents)` with no stage 1, and diff3 does not narrow
+  its region — the whole file is one region with an empty base.
+- A rename on one side and a colliding edit on the other is plain `contents`,
+  with every stage recorded under the new name. The unrenamed side's own path
+  is found by its blob in its own commit, never by parsing marker labels.
+- modify/delete and rename/delete carry no binary verdict, and a file turned
+  symlink against a delete is `modify/delete` too — check the mode and the
+  content before reading lines out of either side.
+
 ## Conflicts are results, not errors
 
 A conflicted merge is a successful analysis with a finding. Throw only when the
