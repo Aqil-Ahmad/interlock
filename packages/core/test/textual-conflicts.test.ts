@@ -510,6 +510,19 @@ describe('textual conflicts', () => {
       });
     });
 
+    it('give no span even where a side’s lines changed', async () => {
+      const request = await pair(
+        () => write('x.txt', 'one\ntwo\nthree\nfour\nfive\n'),
+        () => {
+          git('mv', 'x.txt', 'y.txt');
+          write('y.txt', 'one\ntwo\nTHREE\nfour\nfive\n');
+        },
+        () => git('mv', 'x.txt', 'z.txt'),
+      );
+
+      expectOther(await analyze(request), 'CONFLICT (rename/rename)');
+    });
+
     it('report a file against a directory', async () => {
       const request = await pair(
         () => write('README', 'r\n'),
@@ -532,8 +545,48 @@ describe('textual conflicts', () => {
 
       const finding = expectOther(await analyze(request), 'CONFLICT (distinct modes)');
       // Filed under the path, not the `t~<commit>` name git moved one side to,
-      // which changes with every commit.
-      expect(provenanceOf(finding).path).toBe('t');
+      // which changes with every commit — and the base, recorded under the moved
+      // name, found all the same.
+      expect(provenanceOf(finding)).toMatchObject({
+        path: 't',
+        base: { path: 't' },
+        sideA: { path: 't', mode: '120000' },
+        sideB: { path: 't' },
+      });
+    });
+
+    it('keep a real file whose name looks moved aside under its own path', async () => {
+      const request = await pair(
+        () => {
+          write('a', 'x\n');
+          write('a~b', 'x\n');
+        },
+        () => {
+          write('a', 'A\n');
+          write('a~b', 'A\n');
+        },
+        () => {
+          write('a', 'B\n');
+          write('a~b', 'B\n');
+        },
+      );
+
+      const { findings } = await analyze(request);
+
+      expect(findings.map((f) => provenanceOf(f).path).sort()).toEqual(['a', 'a~b']);
+    });
+
+    it('keep a renamed file under its new name when the old one is a prefix of it', async () => {
+      const request = await pair(
+        () => write('util', 'one\ntwo\nthree\nfour\n'),
+        () => git('mv', 'util', 'util2'),
+        () => git('rm', '-q', 'util'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('rename-vs-delete');
+      expect(provenanceOf(finding!).path).toBe('util2');
     });
 
     it('file a moved-aside file under the path it came from, whatever its class', async () => {
@@ -618,6 +671,7 @@ describe('textual conflicts', () => {
       one: () => void;
       two: () => void;
       bend: (stages: readonly ConflictStage[]) => ConflictStage[];
+      mute?: boolean;
     }[] = [
       {
         name: 'a modify/delete with no base',
@@ -648,6 +702,14 @@ describe('textual conflicts', () => {
         bend: (stages) => [...stages, { ...stages.find((s) => s.stage === 2)!, stage: 3 }],
       },
       {
+        name: 'a conflicted path no message names',
+        setup: () => write('f.txt', 'a\n'),
+        one: () => write('f.txt', 'A\n'),
+        two: () => write('f.txt', 'B\n'),
+        bend: (stages) => [...stages],
+        mute: true,
+      },
+      {
         name: 'a content conflict missing a side',
         setup: () => write('f.txt', 'a\n'),
         one: () => write('f.txt', 'A\n'),
@@ -658,13 +720,17 @@ describe('textual conflicts', () => {
 
     it.each(cases)(
       'report $name as a conflict no class covers',
-      async ({ setup, one, two, bend }) => {
+      async ({ setup, one, two, bend, mute }) => {
         const request = await pair(setup, one, two);
         const ctx = await context(request);
         const real = await textualAnalyzer.analyze(ctx);
         expect(real.findings[0]!.rule).not.toBe('other-conflict');
 
-        const bent = { ...ctx, merged: { ...ctx.merged, stages: bend(ctx.merged.stages) } };
+        const messages = mute ? [] : ctx.merged.messages;
+        const bent = {
+          ...ctx,
+          merged: { ...ctx.merged, stages: bend(ctx.merged.stages), messages },
+        };
         const outcome = await textualAnalyzer.analyze(bent);
 
         expect(outcome.verdict).toBe('findings');

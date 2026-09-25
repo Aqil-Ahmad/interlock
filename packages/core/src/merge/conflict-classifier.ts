@@ -346,7 +346,7 @@ function gatherUncovered(
     if (parts.length === 0) continue;
     for (const part of parts) pending.delete(part.recorded[0]!);
     gathered.push({
-      path: movedFrom(message.paths[0]!, merged),
+      path: parts[0]!.path,
       recorded: parts.flatMap((part) => part.recorded),
       base: parts.find((part) => part.base !== undefined)?.base,
       ours: parts.find((part) => part.ours !== undefined)?.ours,
