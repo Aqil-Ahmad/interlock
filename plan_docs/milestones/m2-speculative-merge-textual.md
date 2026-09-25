@@ -194,9 +194,46 @@ merge-tree` over the two commits reports the conflict — with neither side
 
 - [ ] **Textual conflict classification**
       **Files:** `packages/core/src/merge/conflict-classifier.ts`, `packages/core/src/analyzers/textual.ts`
-      **What:** turn `merge-tree`'s conflict output into Findings carrying file and hunk spans on both branches.
-      **Done when:** each Finding names both branches, both spans and the merge-base, and a fixture suite covers add/add, edit/edit, edit/delete and rename/edit.
-      **Constraints:** evidence is machine-checkable — spans and tool output, never prose alone.
+      **What:** turn `merge-tree`'s conflict output into Findings — one per conflicted path — carrying each branch's hunk spans in that branch's own file, and wire `textualAnalyzer.analyze` to produce them.
+
+  The class comes from structure, never from git's prose: the stage set and the
+  `-z` type token. `CONFLICT (modify/delete)` is `delete-vs-modify`,
+  `CONFLICT (rename/delete)` is `rename-vs-modify`, a content conflict with no
+  base stage is `add-add`, and a content conflict with one is
+  `overlapping-edit` when both sides changed a base line in common and
+  `adjacent-addition` otherwise — including when the regions cannot be read,
+  because when it cannot tell it says the weaker thing. A binary conflict is
+  `overlapping-edit` with no span. git merges a rename on one side and an edit
+  on the other cleanly unless the edits collide, so rename/edit is a content
+  conflict classified by its regions, whose spans sit at each branch's own
+  path. Any other type (`rename/rename`, `file/directory`, a submodule) raises
+  nothing and is logged by its token.
+
+  A span is located in the stage-2 or stage-3 blob, never in merged-file
+  coordinates, and a side whose lines cannot be placed exactly gets no span.
+  The merge base and both commits travel on a `merge-conflict` evidence beside
+  the spans, with git's type tokens and each side's blob. Severity is by class;
+  confidence is 1, since git conflicting is ground truth. `originBranch` is null:
+  a textual conflict is symmetric.
+
+  Rewritten from "both spans and the merge-base, and a fixture suite covers
+  add/add, edit/edit, edit/delete and rename/edit": the deleting side of an
+  edit/delete has no file to hold a span; the Finding model had nowhere to name
+  a merge base; git reports no conflict at all for a rename against an edit
+  elsewhere in the file; and the Fixture suite task below writes to `eval/`,
+  which is read-only to coding sessions — this task's fixtures are integration
+  fixtures in `packages/core/test`.
+
+  **Done when:** each Finding names both branches, the merge base and both
+  commits, and a span on every branch that has the file, placed in that
+  branch's own blob; a labelled fixture suite covers add/add, edit/edit,
+  edit/delete, rename/edit, rename/delete and adjacent additions, each with a
+  negative twin that raises nothing; a binary conflict yields no span, and a
+  newline in a path, CRLF, regions on the first and last line and a pair with
+  dozens of conflicted files are covered, the last against a stated bound on
+  Findings per run; and an analyzer that cannot read a blob returns
+  `infra-failure`, never an empty list.
+  **Constraints:** evidence is machine-checkable — spans and tool output, never prose alone. The fixture lands before the rule it exercises. Excerpts are bounded; repository content stays out of titles and descriptions.
 
 - [ ] **Per-pair worktree pool**
       **Files:** `packages/core/src/git/shadow.ts`

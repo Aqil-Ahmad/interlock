@@ -7,8 +7,12 @@ import type {
   Logger,
   SpeculativeRunId,
 } from '@interlock/shared';
+import type { GitRunner } from '../git/repo-handle.js';
 import type { ShadowWorktree } from '../git/shadow.js';
-import type { SpeculativeMergeResult } from '../merge/speculative-merge.js';
+import type {
+  SpeculativeMergeRequest,
+  SpeculativeMergeResult,
+} from '../merge/speculative-merge.js';
 
 /**
  * The analyzer contract.
@@ -42,9 +46,17 @@ export interface AnalyzerContext {
   readonly branchB: BranchRefId;
   readonly changeSetA: ChangeSet;
   readonly changeSetB: ChangeSet;
-  /** The merged tree, checked out in a disposable shadow worktree. */
+  /** The merge as it was asked for: the shadow, both commits and the merge base. */
+  readonly mergeRequest: SpeculativeMergeRequest;
   readonly merged: SpeculativeMergeResult;
-  readonly worktree: ShadowWorktree;
+  /**
+   * The merged tree checked out, for an analyzer that has to execute it; null
+   * when the pair has no slot. The merge itself needs no checkout, so an
+   * analyzer that reads only what git wrote runs on every pair without one.
+   */
+  readonly worktree: ShadowWorktree | null;
+  /** Reads the shadow; `mergeRequest.shadow` is the only repository it is given. */
+  readonly runner: GitRunner;
   readonly logger: Logger;
   /** Aborted when the run is superseded by newer snapshots. */
   readonly signal: AbortSignal;

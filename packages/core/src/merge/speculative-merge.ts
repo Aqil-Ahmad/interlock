@@ -366,8 +366,34 @@ async function readConflictBlocks(
  * reading of the file can tell the two apart.
  */
 export function parseConflictRegions(path: string, text: string): ConflictBlock[] {
+  return scanConflictRegions(text).map((region) => ({
+    path,
+    startLine: region.startLine,
+    endLine: region.endLine,
+    ours: region.ours.join('\n'),
+    theirs: region.theirs.join('\n'),
+    base: region.base === null ? null : region.base.join('\n'),
+  }));
+}
+
+/**
+ * A conflict region with each section as its lines.
+ *
+ * Joined, a section of no lines and a section of one empty line are the same
+ * string; anything placing a section in a file needs to tell them apart.
+ */
+export interface ConflictRegionLines {
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly ours: readonly string[];
+  readonly base: readonly string[] | null;
+  readonly theirs: readonly string[];
+}
+
+/** {@link parseConflictRegions}, keeping each section as lines. */
+export function scanConflictRegions(text: string): ConflictRegionLines[] {
   const lines = text.split('\n');
-  const blocks: ConflictBlock[] = [];
+  const regions: ConflictRegionLines[] = [];
 
   for (let at = 0; at < lines.length; at++) {
     const size = markerLength(lines[at]!, '<');
@@ -395,17 +421,10 @@ export function parseConflictRegions(path: string, text: string): ConflictBlock[
     }
 
     if (end === null) break;
-    blocks.push({
-      path,
-      startLine: at + 1,
-      endLine: end + 1,
-      ours: ours.join('\n'),
-      theirs: theirs.join('\n'),
-      base: base === null ? null : base.join('\n'),
-    });
+    regions.push({ startLine: at + 1, endLine: end + 1, ours, base, theirs });
     at = end;
   }
-  return blocks;
+  return regions;
 }
 
 /**

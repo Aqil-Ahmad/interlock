@@ -70,7 +70,7 @@ The path to trace when debugging anything:
 5. **Merge.** Both sides' commits — real or snapshot — are merged with `git merge-tree` inside the shadow clone's object database. No checkout, no working directory. Publishes `run.merge-completed`.
 6. **Analyze.** A conflicted merge is already a textual finding. A clean merge is a semantic candidate: the pre-filter asks whether the two branches touched overlapping exported symbols, and only then is the merged tree materialised into the scratch worktree and handed to the compiler, the build and targeted tests inside the sandbox. Each step publishes `run.analyzer-completed`.
 7. **Attribute.** Each problem is traced to which side introduced which half — the difference between "TS2304" and "your rename broke a call site the other branch added".
-8. **Record.** Findings are persisted with evidence: spans on both branches, redacted tool output, symbol trails. Publishes `finding.raised`.
+8. **Record.** Findings are persisted with evidence: spans on both branches, each in that branch's own file; for a textual conflict, the merge it came from — both commits, the merge base and git's conflict type; redacted tool output; symbol trails. Publishes `finding.raised`.
 9. **Advise.** The advisor ranks by severity × confidence and produces Advice within the noise budget.
 10. **Deliver.** MCP pushes to the owning agent, rate-limited; the dashboard updates over WebSocket; `interlock status` shows it. Publishes `advice.delivered`.
 11. **Invalidate.** Branches move; the finding becomes `stale`, is re-verified, and ends `resolved` or `dismissed`.

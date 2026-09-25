@@ -53,9 +53,17 @@ export interface Attribution {
   readonly rationale: string;
 }
 
-export type Evidence = SpanEvidence | ProcessOutputEvidence | SymbolTrailEvidence | TestEvidence;
+export type Evidence =
+  SpanEvidence | MergeConflictEvidence | ProcessOutputEvidence | SymbolTrailEvidence | TestEvidence;
 
-/** A file/line span on one of the two branches. */
+/**
+ * A file/line span on one of the two branches.
+ *
+ * Lines are 1-based and inclusive, in that branch's own copy of the file. A
+ * span with `endLine` one less than `startLine` is empty: the branch has no
+ * lines there — it deleted them, or added nothing — and `startLine` is where
+ * they would begin.
+ */
 export interface SpanEvidence {
   readonly type: 'span';
   readonly branchRefId: BranchRefId;
@@ -64,6 +72,36 @@ export interface SpanEvidence {
   readonly endLine: number;
   /** Short excerpt, redacted. Never a whole file. */
   readonly excerpt: string;
+}
+
+/**
+ * The speculative merge a textual conflict came from, as git reported it.
+ *
+ * Enough to run the merge again and get the same answer: the three commits it
+ * took, and git's own type tokens for the conflict rather than its prose,
+ * which is reworded between releases.
+ */
+export interface MergeConflictEvidence {
+  readonly type: 'merge-conflict';
+  readonly mergeBaseSha: string;
+  readonly commitA: string;
+  readonly commitB: string;
+  /** The path git recorded the conflict under, which after a rename exists on one side only. */
+  readonly path: string;
+  /** Verbatim, e.g. `CONFLICT (contents)`, `CONFLICT (modify/delete)`. */
+  readonly conflictTypes: readonly string[];
+  /** The file at the merge base; null where it had none, as for an add/add. */
+  readonly base: MergeConflictSide | null;
+  /** Each branch's file; null on the branch that deleted it. */
+  readonly sideA: MergeConflictSide | null;
+  readonly sideB: MergeConflictSide | null;
+}
+
+export interface MergeConflictSide {
+  /** The path on that commit; null when a rename left more than one candidate. */
+  readonly path: string | null;
+  readonly mode: string;
+  readonly oid: string;
 }
 
 /** Compiler, typechecker or build output from the sandbox. */
