@@ -254,18 +254,17 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
   /**
    * Remove a slot and every administrative trace of it.
    *
-   * git's own removal first. What follows is for a slot git no longer
-   * recognises — an `add` interrupted before it registered, or one that left
-   * its `locked` marker, which `remove` refuses and `prune` skips — and each
-   * recursive delete is bounded to a direct child of the directory it belongs
-   * in, which is the only shape this module creates.
+   * Two deletes rather than `worktree remove`: git registers a worktree by its
+   * administrative directory alone, so removing that and the checkout is the
+   * whole of what `remove` does — and it also covers what `remove` refuses, an
+   * `add` interrupted before it registered or one that left its `locked`
+   * marker, which `prune` skips as well. Each recursive delete is bounded to a
+   * direct child of the directory it belongs in, the only shape this module
+   * creates.
    */
-  const discard = async (canonicalPool: string, name: string): Promise<void> => {
-    const path = join(canonicalPool, name);
-    await runner.run(shadow, ['worktree', 'remove', '--force', '--force', path]);
-    removeChild(canonicalPool, path);
+  const discard = (canonicalPool: string, name: string): void => {
+    removeChild(canonicalPool, join(canonicalPool, name));
     removeChild(adminRoot, join(adminRoot, name));
-    await runRequired(runner, shadow, ['worktree', 'prune']);
   };
 
   const evict = async (canonicalPool: string, entry: Entry): Promise<SlotEviction> => {
@@ -278,7 +277,7 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
       buildStateAgeMs: entry.filledAt === null ? 0 : now - entry.filledAt,
       idleMs: now - entry.lastUsedAt,
     };
-    await discard(canonicalPool, entry.name);
+    discard(canonicalPool, entry.name);
     // Info, not debug: every eviction discards incremental compiler state and
     // forces a cold fill later, and the rate of them is a tuning signal.
     log.info('pool slot evicted', { ...eviction });
@@ -333,10 +332,10 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
 
     const found: Entry[] = [];
     for (const name of readdirSync(canonicalPool)) {
-      const times = SLOT_NAME.test(name) ? slotTimesOf(canonicalPool, adminRoot, name) : null;
+      const times = slotTimesOf(canonicalPool, adminRoot, name);
       if (times === null) {
         log.warn('pool slot unusable, discarded', { path: join(canonicalPool, name) });
-        await discard(canonicalPool, name);
+        discard(canonicalPool, name);
         continue;
       }
       found.push({ name, key: keyOfSlot(name), ...times, holders: 0 });
@@ -378,7 +377,7 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
     if (slotTimesOf(canonicalPool, adminRoot, entry.name) === null) {
       if (existsSync(repo.rootPath) || existsSync(repo.gitDir)) {
         log.warn('pool slot unusable, discarded', { path: repo.rootPath });
-        await discard(canonicalPool, entry.name);
+        discard(canonicalPool, entry.name);
       }
       // `--no-checkout`, and the files written by the reset below: `add` checks
       // out in a child process that keeps writing into the slot when `add`

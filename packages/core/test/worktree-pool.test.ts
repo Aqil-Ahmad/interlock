@@ -278,6 +278,25 @@ describe('worktree pool', () => {
       expect(readFileSync(join(slot.path, 'src/f1.ts'), 'utf8')).toBe('v3\n');
     });
 
+    it('writes a new slot in one process, not in a child of add', async () => {
+      // A plain `add` checks out in a child process that keeps writing after
+      // `add` is killed; with `--no-checkout` it writes nothing but `.git`,
+      // and the reset the runner can kill writes the rest.
+      const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
+      let afterAdd: string[] = [];
+      const watching: GitRunner = {
+        run: async (target, args, options) => {
+          const result = await runner.run(target, args, options);
+          if (args[0] === 'worktree' && args[1] === 'add') afterAdd = readdirSync(args.at(-2)!);
+          return result;
+        },
+      };
+
+      ran(await look(open({ runner: watching }), await request(newKey(), a, baseSha)));
+
+      expect(afterAdd).toStrictEqual(['.git']);
+    });
+
     it('keeps no reflog in a slot, so spent commits are not pinned', async () => {
       const a1 = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
       const key = newKey();
@@ -395,6 +414,43 @@ describe('worktree pool', () => {
       expect(existsSync(join(dir, 'data', 'worktrees'))).toBe(false);
     });
 
+    it('refuses a pool directory inside a git dir kept apart from the checkout', async () => {
+      const separate = join(base, 'separate');
+      const apart = join(base, 'apart.git');
+      execFileSync('git', ['init', '-q', '-b', 'main', `--separate-git-dir=${apart}`, separate], {
+        stdio: 'pipe',
+      });
+      gitIn(separate, 'config', 'user.name', 'Interlock Test');
+      gitIn(separate, 'config', 'user.email', 'test@example.invalid');
+      writeFileSync(join(separate, 'a.txt'), 'a\n');
+      gitIn(separate, 'add', '-A');
+      gitIn(separate, 'commit', '-qm', 'one');
+      const sha = gitIn(separate, 'rev-parse', 'HEAD').trim();
+      dataDir = join(apart, 'interlock-data');
+      shadow = await ensureShadow(
+        { kind: 'user', rootPath: separate, gitDir: apart },
+        { runner, dataDir, repoId },
+      );
+      const merged = await speculativeMerge(
+        { shadow, commitA: sha, commitB: sha, mergeBaseSha: sha },
+        { runner },
+      );
+      const tree = gitIn(separate, 'rev-parse', 'HEAD^{tree}').trim();
+
+      const error = await rejection(
+        look(open(), {
+          key: newKey(),
+          commitA: sha,
+          commitB: sha,
+          merged,
+          dependencyTreeOid: tree,
+        }),
+      );
+
+      expect(error.code).toBe('SHADOW_UNAVAILABLE');
+      expect(existsSync(join(dataDir, 'worktrees'))).toBe(false);
+    });
+
     it('tries again after a failed start rather than keeping the failure', async () => {
       const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', '1\n'));
       const slotRequest = await request(newKey(), a, baseSha);
@@ -424,8 +480,11 @@ describe('worktree pool', () => {
 
       expect(third.evicted).toMatchObject({ key: keys[1], path: second.path });
       expect(third.evicted!.bytes).toBeGreaterThan(0);
-      expect(third.evicted!.buildStateAgeMs).toBeGreaterThanOrEqual(0);
+      // Last used after it was filled, so idle for no longer than its build
+      // state has existed — and that state is older than the fill that made it.
+      expect(third.evicted!.buildStateAgeMs).toBeGreaterThan(0);
       expect(third.evicted!.idleMs).toBeGreaterThanOrEqual(0);
+      expect(third.evicted!.idleMs).toBeLessThanOrEqual(third.evicted!.buildStateAgeMs);
       expect(existsSync(second.path)).toBe(false);
       expect(existsSync(first.path)).toBe(true);
       const logged = records.find((record) => record.msg === 'pool slot evicted');
@@ -436,6 +495,63 @@ describe('worktree pool', () => {
       expect(adminDirs()).not.toContain(second.path.split('/').pop());
       const listed = gitIn(shadow.rootPath, 'worktree', 'list', '--porcelain');
       expect(listed).not.toContain(second.path);
+    });
+
+    it('can still evict a pair after checking it again', async () => {
+      const one = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'one\n'));
+      const two = commitOn('two', baseSha, () => write(dir, 'src/f2.ts', 'two\n'));
+      const pool = open({ size: 1 });
+      const hot = await request(newKey(), one, baseSha);
+      await look(pool, hot);
+      const slot = ran(await look(pool, hot)).value;
+
+      const other = ran(await look(pool, await request(newKey(), two, baseSha)));
+
+      expect(other.evicted?.path).toBe(slot.path);
+    });
+
+    it('evicts an idle slot rather than an older one in use', async () => {
+      const commits = ['one', 'two', 'three'].map((name, i) =>
+        commitOn(name, baseSha, () => write(dir, `src/f${String(i)}.ts`, `${name}\n`)),
+      );
+      const [busy, idle, incoming] = await Promise.all(
+        commits.map((commit) => request(newKey(), commit, baseSha)),
+      );
+      const pool = open({ size: 2 });
+      await look(pool, busy!);
+      await look(pool, idle!);
+      let evicted: SlotOutcome<PoolSlot> | undefined;
+
+      const holding = pool.withSlot(busy!, async (slot) => {
+        // Used after the busy slot was claimed, so the busy one is now the
+        // least recently used — and still held.
+        await look(pool, idle!);
+        evicted = await look(pool, incoming!);
+        return slot.path;
+      });
+
+      const busyPath = ran(await holding).value;
+      expect(ran(evicted!).evicted?.key).toBe(idle!.key);
+      expect(existsSync(busyPath)).toBe(true);
+    });
+
+    it('frees the place of a check whose slot never reached the disk', async () => {
+      const one = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'one\n'));
+      const two = commitOn('two', baseSha, () => write(dir, 'src/f2.ts', 'two\n'));
+      let hollow = true;
+      const flaky: GitRunner = {
+        run: (target, args, options) =>
+          hollow && args[0] === 'worktree' && args[1] === 'add'
+            ? Promise.resolve({ stdout: '', stderr: '', exitCode: 0 })
+            : runner.run(target, args, options),
+      };
+      const pool = open({ size: 1, runner: flaky });
+      await rejection(look(pool, await request(newKey(), one, baseSha)));
+      hollow = false;
+
+      const next = ran(await look(pool, await request(newKey(), two, baseSha)));
+
+      expect(next.evicted).toBeNull();
     });
 
     it('never evicts a slot a check is still using', async () => {
@@ -468,24 +584,25 @@ describe('worktree pool', () => {
       expect(existsSync(first.path)).toBe(false);
     });
 
-    it('trims slots a larger pool left behind to the new size', async () => {
+    it('trims slots a larger pool left behind, keeping the most recently used', async () => {
       const commits = ['one', 'two'].map((name, i) =>
         commitOn(name, baseSha, () => write(dir, `src/f${String(i)}.ts`, `${name}\n`)),
       );
       const keys = commits.map(() => newKey());
       const wide = open({ size: 2 });
-      const older = ran(await look(wide, await request(keys[0]!, commits[0]!, baseSha))).value;
-      const newer = ran(await look(wide, await request(keys[1]!, commits[1]!, baseSha))).value;
-      // Recency survives a restart only through the disk, at filesystem
-      // resolution, so the two uses are made unambiguous there.
-      execFileSync('touch', ['-t', '202001010000', join(older.repo.gitDir, 'index')]);
+      const earlier = ran(await look(wide, await request(keys[0]!, commits[0]!, baseSha))).value;
+      const later = ran(await look(wide, await request(keys[1]!, commits[1]!, baseSha))).value;
+      // Recency survives a restart only through the disk. The slot filled
+      // later is made the one used least recently, so an order read from
+      // creation rather than from use keeps the wrong one.
+      execFileSync('touch', ['-t', '202001010000', join(later.repo.gitDir, 'index')]);
 
       const narrow = open({ size: 1 });
-      const again = ran(await look(narrow, await request(keys[1]!, commits[1]!, baseSha)));
+      const again = ran(await look(narrow, await request(keys[0]!, commits[0]!, baseSha)));
 
       expect(again.fill).toBe('delta');
-      expect(existsSync(older.path)).toBe(false);
-      expect(existsSync(newer.path)).toBe(true);
+      expect(existsSync(later.path)).toBe(false);
+      expect(existsSync(earlier.path)).toBe(true);
       expect(adminDirs()).toHaveLength(1);
     });
   });
@@ -502,6 +619,35 @@ describe('worktree pool', () => {
       expect(again.fill).toBe('delta');
       expect(again.value.path).toBe(slot.path);
       expect(readFileSync(join(slot.path, 'tsconfig.tsbuildinfo'), 'utf8')).toBe('state');
+    });
+
+    it('forgets a slot whose directory was removed by hand', async () => {
+      const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
+      const gone = ran(await look(open(), await request(newKey(), a, baseSha))).value;
+      rmSync(gone.path, { recursive: true, force: true });
+
+      await look(open(), await request(newKey(), a, baseSha));
+
+      expect(adminDirs()).not.toContain(gone.path.split('/').pop());
+      expect(adminDirs()).toHaveLength(1);
+    });
+
+    it('opens once, however many checks it serves', async () => {
+      const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
+      const calls: string[][] = [];
+      const counting: GitRunner = {
+        run: (target, args, options) => {
+          calls.push([...args]);
+          return runner.run(target, args, options);
+        },
+      };
+      const pool = open({ runner: counting });
+      const slotRequest = await request(newKey(), a, baseSha);
+
+      await look(pool, slotRequest);
+      await look(pool, slotRequest);
+
+      expect(calls.filter((argv) => argv[0] === 'worktree' && argv[1] === 'prune')).toHaveLength(1);
     });
 
     it('clears out anything in the pool directory that is not a slot', async () => {
@@ -574,8 +720,11 @@ describe('worktree pool', () => {
       child.kill('SIGKILL');
       await new Promise((resolve) => child.on('exit', resolve));
       expect(existsSync(lock)).toBe(true);
+      // `reset` locks `HEAD` too, and a kill between the two leaves that one.
+      writeFileSync(join(slot.repo.gitDir, 'HEAD.lock'), '');
 
       assertRepaired(slot, await look(pool, next));
+      expect(existsSync(join(slot.repo.gitDir, 'HEAD.lock'))).toBe(false);
       expect(existsSync(lock)).toBe(false);
       expect(records.some((record) => record.msg === 'stale lock removed from pool slot')).toBe(
         true,
@@ -608,6 +757,34 @@ describe('worktree pool', () => {
       expect(again.fill).toBe('cold');
       expect(gitIn(slot.path, 'rev-parse', 'HEAD').trim()).toBe(again.value.commitSha);
       expect(adminDirs()).toHaveLength(1);
+    });
+
+    it('fills again a slot git and the pool disagree about', async () => {
+      const corruptions: [string, (slot: PoolSlot) => void][] = [
+        [
+          'a checkout naming another git dir',
+          (slot) => writeFileSync(join(slot.path, '.git'), `gitdir: ${join(base, 'elsewhere')}\n`),
+        ],
+        [
+          'an administrative dir naming another checkout',
+          (slot) =>
+            writeFileSync(join(slot.repo.gitDir, 'gitdir'), `${join(base, 'elsewhere', '.git')}\n`),
+        ],
+        ['an administrative dir with no HEAD', (slot) => rmSync(join(slot.repo.gitDir, 'HEAD'))],
+      ];
+      mkdirSync(join(base, 'elsewhere'));
+      for (const [label, corrupt] of corruptions) {
+        const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', `${label}\n`));
+        const key = newKey();
+        const pool = open();
+        const slot = ran(await look(pool, await request(key, a, baseSha))).value;
+        corrupt(slot);
+
+        const again = ran(await look(pool, await request(key, a, baseSha)));
+
+        expect(again.fill, label).toBe('cold');
+        expect(gitIn(slot.path, 'status', '--porcelain'), label).toBe('');
+      }
     });
 
     it('fills again a slot whose add was interrupted', async () => {
@@ -774,13 +951,24 @@ describe('worktree pool', () => {
       expect(existsSync(poolDir())).toBe(false);
     });
 
-    it('refuses a commit that is not an object id', async () => {
+    it('refuses an id that is not an object id before creating anything', async () => {
       const one = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'one\n'));
       const slotRequest = await request(newKey(), one, baseSha);
+      const flag = '--output=/tmp/x';
+      const malformed: SlotRequest[] = [
+        { ...slotRequest, commitA: flag },
+        { ...slotRequest, commitB: flag },
+        { ...slotRequest, dependencyTreeOid: flag },
+        { ...slotRequest, merged: { ...slotRequest.merged, treeOid: flag } },
+      ];
 
-      const error = await rejection(look(open(), { ...slotRequest, commitB: '--output=/tmp/x' }));
-
-      expect(error.code).toBe('GIT_COMMAND_REFUSED');
+      for (const bad of malformed) {
+        expect((await rejection(look(open(), bad))).code).toBe('GIT_COMMAND_REFUSED');
+      }
+      expect(existsSync(poolDir())).toBe(false);
+      expect((await rejection(dependencyDrift(shadow, runner, flag, treeOf(baseSha)))).code).toBe(
+        'GIT_COMMAND_REFUSED',
+      );
     });
 
     it('will only open over the shadow ensureShadow put at this data dir', async () => {
@@ -798,19 +986,30 @@ describe('worktree pool', () => {
           repoId,
         });
 
-      for (const attempt of [asShadow, elsewhere, forged]) {
+      const notBare = (): WorktreePool =>
+        createWorktreePool(
+          { ...shadow, gitDir: join(shadow.gitDir, 'worktrees', 'x') },
+          { runner, dataDir, repoId },
+        );
+
+      for (const attempt of [asShadow, elsewhere, forged, notBare]) {
         expect(attempt).toThrow(expect.objectContaining({ code: 'GIT_COMMAND_REFUSED' }));
       }
     });
 
-    it('refuses a repository id that is not one, before it becomes a path', () => {
-      // `..` would put the pool at the data dir itself, where everything that
-      // is not a slot is cleared out on the first check.
-      for (const id of ['..', '', 'not-a-ulid']) {
-        expect(() => createWorktreePool(shadow, { runner, dataDir, repoId: id as RepoId })).toThrow(
-          expect.objectContaining({ code: 'GIT_COMMAND_REFUSED' }),
-        );
-      }
+    it('refuses a repository id that is not a ULID, before it becomes a path', async () => {
+      // A path-safe id that is not a ULID, with a real shadow made for it, so
+      // the id is the only thing wrong. `..` is what this stops: the pool
+      // would be the data dir itself, cleared of everything that is not a slot.
+      const odd = 'not-a-ulid' as RepoId;
+      const oddShadow = await ensureShadow(
+        { kind: 'user', rootPath: dir, gitDir: join(dir, '.git') },
+        { runner, dataDir, repoId: odd },
+      );
+
+      expect(() => createWorktreePool(oddShadow, { runner, dataDir, repoId: odd })).toThrow(
+        expect.objectContaining({ code: 'GIT_COMMAND_REFUSED' }),
+      );
     });
 
     it('does not take git at its word when an add registers no slot', async () => {
