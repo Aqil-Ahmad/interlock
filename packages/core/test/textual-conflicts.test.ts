@@ -32,11 +32,12 @@ import { ensureShadow } from '../src/git/shadow.js';
 import {
   MAX_EXCERPT_LINES,
   MAX_FINDINGS_PER_RUN,
+  MAX_SPANS_PER_SIDE,
   classifyTextualConflicts,
   textualFindingKey,
 } from '../src/merge/conflict-classifier.js';
 import { speculativeMerge } from '../src/merge/speculative-merge.js';
-import type { SpeculativeMergeRequest } from '../src/merge/speculative-merge.js';
+import type { ConflictStage, SpeculativeMergeRequest } from '../src/merge/speculative-merge.js';
 import { TEXTUAL_FIXTURES } from './support/textual-fixtures.js';
 import type { BranchChange } from './support/textual-fixtures.js';
 
@@ -219,6 +220,9 @@ describe('textual conflicts', () => {
         commitB: request.commitB,
         path: expected.path,
       });
+      // Tokens only: the `Auto-merging` notes beside them are not conflicts.
+      expect(provenance.conflictTypes.length).toBeGreaterThan(0);
+      expect(provenance.conflictTypes.every((t) => t.startsWith('CONFLICT ('))).toBe(true);
       expect(provenance.sideA?.path ?? null).toBe(expected.pathA);
       expect(provenance.sideB?.path ?? null).toBe(expected.pathB);
 
@@ -550,6 +554,192 @@ describe('textual conflicts', () => {
     });
   });
 
+  describe('stage sets git does not produce', () => {
+    /**
+     * Each starts from a real merge and changes one thing about its stages, so
+     * it passes every check but the one it is aimed at.
+     */
+    const cases: readonly {
+      name: string;
+      setup: () => void;
+      one: () => void;
+      two: () => void;
+      bend: (stages: readonly ConflictStage[]) => ConflictStage[];
+    }[] = [
+      {
+        name: 'a modify/delete with no base',
+        setup: () => write('f.txt', 'a\n'),
+        one: () => write('f.txt', 'A\n'),
+        two: () => git('rm', '-q', 'f.txt'),
+        bend: (stages) => stages.filter((s) => s.stage !== 1),
+      },
+      {
+        name: 'a modify/delete with both sides',
+        setup: () => write('f.txt', 'a\n'),
+        one: () => write('f.txt', 'A\n'),
+        two: () => git('rm', '-q', 'f.txt'),
+        bend: (stages) => [...stages, { ...stages.find((s) => s.stage === 2)!, stage: 3 }],
+      },
+      {
+        name: 'a rename/delete with no base',
+        setup: () => write('f.txt', 'one\ntwo\nthree\nfour\n'),
+        one: () => git('mv', 'f.txt', 'g.txt'),
+        two: () => git('rm', '-q', 'f.txt'),
+        bend: (stages) => stages.filter((s) => s.stage !== 1),
+      },
+      {
+        name: 'a rename/delete with both sides',
+        setup: () => write('f.txt', 'one\ntwo\nthree\nfour\n'),
+        one: () => git('mv', 'f.txt', 'g.txt'),
+        two: () => git('rm', '-q', 'f.txt'),
+        bend: (stages) => [...stages, { ...stages.find((s) => s.stage === 2)!, stage: 3 }],
+      },
+      {
+        name: 'a content conflict missing a side',
+        setup: () => write('f.txt', 'a\n'),
+        one: () => write('f.txt', 'A\n'),
+        two: () => write('f.txt', 'B\n'),
+        bend: (stages) => stages.filter((s) => s.stage !== 3),
+      },
+    ];
+
+    it.each(cases)('leave $name unclassified', async ({ setup, one, two, bend }) => {
+      const request = await pair(setup, one, two);
+      const ctx = await context(request);
+      const real = await textualAnalyzer.analyze(ctx);
+      expect(real.verdict).toBe('findings');
+
+      const bent = { ...ctx, merged: { ...ctx.merged, stages: bend(ctx.merged.stages) } };
+      expect(await textualAnalyzer.analyze(bent)).toEqual({ verdict: 'clean', findings: [] });
+    });
+  });
+
+  describe('a blob at its recorded path that is also copied elsewhere', () => {
+    it('is taken at the recorded path', async () => {
+      const request = await pair(
+        () => {
+          write('f.txt', 'a\n');
+          write('g.txt', 'a\n');
+        },
+        () => {
+          write('f.txt', 'A\n');
+          write('g.txt', 'A\n');
+        },
+        () => {
+          write('f.txt', 'B\n');
+          write('g.txt', 'B\n');
+        },
+      );
+
+      const { findings } = await analyze(request);
+
+      expect(findings).toHaveLength(2);
+      for (const finding of findings) {
+        const path = provenanceOf(finding).path;
+        expect(spansOf(finding, branchA)).toMatchObject([{ path, startLine: 1 }]);
+        expect(spansOf(finding, branchB)).toMatchObject([{ path, startLine: 1 }]);
+      }
+    });
+  });
+
+  describe('spans past the bound', () => {
+    /** `count` changed lines, each with five untouched lines around it. */
+    const spaced = (count: number, tag: (i: number) => string): string =>
+      Array.from({ length: count }, (_, i) => `${tag(i)}\n1\n2\n3\n4\n5\n`).join('');
+
+    it('are counted in the description, for regions', async () => {
+      const request = await pair(
+        () =>
+          write(
+            'f.txt',
+            spaced(MAX_SPANS_PER_SIDE + 1, (i) => `x${i}`),
+          ),
+        () =>
+          write(
+            'f.txt',
+            spaced(MAX_SPANS_PER_SIDE + 1, (i) => `a${i}`),
+          ),
+        () =>
+          write(
+            'f.txt',
+            spaced(MAX_SPANS_PER_SIDE + 1, (i) => `b${i}`),
+          ),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(spansOf(finding!, branchA)).toHaveLength(MAX_SPANS_PER_SIDE);
+      expect(spansOf(finding!, branchB)).toHaveLength(MAX_SPANS_PER_SIDE);
+      expect(finding!.description).toContain(' 1 further region has no span.');
+    });
+
+    it('are counted in the description, for a deleted file’s changes', async () => {
+      const request = await pair(
+        () =>
+          write(
+            'f.txt',
+            spaced(MAX_SPANS_PER_SIDE + 2, (i) => `x${i}`),
+          ),
+        () =>
+          write(
+            'f.txt',
+            spaced(MAX_SPANS_PER_SIDE + 2, (i) => `a${i}`),
+          ),
+        () => git('rm', '-q', 'f.txt'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('delete-vs-modify');
+      expect(spansOf(finding!, branchA)).toHaveLength(MAX_SPANS_PER_SIDE);
+      expect(finding!.description).toContain(' 2 further regions have no span.');
+    });
+
+    it('are all given when there are no more than the bound', async () => {
+      const request = await pair(
+        () =>
+          write(
+            'f.txt',
+            spaced(2, (i) => `x${i}`),
+          ),
+        () =>
+          write(
+            'f.txt',
+            spaced(2, (i) => `a${i}`),
+          ),
+        () =>
+          write(
+            'f.txt',
+            spaced(2, (i) => `b${i}`),
+          ),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(spansOf(finding!, branchA)).toHaveLength(2);
+      expect(finding!.description).not.toContain('further');
+    });
+  });
+
+  describe('a region too large to align against its base', () => {
+    it('says the weaker thing, and still places both sides', async () => {
+      const block = (tag: string): string =>
+        Array.from({ length: 1001 }, (_, i) => `${tag} ${i}`).join('\n');
+      const request = await pair(
+        () => write('f.txt', 'start\nx\nend\n'),
+        () => write('f.txt', `start\n${block('a')}\nend\n`),
+        () => write('f.txt', `start\n${block('b')}\nend\n`),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('adjacent-addition');
+      expect(finding!.severity).toBe('low');
+      expect(spansOf(finding!, branchA)).toMatchObject([{ startLine: 2, endLine: 1002 }]);
+      expect(spansOf(finding!, branchB)).toMatchObject([{ startLine: 2, endLine: 1002 }]);
+    });
+  });
+
   describe('identity', () => {
     const run = async (
       request: SpeculativeMergeRequest,
@@ -605,9 +795,22 @@ describe('textual conflicts', () => {
       expect(textualFindingKey(overlapping)).not.toBe(textualFindingKey(adjacent));
     });
 
-    it('is null for a Finding that is not textual', () => {
-      const finding = { kind: 'typecheck', evidence: [] } as unknown as Finding;
-      expect(textualFindingKey(finding)).toBeNull();
+    it('is null for a Finding that is not textual, or carries no merge', async () => {
+      const request = await pair(
+        () => write('f.txt', 'a\n'),
+        () => write('f.txt', 'A\n'),
+        () => write('f.txt', 'B\n'),
+      );
+      const finding = await run(request, branchA, branchB);
+
+      expect(textualFindingKey(finding)).not.toBeNull();
+      expect(textualFindingKey({ ...finding, kind: 'typecheck' })).toBeNull();
+      expect(
+        textualFindingKey({
+          ...finding,
+          evidence: finding.evidence.filter((e) => e.type === 'span'),
+        }),
+      ).toBeNull();
     });
   });
 
