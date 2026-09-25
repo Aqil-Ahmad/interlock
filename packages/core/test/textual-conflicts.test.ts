@@ -614,6 +614,165 @@ describe('textual conflicts', () => {
     });
   });
 
+  describe('one side that is not a regular file', () => {
+    it.each([2, 3] as const)(
+      'leaves a content conflict unplaced when stage %i is not',
+      async (stage) => {
+        const request = await pair(
+          () => write('f.txt', 'a\n'),
+          () => write('f.txt', 'A\n'),
+          () => write('f.txt', 'B\n'),
+        );
+        const ctx = await context(request);
+        const stages = ctx.merged.stages.map((s) =>
+          s.stage === stage ? { ...s, mode: '120000' } : s,
+        );
+
+        const outcome = await textualAnalyzer.analyze({
+          ...ctx,
+          merged: { ...ctx.merged, stages },
+        });
+
+        expect(outcome.findings[0]!.rule).toBe('overlapping-edit');
+        expect(outcome.findings[0]!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+      },
+    );
+  });
+
+  describe('a deleted file with no lines to read', () => {
+    it('gives no span when the file is binary', async () => {
+      const request = await pair(
+        () => write('img.bin', Buffer.from([0, 1, 2, 3, 10, 4])),
+        () => write('img.bin', Buffer.from([0, 1, 2, 9, 10, 4])),
+        () => git('rm', '-q', 'img.bin'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('delete-vs-modify');
+      expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+    });
+
+    it('gives no span when only the base was binary', async () => {
+      const request = await pair(
+        () => write('f.dat', Buffer.from([0, 1, 10, 2])),
+        () => write('f.dat', 'now text\n'),
+        () => git('rm', '-q', 'f.dat'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('delete-vs-modify');
+      expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+    });
+
+    it('gives no span when the file is a symlink', async () => {
+      const request = await pair(
+        () => symlinkSync('target-0', join(dir, 'link')),
+        () => {
+          unlinkSync(join(dir, 'link'));
+          symlinkSync('target-a', join(dir, 'link'));
+        },
+        () => git('rm', '-q', 'link'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('delete-vs-modify');
+      expect(provenanceOf(finding!).sideA).toMatchObject({ mode: '120000' });
+      expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+    });
+  });
+
+  describe('a deleted file whose type changed on the other side', () => {
+    it('gives no span when a file became a symlink', async () => {
+      const request = await pair(
+        () => write('f', 'line\n'),
+        () => {
+          unlinkSync(join(dir, 'f'));
+          symlinkSync('target', join(dir, 'f'));
+        },
+        () => git('rm', '-q', 'f'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('delete-vs-modify');
+      expect(provenanceOf(finding!).sideA).toMatchObject({ mode: '120000' });
+      expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+    });
+
+    it('gives no span when a symlink became a file', async () => {
+      const request = await pair(
+        () => symlinkSync('target', join(dir, 'f')),
+        () => {
+          unlinkSync(join(dir, 'f'));
+          write('f', 'target\nmore\n');
+        },
+        () => git('rm', '-q', 'f'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('delete-vs-modify');
+      expect(provenanceOf(finding!).base).toMatchObject({ mode: '120000' });
+      expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+    });
+
+    it('gives no span when text was rewritten as binary', async () => {
+      const request = await pair(
+        () => write('f.dat', 'text\n'),
+        () => write('f.dat', Buffer.from([0, 1, 10, 2])),
+        () => git('rm', '-q', 'f.dat'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('delete-vs-modify');
+      expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+    });
+  });
+
+  describe('ordering', () => {
+    it('examines a text conflict that may be high ahead of add/adds at the bound', async () => {
+      const added = Array.from({ length: MAX_FINDINGS_PER_RUN }, (_, i) => `new${i}.txt`);
+      const request = await pair(
+        () => write('zz.txt', 'a\n'),
+        () => {
+          for (const file of added) write(file, 'one\n');
+          write('zz.txt', 'A\n');
+        },
+        () => {
+          for (const file of added) write(file, 'two\n');
+          write('zz.txt', 'B\n');
+        },
+      );
+
+      const { findings } = await analyze(request);
+
+      expect(findings).toHaveLength(MAX_FINDINGS_PER_RUN);
+      expect(findings[0]!.rule).toBe('overlapping-edit');
+    });
+
+    it('reports by final severity, not by the order paths were examined in', async () => {
+      const request = await pair(
+        () => write('a.txt', 'x\ny\n'),
+        () => {
+          write('a.txt', 'X\ny\n');
+          write('b.txt', 'one\n');
+        },
+        () => {
+          write('a.txt', 'x\nY\n');
+          write('b.txt', 'two\n');
+        },
+      );
+
+      const { findings } = await analyze(request);
+
+      expect(findings.map((f) => f.rule)).toEqual(['add-add', 'adjacent-addition']);
+    });
+  });
+
   describe('a blob at its recorded path that is also copied elsewhere', () => {
     it('is taken at the recorded path', async () => {
       const request = await pair(

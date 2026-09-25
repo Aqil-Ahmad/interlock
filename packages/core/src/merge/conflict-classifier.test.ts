@@ -48,8 +48,9 @@ describe('regionOverlaps', () => {
 
   it('cannot tell without a base, or with a side too far from it to align', () => {
     expect(regionOverlaps(region(null, ['a'], ['b']))).toBeNull();
-    expect(regionOverlaps(region(huge('x'), huge('a'), ['b']))).toBeNull();
-    expect(regionOverlaps(region(huge('x'), ['b'], huge('a')))).toBeNull();
+    // One side at a time, the other aligning easily.
+    expect(regionOverlaps(region(['x'], huge('a'), ['b']))).toBeNull();
+    expect(regionOverlaps(region(['x'], ['b'], huge('a')))).toBeNull();
   });
 });
 
@@ -74,6 +75,7 @@ describe('placeRegions', () => {
     const regions = [at(['o', 'p'], ['t'])];
     expect(placeRegions(merged, regions, 'ours', ['k', 'o', 'mid', 'p', 'k2'])).toEqual([null]);
     expect(placeRegions(merged, regions, 'ours', ['k', 'q', 'p', 'k2'])).toEqual([null]);
+    expect(placeRegions(merged, [at(['o'], ['t'])], 'ours', ['k', 'q', 'k2'])).toEqual([null]);
   });
 
   it('places an empty side between neighbours, and only between neighbours', () => {
@@ -81,6 +83,12 @@ describe('placeRegions', () => {
     expect(placeRegions(merged, regions, 'ours', ['k', 'k2'])).toEqual([[1, 1]]);
     // Something of the other side's sits between them: no single position.
     expect(placeRegions(merged, regions, 'ours', ['k', 'other', 'k2'])).toEqual([null]);
+  });
+
+  it('places an empty side first when nothing before it is in the file', () => {
+    // `k` is the other side's clean addition, absent from this side.
+    expect(placeRegions(merged, [at([], ['t'])], 'ours', ['k2'])).toEqual([[0, 0]]);
+    expect(placeRegions(merged, [at([], ['t'])], 'ours', ['z', 'k2'])).toEqual([null]);
   });
 
   it('places an empty side at either end of the file', () => {

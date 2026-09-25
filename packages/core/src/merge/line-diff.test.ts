@@ -55,6 +55,16 @@ describe('alignLines', () => {
     }
   });
 
+  it('aligns a pure insertion or deletion whatever its size', () => {
+    const many = Array.from({ length: 50 }, (_, i) => `n${i}`);
+    expect([...alignLines(['a', 'b'], ['a', ...many, 'b'], 10)!]).toEqual([0, 51]);
+    expect([...alignLines(['a', ...many, 'b'], ['a', 'b'], 10)!]).toEqual([
+      0,
+      ...many.map(() => -1),
+      1,
+    ]);
+  });
+
   it('gives up past the edit bound, and not at it', () => {
     // Two lines replaced by two others: four edits once the shared ends are set aside.
     const a = ['s', 'a1', 'a2', 'e'];

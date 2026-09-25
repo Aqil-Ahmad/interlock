@@ -113,6 +113,9 @@ const TYPE_BINARY = 'CONFLICT (binary)';
 const TYPE_MODIFY_DELETE = 'CONFLICT (modify/delete)';
 const TYPE_RENAME_DELETE = 'CONFLICT (rename/delete)';
 
+/** How far git looks for a NUL before calling content binary. */
+const BINARY_SNIFF_LENGTH = 8000;
+
 /** Modes whose blob is text a line can be read from; a symlink holds a target. */
 const REGULAR_MODES: ReadonlySet<string> = new Set(['100644', '100755']);
 
@@ -406,10 +409,12 @@ async function examine(
     let spans: SpanEvidence[] = [];
     let omitted = 0;
     if (isText(sides.base) && isText(survivor) && survivor.path !== null) {
-      const hunks = changedHunks(
-        await reader.lines(sides.base.oid),
-        await reader.lines(survivor.oid),
-      );
+      const baseText = await reader.text(sides.base.oid);
+      const survivorText = await reader.text(survivor.oid);
+      const hunks =
+        looksBinary(baseText) || looksBinary(survivorText)
+          ? null
+          : changedHunks(baseText.split('\n'), survivorText.split('\n'));
       if (hunks !== null) {
         const branch = deletedByA ? branchB : branchA;
         const kept = hunks.slice(0, MAX_SPANS_PER_SIDE);
@@ -432,10 +437,9 @@ async function examine(
   }
 
   const mergedOid = (await reader.list(request.merged.treeOid, [conflict.path])).get(conflict.path);
+  // Both sides are regular files here, so the merged entry is one too.
   const regions =
-    mergedOid !== undefined && REGULAR_MODES.has(mergedOid.mode)
-      ? scanConflictRegions(await reader.text(mergedOid.oid))
-      : [];
+    mergedOid === undefined ? [] : scanConflictRegions(await reader.text(mergedOid.oid));
   const cls: TextualConflictClass =
     shape.kind === 'add-add'
       ? 'add-add'
@@ -451,11 +455,14 @@ async function examine(
     which: 'ours' | 'theirs',
     branch: BranchRefId,
   ): Promise<SpanEvidence[]> => {
-    if (!isText(side) || side.path === null || regions.length === 0) return [];
+    // Both sides exist and are regular files, or the shape would not be text;
+    // a side can still lack a path, when its blob sits at more than one.
+    const path = side?.path ?? null;
+    if (side === null || path === null || regions.length === 0) return [];
     const lines = await reader.lines(side.oid);
     const placed = placeRegions(mergedLines, regions, which, lines).slice(0, MAX_SPANS_PER_SIDE);
     const found = placed.filter((range): range is LineRange => range !== null);
-    return spansFor(branch, side.path, side.oid, found, reader);
+    return spansFor(branch, path, side.oid, found, reader);
   };
 
   return {
@@ -468,6 +475,18 @@ async function examine(
 
 function isText(side: MergeConflictSide | null): side is MergeConflictSide {
   return side !== null && REGULAR_MODES.has(side.mode);
+}
+
+/**
+ * git's own test for binary content: a NUL in the first 8000 bytes.
+ *
+ * Only where git gives no verdict. A content conflict comes with
+ * `CONFLICT (binary)` when it is one, and that is the authority; a
+ * modify/delete or rename/delete says nothing either way, and a span over a
+ * binary file's "lines" would be invented.
+ */
+function looksBinary(text: string): boolean {
+  return text.slice(0, BINARY_SNIFF_LENGTH).includes('\0');
 }
 
 /** Zero-based, half-open line range within one side's file. */
@@ -541,8 +560,12 @@ export function placeRegions(
       return [first, first + count];
     }
     const before = start === 0 ? -1 : match[start - 1]!;
-    const after = start === resolved.length ? sideLines.length : match[start]!;
-    if ((start > 0 && before === -1) || after === -1 || after !== before + 1) return null;
+    // Past the last line, the region is at the end of the file.
+    const after = match[start] ?? sideLines.length;
+    // Matches only increase, so an unmatched line before is fine exactly when
+    // the line after is the file's first — nothing before it exists here. An
+    // unmatched line after never passes: -1 is no line's successor.
+    if (after !== before + 1) return null;
     return [after, after];
   });
 }
@@ -756,8 +779,8 @@ class BlobReader {
 function parseListing(stdout: string): [string, TreeEntry][] {
   const entries: [string, TreeEntry][] = [];
   for (const record of stdout.split('\0')) {
+    // The empty record after the last terminator has no tab, and no type.
     const tab = record.indexOf('\t');
-    if (tab === -1) continue;
     const [mode = '', type, oid = ''] = record.slice(0, tab).split(' ');
     if (type !== 'blob') continue;
     entries.push([record.slice(tab + 1), { mode, oid }]);
