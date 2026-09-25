@@ -11,8 +11,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isInterlockError, ulid } from '@interlock/shared';
-import type { SnapshotId } from '@interlock/shared';
+import { isInterlockError, makePairKey, ulid } from '@interlock/shared';
+import type { BranchRefId, SnapshotId } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   captureDirtyState,
@@ -28,6 +28,7 @@ import {
 } from '../src/index.js';
 import type { GitRunner, UserRepo } from '../src/index.js';
 import { ensureShadow } from '../src/git/shadow.js';
+import { createWorktreePool } from '../src/git/worktree-pool.js';
 import { captureState, describeDiff, diffState, isClean } from './support/repo-state.js';
 import type { RepoState } from './support/repo-state.js';
 
@@ -88,7 +89,9 @@ describe('user repositories are never modified', () => {
    * whole-tree capture produced, and both write objects. The change set runs
    * against the snapshot as well as against the head.
    */
-  const cycle = async (root: string): Promise<{ diffed: number; excused: number }> => {
+  const cycle = async (
+    root: string,
+  ): Promise<{ diffed: number; excused: number; pooled: number }> => {
     const handle: UserRepo = await openUserRepo(root, { runner });
     const repo = await describeRepo(handle, { runner, dataDir });
     // Reads the user repository over git's own local transport, which is the
@@ -96,8 +99,12 @@ describe('user repositories are never modified', () => {
     const shadow = await ensureShadow(handle, { runner, dataDir, repoId: repo.id });
     const branches = await listBranchRefs(handle, repo.id, { runner });
     expect(branches.length).toBeGreaterThan(0);
+    // One slot, so a second pair evicts the first: fill, update and eviction
+    // all run inside the shadow while the user's repository is under the hash.
+    const pool = createWorktreePool(shadow, { runner, dataDir, repoId: repo.id, size: 1 });
     let diffed = 0;
     let excused = 0;
+    let pooled = 0;
 
     for (const branch of branches) {
       let snapshot: { id: SnapshotId; treeOid: string } | undefined;
@@ -161,20 +168,32 @@ describe('user repositories are never modified', () => {
         '--quiet',
         `${repo.defaultBranch}^{commit}`,
       ]);
-      await speculativeMerge(
-        {
-          shadow,
-          commitA: snapshotCommit ?? branch.headSha,
-          commitB: target.stdout.trim(),
-          mergeBaseSha,
-        },
-        { runner },
-      );
+      const commitA = snapshotCommit ?? branch.headSha;
+      const commitB = target.stdout.trim();
+      const merged = await speculativeMerge({ shadow, commitA, commitB, mergeBaseSha }, { runner });
+
+      // A clean pair reaches a pool slot: filled, then updated by delta. The
+      // reset that does it is the one mutating command in the whole cycle, and
+      // it runs in the shadow's worktree, never this repository's.
+      if (merged.clean) {
+        const request = {
+          key: makePairKey(branch.id, ulid<BranchRefId>()),
+          commitA,
+          commitB,
+          merged,
+          dependencyTreeOid: merged.treeOid,
+        };
+        for (const expected of ['cold', 'delta']) {
+          const outcome = await pool.withSlot(request, () => Promise.resolve());
+          expect(outcome.kind === 'ran' && outcome.fill).toBe(expected);
+        }
+        pooled += 1;
+      }
 
       diffed += 1;
     }
 
-    return { diffed, excused };
+    return { diffed, excused, pooled };
   };
 
   /** Capture, run, capture, and fail with the diagnosis rather than a boolean. */
@@ -184,6 +203,8 @@ describe('user repositories are never modified', () => {
     // Every fixture here has a default branch that resolves, so a cycle that
     // diffed nothing exercised half the surface it claims to and must not pass.
     expect(outcome.diffed).toBeGreaterThan(0);
+    // And one clean pair at least, or the pool was never exercised.
+    expect(outcome.pooled).toBeGreaterThan(0);
     for (const root of roots) {
       const after = captureState(root);
       const diff = diffState(before.get(root)!, after);
@@ -471,7 +492,7 @@ describe('user repositories are never modified', () => {
     const after = captureState(root);
     const diff = diffState(before, after);
     expect(isClean(diff), describeDiff(diff, before, after)).toBe(true);
-    expect(outcome).toStrictEqual({ diffed: 0, excused: 1 });
+    expect(outcome).toStrictEqual({ diffed: 0, excused: 1, pooled: 0 });
   });
 
   it('holds no lock files in the user repo after the run', async () => {

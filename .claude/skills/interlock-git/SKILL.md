@@ -190,6 +190,22 @@ magnitude more than the merge, and unaffordable per check.
 - `.tsbuildinfo` stays in the slot between checks. That persistence is the
   entire reason continuous checking is affordable, so never clear a slot as a
   "cleanup" step.
+- Fill a new slot with `worktree add --detach --no-checkout` and then the same
+  `reset --hard`. A plain `add` checks out in a child process, and killing
+  `add` — a runner timeout does — leaves that child writing into the slot with
+  nothing left to stop it.
+- A slot is a worktree, so git gives it a `HEAD` reflog although the shadow is
+  bare, and every throwaway commit stays reachable for 90 days. The shadow
+  sets `core.logAllRefUpdates=false`. A slot's `HEAD` is a root for `prune`;
+  `ORIG_HEAD` is not.
+- `SIGTERM` lets git remove its own `index.lock`; `SIGKILL` leaves it, and every
+  later command in that slot fails on it. An interrupted `add` leaves a
+  `locked` file that `worktree remove` refuses without `--force --force` and
+  `worktree prune` skips.
+- The first update after a cold fill re-reads every file written in the same
+  second as the index: git compares timestamps at one-second resolution and
+  cannot trust those. On a 6,500-file tree that is 0.1–2.8 s, about the fill
+  again. Time the updates after it, never the first one alone.
 
 The symlink is only valid while dependencies match. If either branch changed
 `package.json` or the lockfile, that pair needs a slower path with a real
