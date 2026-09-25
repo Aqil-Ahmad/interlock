@@ -4,6 +4,14 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-26 — review of the classifier: four taken
+
+- **Taken — a conflicted merge could come back `clean`.** Confirmed against real git: a merge whose only conflict was `rename/rename`, `file/directory` or `distinct modes` raised nothing, and the analyzer answered `clean` — the missing answer that reads as "no conflicts found". The earlier rule was right for a shape that fits no class and wrong about what to do then: git is certain these conflict. Anything no class covers, including a known token on stages that do not fit it, is now `other-conflict`: medium, no spans, git's tokens and each side's blob in the evidence. One Finding per git message, since a rename on both sides records three paths for one conflict. The tests that asserted the silence changed first, in their own commit.
+- **Discovered while doing it — identity moved with every commit for a file git moves aside.** `file/directory` and `distinct modes` record one side as `<path>~<commit>`, and a modify/delete on that name carried it as its path, so every snapshot would have minted a new Finding. A conflict is filed under the path it came from, read off git's own pairing of the two names in its message rather than off the shape of the name.
+- **Taken — `rename-vs-modify` is `rename-vs-delete`.** Its meaning had changed and its name had not; the rule string is stable across releases and nothing is stored yet, so renaming is free now and a migration later.
+- **Taken — only infrastructure is `infra-failure`.** The analyzer filed every `InterlockError` as one, including `GIT_COMMAND_REFUSED`, which only Interlock's own code can cause. It now keys on the error's `infra` flag — set for a failed, timed-out, unstartable or over-buffer git — and lets anything else through as the bug it is.
+- **Taken — blobs over 1 MiB are not read.** Up to four versions of fifty files were read whole, each up to the runner's 32 MB. Sizes come from `ls-tree -l` on the listings that already locate each blob, and from `cat-file -s` only for one no listing sized; a content conflict in an oversized file has no regions to read and is classed the weaker way, without spans.
+
 ## 2026-09-26 — textual conflict classification
 
 - **Rewrote the task before starting.** "Both spans" cannot hold for edit/delete — the deleting branch has no file; the Finding model had nowhere to name a merge base; git reports nothing at all for a rename against an edit elsewhere in the file; and the Fixture suite task writes to `eval/`, read-only to coding sessions. The fixtures are integration fixtures in `packages/core/test/support/textual-fixtures.ts`, each labelled with class, path, symbol and both spans, each with a negative twin, landed in a commit before the rule.

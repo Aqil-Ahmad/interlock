@@ -86,7 +86,11 @@ export interface MergeConflictEvidence {
   readonly mergeBaseSha: string;
   readonly commitA: string;
   readonly commitB: string;
-  /** The path git recorded the conflict under, which after a rename exists on one side only. */
+  /**
+   * The path the conflict is about: where git recorded it — after a rename, a
+   * path on one side only — or, for a file git moved aside to `<path>~<commit>`,
+   * the path it came from, since the aside name changes with every commit.
+   */
   readonly path: string;
   /** Verbatim, e.g. `CONFLICT (contents)`, `CONFLICT (modify/delete)`. */
   readonly conflictTypes: readonly string[];

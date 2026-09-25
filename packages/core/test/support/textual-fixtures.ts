@@ -227,7 +227,7 @@ export const TEXTUAL_FIXTURES: readonly TextualFixture[] = [
     two: { remove: ['util.ts'] },
     expected: {
       analyzer: 'textual',
-      class: 'rename-vs-modify',
+      class: 'rename-vs-delete',
       path: 'helpers.ts',
       symbol: 'Math.max',
       pathA: 'helpers.ts',

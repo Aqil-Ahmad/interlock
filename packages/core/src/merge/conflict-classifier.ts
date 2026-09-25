@@ -1,4 +1,4 @@
-import { SEVERITY_RANK, redact, ulid } from '@interlock/shared';
+import { InterlockError, SEVERITY_RANK, redact, ulid } from '@interlock/shared';
 import type {
   BranchRefId,
   Evidence,
@@ -18,6 +18,7 @@ import { scanConflictRegions } from './speculative-merge.js';
 import type {
   ConflictRegionLines,
   ConflictStage,
+  MergeMessage,
   SpeculativeMergeRequest,
   SpeculativeMergeResult,
 } from './speculative-merge.js';
@@ -46,9 +47,15 @@ export type TextualConflictClass =
   /** One side deleted a file the other modified. */
   | 'delete-vs-modify'
   /** One side renamed a file the other deleted. */
-  | 'rename-vs-modify'
+  | 'rename-vs-delete'
   /** Both sides added a file at the same path. */
-  | 'add-add';
+  | 'add-add'
+  /**
+   * Any other conflict git reports: a rename on both sides, a file against a
+   * directory or a symlink, a submodule. git is certain these conflict, so they
+   * are reported, without spans, rather than read as a clean merge.
+   */
+  | 'other-conflict';
 
 /**
  * Severity by class.
@@ -60,10 +67,12 @@ export type TextualConflictClass =
  *
  * - `overlapping-edit` — the same lines were written two ways; one version is
  *   lost unless someone reconciles them by hand.
- * - `delete-vs-modify`, `rename-vs-modify` — one side's work goes with the file
+ * - `delete-vs-modify`, `rename-vs-delete` — one side's work goes with the file
  *   the other deleted.
  * - `add-add` — both wrote the same file from nothing. Nothing that existed is
  *   lost, but the file has to be reconciled whole.
+ * - `other-conflict` — certain to need a person, and nothing narrower is known
+ *   about what it costs them; medium says exactly that much.
  * - `adjacent-addition` — both changed next to each other and neither touched
  *   the other's lines; keeping both is usually the resolution. Low, because
  *   every pair of branches that adds an import at the same place lands here, and
@@ -72,8 +81,9 @@ export type TextualConflictClass =
 export const SEVERITY_BY_CLASS: Readonly<Record<TextualConflictClass, Severity>> = {
   'overlapping-edit': 'high',
   'delete-vs-modify': 'high',
-  'rename-vs-modify': 'high',
+  'rename-vs-delete': 'high',
   'add-add': 'medium',
+  'other-conflict': 'medium',
   'adjacent-addition': 'low',
 };
 
@@ -97,6 +107,16 @@ export const MAX_SPANS_PER_SIDE = 10;
  */
 export const MAX_EXCERPT_LINES = 10;
 export const MAX_EXCERPT_CHARS = 600;
+
+/**
+ * A blob larger than this is not read, and gets no span.
+ *
+ * Up to four versions of up to fifty files are read per run, and the files that
+ * conflict most are lockfiles and generated code. Its regions unread, a content
+ * conflict in such a file is classed the weaker way, as anything else it cannot
+ * tell apart is.
+ */
+export const MAX_BLOB_BYTES = 1024 * 1024;
 
 /**
  * Past this many differing lines, a side is not aligned and gets no span.
@@ -123,8 +143,9 @@ const TITLES: Readonly<Record<TextualConflictClass, string>> = {
   'overlapping-edit': 'Both branches changed the same lines',
   'adjacent-addition': 'Both branches changed neighbouring lines',
   'delete-vs-modify': 'One branch deleted a file the other changed',
-  'rename-vs-modify': 'One branch deleted a file the other renamed',
+  'rename-vs-delete': 'One branch deleted a file the other renamed',
   'add-add': 'Both branches added the same file',
+  'other-conflict': 'The branches changed a file in ways git cannot combine',
 };
 
 const DESCRIPTIONS: Readonly<Record<TextualConflictClass, string>> = {
@@ -134,10 +155,12 @@ const DESCRIPTIONS: Readonly<Record<TextualConflictClass, string>> = {
     'git cannot merge the two branches: they changed the same region without changing a line in common, as when both add an import at one place. Keeping both is usually the resolution.',
   'delete-vs-modify':
     'git cannot merge the two branches: one deleted a file the other modified, so the modification goes with the file.',
-  'rename-vs-modify':
+  'rename-vs-delete':
     'git cannot merge the two branches: one renamed a file the other deleted, so whatever changed with the rename goes with the file.',
   'add-add':
     'git cannot merge the two branches: both created the same file independently, and it has to be reconciled whole.',
+  'other-conflict':
+    "git cannot merge the two branches, with a conflict no narrower class describes — a rename on both sides, a file against a directory or a symlink, a submodule. git's type for it is in the evidence.",
 };
 
 const RATIONALE =
@@ -161,8 +184,6 @@ export interface ClassifyOptions {
 export interface ClassifiedConflicts {
   /** Most severe first, and at most {@link MAX_FINDINGS_PER_RUN}. */
   readonly findings: readonly Finding[];
-  /** Conflict types seen on paths no class covers, e.g. `CONFLICT (rename/rename)`. */
-  readonly unclassified: readonly string[];
   /** Conflicted paths past the bound, examined for nothing. */
   readonly dropped: number;
 }
@@ -179,16 +200,18 @@ export async function classifyTextualConflicts(
   options: ClassifyOptions,
 ): Promise<ClassifiedConflicts> {
   const { merged } = request;
-  const unclassified = new Set<string>();
   const candidates: Candidate[] = [];
+  const uncovered: Conflict[] = [];
 
   for (const conflict of groupConflicts(merged)) {
     const shape = shapeOf(conflict);
-    if (shape === null) {
-      for (const type of conflict.types) unclassified.add(type);
-    } else {
-      candidates.push({ conflict, shape });
-    }
+    if (shape === null) uncovered.push(conflict);
+    else candidates.push({ conflict, shape });
+  }
+  // A conflicted merge never comes back as nothing: git is certain, and silence
+  // here would read as "no conflicts found".
+  for (const conflict of gatherUncovered(uncovered, merged)) {
+    candidates.push({ conflict, shape: { kind: 'class', class: 'other-conflict' } });
   }
 
   // Stable, so git's path order holds within a rank.
@@ -206,18 +229,14 @@ export async function classifyTextualConflicts(
   }
   findings.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
 
-  return {
-    findings,
-    unclassified: [...unclassified],
-    dropped: candidates.length - examined.length,
-  };
+  return { findings, dropped: candidates.length - examined.length };
 }
 
 /**
  * What makes two textual Findings the same finding, or null for any other.
  *
  * The pair, unordered — a conflict does not change with the order it was
- * merged in — the class, and the path git recorded the conflict under. Not the
+ * merged in — the class, and the path the conflict is about. Not the
  * span: it moves whenever either branch edits above the conflict, and a key that
  * moved with it would make a new finding on every poll while the old one went
  * stale beside it. Not the commits either, for the same reason. A class change
@@ -235,7 +254,14 @@ export function textualFindingKey(finding: Finding): string | null {
 // --- Structure ---------------------------------------------------------------
 
 interface Conflict {
+  /**
+   * The path the conflict is about. git's own, except for a file it moved aside
+   * to `<path>~<commit>`, which is filed under the path it was moved from: the
+   * aside name changes with every commit, and identity must not.
+   */
   readonly path: string;
+  /** The paths git recorded the conflict's stages under. */
+  readonly recorded: readonly string[];
   readonly base: ConflictStage | undefined;
   readonly ours: ConflictStage | undefined;
   readonly theirs: ConflictStage | undefined;
@@ -245,7 +271,10 @@ interface Conflict {
 
 /** What a path's stages and tokens say, before any blob is read. */
 type Shape =
-  | { readonly kind: 'class'; readonly class: 'delete-vs-modify' | 'rename-vs-modify' }
+  | {
+      readonly kind: 'class';
+      readonly class: 'delete-vs-modify' | 'rename-vs-delete' | 'other-conflict';
+    }
   | { readonly kind: 'add-add'; readonly text: boolean }
   /** Both sides changed a file the base had; the regions decide the class. */
   | { readonly kind: 'content'; readonly text: boolean };
@@ -257,8 +286,7 @@ interface Candidate {
 
 function groupConflicts(merged: SpeculativeMergeResult): Conflict[] {
   const types = new Map<string, Set<string>>();
-  for (const message of merged.messages) {
-    if (!message.type.startsWith('CONFLICT')) continue;
+  for (const message of conflictMessages(merged)) {
     for (const path of message.paths) {
       const set = types.get(path) ?? new Set<string>();
       set.add(message.type);
@@ -269,7 +297,8 @@ function groupConflicts(merged: SpeculativeMergeResult): Conflict[] {
     const stage = (n: 1 | 2 | 3): ConflictStage | undefined =>
       merged.stages.find((s) => s.path === path && s.stage === n);
     return {
-      path,
+      path: movedFrom(path, merged),
+      recorded: [path],
       base: stage(1),
       ours: stage(2),
       theirs: stage(3),
@@ -278,12 +307,63 @@ function groupConflicts(merged: SpeculativeMergeResult): Conflict[] {
   });
 }
 
+function conflictMessages(merged: SpeculativeMergeResult): MergeMessage[] {
+  return merged.messages.filter((message) => message.type.startsWith('CONFLICT'));
+}
+
+/**
+ * The path a moved-aside file came from, or the path itself.
+ *
+ * git names both in the message about the move — `d~<commit>` beside `d` — so
+ * the original is read off that pairing rather than off the shape of the name,
+ * which a real file can share.
+ */
+function movedFrom(path: string, merged: SpeculativeMergeResult): string {
+  for (const message of conflictMessages(merged)) {
+    if (!message.paths.includes(path)) continue;
+    const original = message.paths.find((other) => path.startsWith(`${other}~`));
+    if (original !== undefined) return original;
+  }
+  return path;
+}
+
+/**
+ * One conflict per git message among paths no class covers.
+ *
+ * A rename on both sides records three paths — the base's and each side's new
+ * name — for what is one conflict, and a file against a symlink records one
+ * side under a moved-aside name. Each message names every path it concerns, so
+ * the paths are gathered by it; a path no message names stays on its own.
+ */
+function gatherUncovered(
+  conflicts: readonly Conflict[],
+  merged: SpeculativeMergeResult,
+): Conflict[] {
+  const pending = new Map(conflicts.map((conflict) => [conflict.recorded[0]!, conflict]));
+  const gathered: Conflict[] = [];
+  for (const message of conflictMessages(merged)) {
+    const parts = message.paths.flatMap((path) => pending.get(path) ?? []);
+    if (parts.length === 0) continue;
+    for (const part of parts) pending.delete(part.recorded[0]!);
+    gathered.push({
+      path: movedFrom(message.paths[0]!, merged),
+      recorded: parts.flatMap((part) => part.recorded),
+      base: parts.find((part) => part.base !== undefined)?.base,
+      ours: parts.find((part) => part.ours !== undefined)?.ours,
+      theirs: parts.find((part) => part.theirs !== undefined)?.theirs,
+      types: [...new Set(parts.flatMap((part) => part.types))],
+    });
+  }
+  gathered.push(...pending.values());
+  return gathered;
+}
+
 /**
  * The class a conflicted path's structure supports, or null when none does.
  *
  * Every mapping requires the stage set it implies as well as the token, so a
- * shape git has never produced is left unclassified rather than forced into
- * the nearest class.
+ * shape that does not fit is never forced into the nearest class; it is
+ * reported as `other-conflict` instead.
  */
 function shapeOf(conflict: Conflict): Shape | null {
   const { base, ours, theirs, types } = conflict;
@@ -291,7 +371,7 @@ function shapeOf(conflict: Conflict): Shape | null {
   const oneSide = (ours === undefined) !== (theirs === undefined);
 
   if (has(TYPE_RENAME_DELETE) && base !== undefined && oneSide) {
-    return { kind: 'class', class: 'rename-vs-modify' };
+    return { kind: 'class', class: 'rename-vs-delete' };
   }
   if (has(TYPE_MODIFY_DELETE) && base !== undefined && oneSide) {
     return { kind: 'class', class: 'delete-vs-modify' };
@@ -401,6 +481,12 @@ async function examine(
   const { shape, conflict } = candidate;
   const { branchA, branchB } = request;
 
+  if (shape.kind === 'class' && shape.class === 'other-conflict') {
+    // Nothing here is lines in one file on each side; git's tokens and the
+    // blobs are the evidence.
+    return { class: shape.class, spansA: [], spansB: [], spansOmitted: 0 };
+  }
+
   if (shape.kind === 'class') {
     // One side has no file; the other's changes against the base are what the
     // deletion takes with it.
@@ -411,15 +497,20 @@ async function examine(
     if (isText(sides.base) && isText(survivor) && survivor.path !== null) {
       const baseText = await reader.text(sides.base.oid);
       const survivorText = await reader.text(survivor.oid);
-      const hunks =
-        looksBinary(baseText) || looksBinary(survivorText)
-          ? null
-          : changedHunks(baseText.split('\n'), survivorText.split('\n'));
-      if (hunks !== null) {
-        const branch = deletedByA ? branchB : branchA;
-        const kept = hunks.slice(0, MAX_SPANS_PER_SIDE);
-        spans = await spansFor(branch, survivor.path, survivor.oid, kept, reader);
-        omitted = hunks.length - kept.length;
+      const readable =
+        baseText !== null &&
+        survivorText !== null &&
+        !looksBinary(baseText) &&
+        !looksBinary(survivorText);
+      if (readable) {
+        const survivorLines = survivorText.split('\n');
+        const hunks = changedHunks(baseText.split('\n'), survivorLines);
+        if (hunks !== null) {
+          const branch = deletedByA ? branchB : branchA;
+          const kept = hunks.slice(0, MAX_SPANS_PER_SIDE);
+          spans = spansFor(branch, survivor.path, survivorLines, kept);
+          omitted = hunks.length - kept.length;
+        }
       }
     }
     return {
@@ -436,20 +527,21 @@ async function examine(
     return { class: cls, spansA: [], spansB: [], spansOmitted: 0 };
   }
 
-  const mergedOid = (await reader.list(request.merged.treeOid, [conflict.path])).get(conflict.path);
+  const recorded = conflict.recorded[0]!;
+  const mergedOid = (await reader.list(request.merged.treeOid, [recorded])).get(recorded);
   // Both sides are regular files here, so the merged entry is one too.
-  const regions =
-    mergedOid === undefined ? [] : scanConflictRegions(await reader.text(mergedOid.oid));
+  const mergedText = mergedOid === undefined ? null : await reader.text(mergedOid.oid);
+  const regions = mergedText === null ? [] : scanConflictRegions(mergedText);
   const cls: TextualConflictClass =
     shape.kind === 'add-add'
       ? 'add-add'
       : regions.some((region) => regionOverlaps(region) === true)
         ? 'overlapping-edit'
-        : // Includes a region with no base and a file with no regions to read:
-          // when it cannot tell, it says the weaker thing.
+        : // Includes a region with no base and a file whose regions could not
+          // be read: when it cannot tell, it says the weaker thing.
           'adjacent-addition';
 
-  const mergedLines = mergedOid === undefined ? [] : await reader.lines(mergedOid.oid);
+  const mergedLines = mergedText?.split('\n') ?? [];
   const place = async (
     side: MergeConflictSide | null,
     which: 'ours' | 'theirs',
@@ -459,10 +551,11 @@ async function examine(
     // a side can still lack a path, when its blob sits at more than one.
     const path = side?.path ?? null;
     if (side === null || path === null || regions.length === 0) return [];
-    const lines = await reader.lines(side.oid);
+    const lines = (await reader.text(side.oid))?.split('\n');
+    if (lines === undefined) return [];
     const placed = placeRegions(mergedLines, regions, which, lines).slice(0, MAX_SPANS_PER_SIDE);
     const found = placed.filter((range): range is LineRange => range !== null);
-    return spansFor(branch, path, side.oid, found, reader);
+    return spansFor(branch, path, lines, found);
   };
 
   return {
@@ -492,14 +585,12 @@ function looksBinary(text: string): boolean {
 /** Zero-based, half-open line range within one side's file. */
 type LineRange = readonly [from: number, to: number];
 
-async function spansFor(
+function spansFor(
   branchRefId: BranchRefId,
   path: string,
-  oid: string,
+  lines: readonly string[],
   ranges: readonly LineRange[],
-  reader: BlobReader,
-): Promise<SpanEvidence[]> {
-  const lines = await reader.lines(oid);
+): SpanEvidence[] {
   return ranges.map(([from, to]) => ({
     type: 'span',
     branchRefId,
@@ -710,13 +801,16 @@ function toFinding(
 interface TreeEntry {
   readonly mode: string;
   readonly oid: string;
+  /** Bytes; null for anything but a blob. */
+  readonly size: number | null;
 }
 
 /** Blob and tree reads for one classification, each object read at most once. */
 class BlobReader {
   readonly #shadow: ShadowRepo;
   readonly #runner: GitRunner;
-  readonly #texts = new Map<string, string>();
+  readonly #texts = new Map<string, string | null>();
+  readonly #sizes = new Map<string, number>();
   readonly #listings = new Map<string, Map<string, string[]>>();
 
   constructor(shadow: ShadowRepo, runner: GitRunner) {
@@ -728,15 +822,20 @@ class BlobReader {
   async list(tree: string, paths: readonly string[]): Promise<Map<string, TreeEntry>> {
     const found = new Map<string, TreeEntry>();
     for (const chunk of chunkPaths([...new Set(paths)])) {
+      // `-l` for sizes: git reads them off the object headers it has open anyway.
       const listing = await runRequired(this.#runner, this.#shadow, [
         'ls-tree',
         '-z',
+        '-l',
         '--full-tree',
         tree,
         '--',
         ...chunk,
       ]);
-      for (const [path, entry] of parseListing(listing.stdout)) found.set(path, entry);
+      for (const [path, entry] of parseListing(listing.stdout)) {
+        found.set(path, entry);
+        if (entry.size !== null) this.#sizes.set(entry.oid, entry.size);
+      }
     }
     return found;
   }
@@ -762,28 +861,50 @@ class BlobReader {
     return paths.length === 1 ? paths[0]! : null;
   }
 
-  async text(oid: string): Promise<string> {
+  /** A blob's content, or null when it is larger than {@link MAX_BLOB_BYTES}. */
+  async text(oid: string): Promise<string | null> {
     const cached = this.#texts.get(oid);
     if (cached !== undefined) return cached;
-    const blob = await runRequired(this.#runner, this.#shadow, ['cat-file', 'blob', oid]);
-    this.#texts.set(oid, blob.stdout);
-    return blob.stdout;
+    const size = this.#sizes.get(oid) ?? (await this.#sizeOf(oid));
+    const text =
+      size > MAX_BLOB_BYTES
+        ? null
+        : (await runRequired(this.#runner, this.#shadow, ['cat-file', 'blob', oid])).stdout;
+    this.#texts.set(oid, text);
+    return text;
   }
 
-  async lines(oid: string): Promise<string[]> {
-    return (await this.text(oid)).split('\n');
+  async #sizeOf(oid: string): Promise<number> {
+    const answer = await runRequired(this.#runner, this.#shadow, ['cat-file', '-s', oid]);
+    const size = Number(answer.stdout.trim());
+    if (!Number.isSafeInteger(size) || size < 0) {
+      throw new InterlockError('MERGE_FAILED', 'git answered a blob size that is not a number', {
+        remedy:
+          'Report the git version in use; its cat-file output differs from the documented form.',
+        infra: true,
+      });
+    }
+    return size;
   }
 }
 
-/** `<mode> SP <type> SP <object> TAB <path>`, NUL-terminated; blobs only. */
+/**
+ * `<mode> SP <type> SP <object> TAB <path>`, NUL-terminated; blobs only. With
+ * `-l`, the object is followed by its size, padded with spaces, which are
+ * git's own and never the path's — the path starts after the tab.
+ */
 function parseListing(stdout: string): [string, TreeEntry][] {
   const entries: [string, TreeEntry][] = [];
   for (const record of stdout.split('\0')) {
     // The empty record after the last terminator has no tab, and no type.
     const tab = record.indexOf('\t');
-    const [mode = '', type, oid = ''] = record.slice(0, tab).split(' ');
+    const [mode = '', type, oid = '', size] = record.slice(0, tab).split(' ').filter(Boolean);
     if (type !== 'blob') continue;
-    entries.push([record.slice(tab + 1), { mode, oid }]);
+    const bytes = size === undefined ? null : Number(size);
+    entries.push([
+      record.slice(tab + 1),
+      { mode, oid, size: bytes !== null && Number.isSafeInteger(bytes) ? bytes : null },
+    ]);
   }
   return entries;
 }

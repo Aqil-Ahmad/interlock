@@ -32,18 +32,17 @@ export const textualAnalyzer: Analyzer = {
         { runner: context.runner },
       );
     } catch (error) {
-      // A blob that cannot be read is a shadow that cannot be trusted, not a
-      // pair with nothing wrong. The code and message carry no paths; details,
-      // which do, stay out.
-      if (!isInterlockError(error)) throw error;
+      // A git that failed, timed out or could not start is the environment,
+      // and the pair is not "clean" for it. Anything else — a command the
+      // runner refused, which only Interlock's own code builds — is a bug, and
+      // filing it as infrastructure would hide it. The code and message carry
+      // no paths; details, which do, stay out.
+      if (!isInterlockError(error) || !error.infra) throw error;
       log.warn('textual classification could not read the merge', { code: error.code });
       return infraFailure(`${error.code}: ${error.message}`);
     }
 
-    const { findings, unclassified, dropped } = classified;
-    if (unclassified.length > 0) {
-      log.info('conflicts of a type no class covers raised nothing', { types: unclassified });
-    }
+    const { findings, dropped } = classified;
     if (dropped > 0) {
       log.warn('conflicted paths past the per-run bound were not examined', {
         dropped,

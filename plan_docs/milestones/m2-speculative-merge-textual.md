@@ -194,11 +194,11 @@ merge-tree` over the two commits reports the conflict — with neither side
 
 - [x] **Textual conflict classification**
       **Files:** `packages/core/src/merge/conflict-classifier.ts`, `packages/core/src/analyzers/textual.ts`
-      **What:** turn `merge-tree`'s conflict output into Findings — one per conflicted path — carrying each branch's hunk spans in that branch's own file, and wire `textualAnalyzer.analyze` to produce them.
+      **What:** turn `merge-tree`'s conflict output into Findings — one per conflict — carrying each branch's hunk spans in that branch's own file, and wire `textualAnalyzer.analyze` to produce them.
 
   The class comes from structure, never from git's prose: the stage set and the
   `-z` type token. `CONFLICT (modify/delete)` is `delete-vs-modify`,
-  `CONFLICT (rename/delete)` is `rename-vs-modify`, a content conflict with no
+  `CONFLICT (rename/delete)` is `rename-vs-delete`, a content conflict with no
   base stage is `add-add`, and a content conflict with one is
   `overlapping-edit` when both sides changed a base line in common and
   `adjacent-addition` otherwise — including when the regions cannot be read,
@@ -206,8 +206,11 @@ merge-tree` over the two commits reports the conflict — with neither side
   `overlapping-edit` with no span. git merges a rename on one side and an edit
   on the other cleanly unless the edits collide, so rename/edit is a content
   conflict classified by its regions, whose spans sit at each branch's own
-  path. Any other type (`rename/rename`, `file/directory`, a submodule) raises
-  nothing and is logged by its token.
+  path. Anything else git reports — `rename/rename`, `file/directory`,
+  `distinct modes`, a submodule, or a known token on stages that do not fit it
+  — is `other-conflict`, medium and without spans: git is certain it conflicts,
+  so a conflicted merge never comes back `clean`. A blob over 1 MiB is not
+  read and gets no span.
 
   A span is located in the stage-2 or stage-3 blob, never in merged-file
   coordinates, and a side whose lines cannot be placed exactly gets no span.
@@ -231,8 +234,9 @@ merge-tree` over the two commits reports the conflict — with neither side
   negative twin that raises nothing; a binary conflict yields no span, and a
   newline in a path, CRLF, regions on the first and last line and a pair with
   dozens of conflicted files are covered, the last against a stated bound on
-  Findings per run; and an analyzer that cannot read a blob returns
-  `infra-failure`, never an empty list.
+  Findings per run; a conflicted merge never yields a `clean` verdict; and an
+  analyzer whose git fails returns `infra-failure`, never an empty list, while
+  a command the runner refused surfaces as the bug it is.
   **Constraints:** evidence is machine-checkable — spans and tool output, never prose alone. The fixture lands before the rule it exercises. Excerpts are bounded; repository content stays out of titles and descriptions.
 
 - [ ] **Per-pair worktree pool**

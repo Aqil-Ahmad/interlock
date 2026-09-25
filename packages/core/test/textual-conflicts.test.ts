@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createLogger, silentLogger, ulid } from '@interlock/shared';
+import { InterlockError, createLogger, silentLogger, ulid } from '@interlock/shared';
 import type {
   BranchRefId,
   ChangeSet,
@@ -30,6 +30,7 @@ import { createGitRunner } from '../src/git/repo-handle.js';
 import type { GitRunner, UserRepo } from '../src/git/repo-handle.js';
 import { ensureShadow } from '../src/git/shadow.js';
 import {
+  MAX_BLOB_BYTES,
   MAX_EXCERPT_LINES,
   MAX_FINDINGS_PER_RUN,
   MAX_SPANS_PER_SIDE,
@@ -38,6 +39,7 @@ import {
 } from '../src/merge/conflict-classifier.js';
 import { speculativeMerge } from '../src/merge/speculative-merge.js';
 import type { ConflictStage, SpeculativeMergeRequest } from '../src/merge/speculative-merge.js';
+import { rejection } from './support/rejection.js';
 import { TEXTUAL_FIXTURES } from './support/textual-fixtures.js';
 import type { BranchChange } from './support/textual-fixtures.js';
 
@@ -472,7 +474,6 @@ describe('textual conflicts', () => {
       );
 
       expect(classified.dropped).toBe(0);
-      expect(classified.unclassified).toEqual([]);
       expect(classified.findings[0]).toMatchObject({
         firstSeenAt: '2026-01-01T00:00:00.000Z',
         updatedAt: '2026-01-01T00:00:00.000Z',
@@ -529,7 +530,27 @@ describe('textual conflicts', () => {
         () => write('t', 'edited\n'),
       );
 
-      expectOther(await analyze(request), 'CONFLICT (distinct modes)');
+      const finding = expectOther(await analyze(request), 'CONFLICT (distinct modes)');
+      // Filed under the path, not the `t~<commit>` name git moved one side to,
+      // which changes with every commit.
+      expect(provenanceOf(finding).path).toBe('t');
+    });
+
+    it('file a moved-aside file under the path it came from, whatever its class', async () => {
+      const request = await pair(
+        () => write('d', 'a file\n'),
+        () => {
+          git('rm', '-q', 'd');
+          write('d/f.txt', 'now a directory\n');
+        },
+        () => write('d', 'an edited file\n'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('delete-vs-modify');
+      expect(provenanceOf(finding!).path).toBe('d');
+      expect(provenanceOf(finding!).sideB?.path).toBe('d');
     });
   });
 
@@ -918,6 +939,88 @@ describe('textual conflicts', () => {
     });
   });
 
+  describe('a file past the size bound', () => {
+    const big = (tag: string): string =>
+      `${tag}\n${'x'.repeat(80)}\n`.repeat(Math.ceil(MAX_BLOB_BYTES / 80));
+
+    it('is not read, so a content conflict in it says the weaker thing, without spans', async () => {
+      const request = await pair(
+        () => write('lock.json', big('base')),
+        () => write('lock.json', `ours\n${big('base')}`),
+        () => write('lock.json', `theirs\n${big('base')}`),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('adjacent-addition');
+      expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+    });
+
+    it('is not read for a deleted file’s changes, on either version', async () => {
+      const survivorBig = await pair(
+        () => write('f.txt', 'small\n'),
+        () => write('f.txt', big('grown')),
+        () => git('rm', '-q', 'f.txt'),
+      );
+      const [grown] = (await analyze(survivorBig)).findings;
+      expect(grown!.rule).toBe('delete-vs-modify');
+      expect(grown!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+    });
+
+    it('is not read when only the base was large', async () => {
+      const request = await pair(
+        () => write('f.txt', big('base')),
+        () => write('f.txt', 'shrunk\n'),
+        () => git('rm', '-q', 'f.txt'),
+      );
+
+      const [finding] = (await analyze(request)).findings;
+
+      expect(finding!.rule).toBe('delete-vs-modify');
+      expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
+    });
+
+    /** The rename/edit fixture, whose unrenamed side is sized by `cat-file -s`. */
+    const renamed = (): Promise<SpeculativeMergeRequest> => {
+      const fixture = TEXTUAL_FIXTURES.find((f) => f.name.startsWith('rename/edit —'))!;
+      return pair(
+        () => {
+          for (const [path, content] of Object.entries(fixture.base)) write(path, content);
+        },
+        () => apply(fixture.one),
+        () => apply(fixture.two),
+      );
+    };
+    const sizing = (answer: string): GitRunner => ({
+      run: (target, args, options) =>
+        args[0] === 'cat-file' && args[1] === '-s'
+          ? Promise.resolve({ stdout: `${answer}\n`, stderr: '', exitCode: 0 })
+          : runner.run(target, args, options),
+    });
+
+    it('is asked of git for a side no listing sized, and that side goes unplaced', async () => {
+      const request = await renamed();
+
+      const outcome = await textualAnalyzer.analyze(
+        await context(request, sizing(String(MAX_BLOB_BYTES + 1))),
+      );
+
+      const finding = outcome.findings[0]!;
+      expect(finding.rule).toBe('overlapping-edit');
+      expect(spansOf(finding, branchA)).toHaveLength(1);
+      expect(spansOf(finding, branchB)).toEqual([]);
+    });
+
+    it('is an infra-failure when git answers a size that is not one', async () => {
+      const request = await renamed();
+
+      const outcome = await textualAnalyzer.analyze(await context(request, sizing('lots')));
+
+      expect(outcome.verdict).toBe('infra-failure');
+      expect(outcome.diagnostic).toMatch(/^MERGE_FAILED: /u);
+    });
+  });
+
   describe('a region too large to align against its base', () => {
     it('says the weaker thing, and still places both sides', async () => {
       const block = (tag: string): string =>
@@ -1047,6 +1150,24 @@ describe('textual conflicts', () => {
       };
 
       await expect(textualAnalyzer.analyze(await context(request, broken))).rejects.toThrow('boom');
+    });
+
+    it('lets a command the runner refused through, since only our own code builds one', async () => {
+      const request = await pair(
+        () => write('f.txt', 'a\n'),
+        () => write('f.txt', 'A\n'),
+        () => write('f.txt', 'B\n'),
+      );
+      const refusing: GitRunner = {
+        run: (target, args, options) =>
+          args[0] === 'cat-file'
+            ? Promise.reject(new InterlockError('GIT_COMMAND_REFUSED', 'refused'))
+            : runner.run(target, args, options),
+      };
+
+      const error = await rejection(textualAnalyzer.analyze(await context(request, refusing)));
+
+      expect(error.code).toBe('GIT_COMMAND_REFUSED');
     });
   });
 });
