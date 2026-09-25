@@ -481,23 +481,55 @@ describe('textual conflicts', () => {
   });
 
   describe('conflicts no class covers', () => {
-    it('raise nothing, and are logged by their type', async () => {
+    /** One Finding, with git's tokens and no span: a conflict, never a clean merge. */
+    const expectOther = (outcome: AnalyzerOutcome, token: string): Finding => {
+      expect(outcome.verdict).toBe('findings');
+      expect(outcome.findings).toHaveLength(1);
+      const finding = outcome.findings[0]!;
+      expect(finding).toMatchObject({ rule: 'other-conflict', severity: 'medium', confidence: 1 });
+      expect(provenanceOf(finding).conflictTypes).toContain(token);
+      expect(finding.evidence.filter((e) => e.type === 'span')).toEqual([]);
+      return finding;
+    };
+
+    it('report a rename on both sides as one Finding naming each side’s path', async () => {
       const request = await pair(
         () => write('x.txt', 'one\ntwo\nthree\nfour\n'),
         () => git('mv', 'x.txt', 'y.txt'),
         () => git('mv', 'x.txt', 'z.txt'),
       );
-      const records: LogRecord[] = [];
-      const logger = createLogger('test', { level: 'debug', sink: (r) => records.push(r) });
-      const ctx = { ...(await context(request)), logger };
-      expect(ctx.merged.messages.map((m) => m.type)).toContain('CONFLICT (rename/rename)');
 
-      const outcome = await textualAnalyzer.analyze(ctx);
+      const finding = expectOther(await analyze(request), 'CONFLICT (rename/rename)');
 
-      expect(outcome).toEqual({ verdict: 'clean', findings: [] });
-      expect(records).toContainEqual(
-        expect.objectContaining({ types: ['CONFLICT (rename/rename)'] }),
+      expect(provenanceOf(finding)).toMatchObject({
+        path: 'x.txt',
+        base: { path: 'x.txt' },
+        sideA: { path: 'y.txt' },
+        sideB: { path: 'z.txt' },
+      });
+    });
+
+    it('report a file against a directory', async () => {
+      const request = await pair(
+        () => write('README', 'r\n'),
+        () => write('d/f.txt', 'in a directory\n'),
+        () => write('d', 'a file\n'),
       );
+
+      expectOther(await analyze(request), 'CONFLICT (file/directory)');
+    });
+
+    it('report a file against a symlink', async () => {
+      const request = await pair(
+        () => write('t', 'text\n'),
+        () => {
+          unlinkSync(join(dir, 't'));
+          symlinkSync('target', join(dir, 't'));
+        },
+        () => write('t', 'edited\n'),
+      );
+
+      expectOther(await analyze(request), 'CONFLICT (distinct modes)');
     });
   });
 
@@ -603,15 +635,21 @@ describe('textual conflicts', () => {
       },
     ];
 
-    it.each(cases)('leave $name unclassified', async ({ setup, one, two, bend }) => {
-      const request = await pair(setup, one, two);
-      const ctx = await context(request);
-      const real = await textualAnalyzer.analyze(ctx);
-      expect(real.verdict).toBe('findings');
+    it.each(cases)(
+      'report $name as a conflict no class covers',
+      async ({ setup, one, two, bend }) => {
+        const request = await pair(setup, one, two);
+        const ctx = await context(request);
+        const real = await textualAnalyzer.analyze(ctx);
+        expect(real.findings[0]!.rule).not.toBe('other-conflict');
 
-      const bent = { ...ctx, merged: { ...ctx.merged, stages: bend(ctx.merged.stages) } };
-      expect(await textualAnalyzer.analyze(bent)).toEqual({ verdict: 'clean', findings: [] });
-    });
+        const bent = { ...ctx, merged: { ...ctx.merged, stages: bend(ctx.merged.stages) } };
+        const outcome = await textualAnalyzer.analyze(bent);
+
+        expect(outcome.verdict).toBe('findings');
+        expect(outcome.findings.map((f) => f.rule)).toEqual(['other-conflict']);
+      },
+    );
   });
 
   describe('one side that is not a regular file', () => {
