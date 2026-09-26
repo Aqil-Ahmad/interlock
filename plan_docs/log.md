@@ -4,6 +4,12 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-26 — second review of the classifier: all taken
+
+- **Taken — merge-tree's type tokens and the regular-file modes lived in two modules.** `TYPE_CONTENTS`, `TYPE_BINARY` and `REGULAR_MODES` are exported from `speculative-merge.ts`, which reads that output first, and the classifier imports them; the merge's own inline `100644`/`100755` check uses the set too.
+- **Taken — grouping conflicts was quadratic in a number the repository chooses.** Each conflicted path searched every stage three times and every message for its moved-aside origin, all before the per-run bound. Stages and origins are indexed once each now, keeping the first match as before; four mutations of the indexes all die.
+- **Taken — finding a blob's path copied the list for every duplicate.** Empty `.gitkeep` files share one blob; the list grows in place.
+
 ## 2026-09-26 — review of the classifier: four taken
 
 - **Taken — a conflicted merge could come back `clean`.** Confirmed against real git: a merge whose only conflict was `rename/rename`, `file/directory` or `distinct modes` raised nothing, and the analyzer answered `clean` — the missing answer that reads as "no conflicts found". The earlier rule was right for a shape that fits no class and wrong about what to do then: git is certain these conflict. Anything no class covers, including a known token on stages that do not fit it, is now `other-conflict`: medium, no spans, git's tokens and each side's blob in the evidence. One Finding per git message, since a rename on both sides records three paths for one conflict. The tests that asserted the silence changed first, in their own commit.
