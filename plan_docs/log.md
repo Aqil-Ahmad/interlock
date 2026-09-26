@@ -4,6 +4,14 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-26 — second review of the pool: four taken, two rejected
+
+- **Taken — `load()` ran `git worktree prune` over the whole shadow.** It forgot every missing worktree, not only the pool's. Orphaned registrations are removed by slot name now, and a worktree of the shadow that is not a slot is left alone.
+- **Taken — ADR-0005 still said dependencies are symlinked into a slot.** Amended: nothing is linked, because each check reaches dependencies its own way; deps-dirty stays against the dependency checkout's tree.
+- **Taken — comments:** `assertRealShadow` checks shape, not provenance; the fill error path and `resolveDeepest`'s EACCES handling say why.
+- **Rejected — adoption does not check the slot belongs to this shadow.** A rebuild removes the slot admin dirs inside the shadow, so a stale slot is refilled cold; a test rebuilds the shadow under a slot and proves it.
+- **Rejected — waking every waiter is a thundering herd.** Waiters are bounded by the scheduler's concurrency, which is capped at the pool size.
+
 ## 2026-09-26 — review of the pool: all taken
 
 - **Taken — two security helpers were copies.** `isWithin`, the whole-segment containment test that already had its `..foo` bug fixed once, and `alternatesOf` were duplicated from the runner and the shadow. Both are exported from where they were and imported here, so a fix lands once.
