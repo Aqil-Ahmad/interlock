@@ -1,4 +1,4 @@
-import { InterlockError, SEVERITY_RANK, redact, ulid } from '@interlock/shared';
+import { InterlockError, REDACTED, SEVERITY_RANK, redact, ulid } from '@interlock/shared';
 import type {
   BranchRefId,
   Evidence,
@@ -60,7 +60,13 @@ export type TextualConflictClass =
    * directory or a symlink, a submodule. git is certain these conflict, so they
    * are reported, without spans, rather than read as a clean merge.
    */
-  | 'other-conflict';
+  | 'other-conflict'
+  /**
+   * Both sides changed a file git can only keep one version of — binary
+   * content, or a symlink's target — so there are no lines to compare and one
+   * side's change is lost.
+   */
+  | 'whole-file-edit';
 
 /**
  * Severity by class.
@@ -89,6 +95,7 @@ export const SEVERITY_BY_CLASS: Readonly<Record<TextualConflictClass, Severity>>
   'rename-vs-delete': 'high',
   'add-add': 'medium',
   'other-conflict': 'medium',
+  'whole-file-edit': 'high',
   'adjacent-addition': 'low',
 };
 
@@ -146,6 +153,7 @@ const TITLES: Readonly<Record<TextualConflictClass, string>> = {
   'rename-vs-delete': 'One branch deleted a file the other renamed',
   'add-add': 'Both branches added the same file',
   'other-conflict': 'The branches changed a file in ways git cannot combine',
+  'whole-file-edit': 'Both branches changed a file git cannot merge line by line',
 };
 
 const DESCRIPTIONS: Readonly<Record<TextualConflictClass, string>> = {
@@ -159,6 +167,8 @@ const DESCRIPTIONS: Readonly<Record<TextualConflictClass, string>> = {
     'git cannot merge the two branches: one renamed a file the other deleted, so whatever changed with the rename goes with the file.',
   'add-add':
     'git cannot merge the two branches: both created the same file independently, and it has to be reconciled whole.',
+  'whole-file-edit':
+    'git cannot merge the two branches: both changed a file it can only keep one version of — binary content, or a symlink — so one side’s change is lost unless the two are reconciled by hand.',
   'other-conflict':
     "git cannot merge the two branches, with a conflict no narrower class describes — a rename on both sides, a file against a directory or a symlink, a submodule. git's type for it is in the evidence.",
 };
@@ -221,10 +231,18 @@ export async function classifyTextualConflicts(
   const reader = new BlobReader(request.merge.shadow, options.runner);
   const sides = await resolveSides(examined, request, reader);
 
+  // One listing for every text conflict's merged file, rather than one each.
+  const mergedEntries = await reader.list(
+    request.merged.treeOid,
+    examined
+      .filter(({ shape }) => shape.kind !== 'class' && shape.text)
+      .map(({ conflict }) => conflict.recorded[0]!),
+  );
+
   const findings: Finding[] = [];
   for (const [index, candidate] of examined.entries()) {
     const resolved = sides[index]!;
-    const body = await examine(candidate, resolved, request, reader);
+    const body = await examine(candidate, resolved, request, reader, mergedEntries);
     findings.push(toFinding(request, candidate, resolved, body));
   }
   findings.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
@@ -412,7 +430,9 @@ function priorityOf(shape: Shape): number {
       ? SEVERITY_BY_CLASS[shape.class]
       : shape.kind === 'add-add'
         ? SEVERITY_BY_CLASS['add-add']
-        : SEVERITY_BY_CLASS['overlapping-edit'];
+        : shape.text
+          ? SEVERITY_BY_CLASS['overlapping-edit']
+          : SEVERITY_BY_CLASS['whole-file-edit'];
   return SEVERITY_RANK[ceiling] * 2 + (certain ? 1 : 0);
 }
 
@@ -478,9 +498,14 @@ async function resolveSides(
 
 interface Examined {
   readonly class: TextualConflictClass;
-  readonly spansA: readonly SpanEvidence[];
-  readonly spansB: readonly SpanEvidence[];
-  /** Regions or hunks past {@link MAX_SPANS_PER_SIDE}, on the side with more. */
+  /**
+   * By region: index i on each side is region i, null where that side's lines
+   * could not be placed. Kept aligned rather than filtered, so a span is only
+   * ever shown beside the other side's span for the same region.
+   */
+  readonly spansA: readonly (SpanEvidence | null)[];
+  readonly spansB: readonly (SpanEvidence | null)[];
+  /** Regions or hunks with no span on a side that has lines there, past the bound included. */
   readonly spansOmitted: number;
 }
 
@@ -489,6 +514,7 @@ async function examine(
   sides: ResolvedSides,
   request: ClassifyRequest,
   reader: BlobReader,
+  mergedEntries: ReadonlyMap<string, TreeEntry>,
 ): Promise<Examined> {
   const { shape, conflict } = candidate;
   const { branchA, branchB } = request;
@@ -520,7 +546,7 @@ async function examine(
         if (hunks !== null) {
           const branch = deletedByA ? branchB : branchA;
           const kept = hunks.slice(0, MAX_SPANS_PER_SIDE);
-          spans = spansFor(branch, survivor.path, survivorLines, kept);
+          spans = kept.map((range) => spanFor(branch, survivor.path!, survivorLines, range));
           omitted = hunks.length - kept.length;
         }
       }
@@ -534,13 +560,13 @@ async function examine(
   }
 
   if (!shape.text) {
-    // No lines to place: a span here would be invented.
-    const cls = shape.kind === 'add-add' ? 'add-add' : 'overlapping-edit';
+    // No lines to place, so no span, and no claim about lines either: whether
+    // the two changes touched the same part of the file is unknowable here.
+    const cls = shape.kind === 'add-add' ? 'add-add' : 'whole-file-edit';
     return { class: cls, spansA: [], spansB: [], spansOmitted: 0 };
   }
 
-  const recorded = conflict.recorded[0]!;
-  const mergedOid = (await reader.list(request.merged.treeOid, [recorded])).get(recorded);
+  const mergedOid = mergedEntries.get(conflict.recorded[0]!);
   // Both sides are regular files here, so the merged entry is one too.
   const mergedText = mergedOid === undefined ? null : await reader.text(mergedOid.oid);
   const regions = mergedText === null ? [] : scanConflictRegions(mergedText);
@@ -554,28 +580,28 @@ async function examine(
           'adjacent-addition';
 
   const mergedLines = mergedText?.split('\n') ?? [];
+  const shown = Math.min(regions.length, MAX_SPANS_PER_SIDE);
   const place = async (
     side: MergeConflictSide | null,
     which: 'ours' | 'theirs',
     branch: BranchRefId,
-  ): Promise<SpanEvidence[]> => {
+  ): Promise<(SpanEvidence | null)[]> => {
     // Both sides exist and are regular files, or the shape would not be text;
     // a side can still lack a path, when its blob sits at more than one.
     const path = side?.path ?? null;
-    if (side === null || path === null || regions.length === 0) return [];
+    const none = new Array<null>(shown).fill(null);
+    if (side === null || path === null) return none;
     const lines = (await reader.text(side.oid))?.split('\n');
-    if (lines === undefined) return [];
-    const placed = placeRegions(mergedLines, regions, which, lines).slice(0, MAX_SPANS_PER_SIDE);
-    const found = placed.filter((range): range is LineRange => range !== null);
-    return spansFor(branch, path, lines, found);
+    if (lines === undefined) return none;
+    return placeRegions(mergedLines, regions, which, lines)
+      .slice(0, shown)
+      .map((range) => (range === null ? null : spanFor(branch, path, lines, range)));
   };
 
-  return {
-    class: cls,
-    spansA: await place(sides.sideA, 'ours', branchA),
-    spansB: await place(sides.sideB, 'theirs', branchB),
-    spansOmitted: Math.max(0, regions.length - MAX_SPANS_PER_SIDE),
-  };
+  const spansA = await place(sides.sideA, 'ours', branchA);
+  const spansB = await place(sides.sideB, 'theirs', branchB);
+  const placedBoth = spansA.filter((span, index) => span !== null && spansB[index] !== null);
+  return { class: cls, spansA, spansB, spansOmitted: regions.length - placedBoth.length };
 }
 
 function isText(side: MergeConflictSide | null): side is MergeConflictSide {
@@ -597,28 +623,44 @@ function looksBinary(text: string): boolean {
 /** Zero-based, half-open line range within one side's file. */
 type LineRange = readonly [from: number, to: number];
 
-function spansFor(
+function spanFor(
   branchRefId: BranchRefId,
   path: string,
   lines: readonly string[],
-  ranges: readonly LineRange[],
-): SpanEvidence[] {
-  return ranges.map(([from, to]) => ({
+  [from, to]: LineRange,
+): SpanEvidence {
+  return {
     type: 'span',
     branchRefId,
     path,
     startLine: from + 1,
     endLine: to,
     excerpt: excerptOf(lines.slice(from, to)),
-  }));
+  };
 }
 
-/** At most {@link MAX_EXCERPT_LINES} lines and {@link MAX_EXCERPT_CHARS} characters, redacted. */
+/** A private key's opening line, which a span can hold without the closing one. */
+const KEY_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/u;
+
+/**
+ * At most {@link MAX_EXCERPT_LINES} lines and {@link MAX_EXCERPT_CHARS}
+ * characters of a span, redacted.
+ *
+ * Redacted whole, before anything is cut. The patterns match a secret only
+ * entire — a key from its `BEGIN` line to its `END`, a token to its minimum
+ * length — so a line limit through a key or a character limit through a token
+ * leaves a fragment nothing recognises, and it would be stored as it is. What
+ * still opens a key after redacting is a key the span holds only the start of,
+ * and everything from its `BEGIN` goes. A span holding only a key's middle has
+ * no marker to find, and is the limit of reading a secret by its shape.
+ */
 export function excerptOf(lines: readonly string[]): string {
-  const text = lines.slice(0, MAX_EXCERPT_LINES).join('\n');
+  const redacted = redact(lines.join('\n'));
+  const open = redacted.search(KEY_BEGIN);
+  const safe = open === -1 ? redacted : `${redacted.slice(0, open)}${REDACTED}`;
+  const text = safe.split('\n').slice(0, MAX_EXCERPT_LINES).join('\n');
   // By code point, so a cut never leaves half a surrogate pair.
-  const cut = [...text].slice(0, MAX_EXCERPT_CHARS).join('');
-  return redact(cut);
+  return [...text].slice(0, MAX_EXCERPT_CHARS).join('');
 }
 
 /**
@@ -773,17 +815,18 @@ function toFinding(
     sideB: sides.sideB,
   };
   const evidence: Evidence[] = [provenance];
-  const pairs = Math.max(examined.spansA.length, examined.spansB.length);
-  for (let index = 0; index < pairs; index++) {
+  // Region by region, each side's span beside the other's for the same region.
+  const regions = Math.max(examined.spansA.length, examined.spansB.length);
+  for (let index = 0; index < regions; index++) {
     const a = examined.spansA[index];
     const b = examined.spansB[index];
-    if (a !== undefined) evidence.push(a);
-    if (b !== undefined) evidence.push(b);
+    if (a != null) evidence.push(a);
+    if (b != null) evidence.push(b);
   }
 
   const omitted =
     examined.spansOmitted > 0
-      ? ` ${examined.spansOmitted} further ${examined.spansOmitted === 1 ? 'region has' : 'regions have'} no span.`
+      ? ` ${String(examined.spansOmitted)} ${examined.spansOmitted === 1 ? 'region lacks' : 'regions lack'} a span on one side or both.`
       : '';
   return {
     id: ulid<FindingId>(),

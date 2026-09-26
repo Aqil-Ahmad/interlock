@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { InterlockError, createLogger, silentLogger, ulid } from '@interlock/shared';
+import { InterlockError, REDACTED, createLogger, silentLogger, ulid } from '@interlock/shared';
 import type {
   BranchRefId,
   ChangeSet,
@@ -31,10 +31,12 @@ import type { GitRunner, UserRepo } from '../src/git/repo-handle.js';
 import { ensureShadow } from '../src/git/shadow.js';
 import {
   MAX_BLOB_BYTES,
+  MAX_EXCERPT_CHARS,
   MAX_EXCERPT_LINES,
   MAX_FINDINGS_PER_RUN,
   MAX_SPANS_PER_SIDE,
   classifyTextualConflicts,
+  excerptOf,
   textualFindingKey,
 } from '../src/merge/conflict-classifier.js';
 import { speculativeMerge } from '../src/merge/speculative-merge.js';
@@ -386,10 +388,87 @@ describe('textual conflicts', () => {
       expect(a).toMatchObject({ startLine: 2, endLine: 41 });
       expect(a!.excerpt.split('\n')).toHaveLength(MAX_EXCERPT_LINES);
     });
+
+    it('stay with their own region when a side has none for an earlier one', async () => {
+      const spaced = (tag: (i: number) => string): string =>
+        [0, 1].map((i) => `${tag(i)}\n1\n2\n3\n4\n5\n`).join('');
+      const request = await pair(
+        () =>
+          write(
+            'f.txt',
+            spaced((i) => `x${i}`),
+          ),
+        () => {
+          write(
+            'f.txt',
+            spaced((i) => `a${i}`),
+          );
+          // The same file with the first region's line gone: side A as a
+          // merge driver or a filter could leave it, placeable only at the second.
+          write(
+            'g.txt',
+            spaced((i) => (i === 0 ? 'elsewhere' : `a${i}`)),
+          );
+        },
+        () =>
+          write(
+            'f.txt',
+            spaced((i) => `b${i}`),
+          ),
+      );
+      const ctx = await context(request);
+      const moved = git('rev-parse', `${request.commitA}:g.txt`).trim();
+      const stages = ctx.merged.stages.map((s) => (s.stage === 2 ? { ...s, oid: moved } : s));
+
+      const outcome = await textualAnalyzer.analyze({
+        ...ctx,
+        merged: { ...ctx.merged, stages },
+      });
+      const [finding] = outcome.findings;
+      const spans = finding!.evidence.flatMap((e) =>
+        e.type === 'span' ? [[e.branchRefId === branchA ? 'A' : 'B', e.startLine]] : [],
+      );
+
+      expect(spans).toEqual([
+        ['B', 1],
+        ['A', 7],
+        ['B', 7],
+      ]);
+      expect(finding!.description).toContain(' 1 region lacks a span on one side or both.');
+    });
+  });
+
+  describe('excerpts', () => {
+    const key = [
+      '-----BEGIN RSA PRIVATE KEY-----',
+      ...Array.from({ length: MAX_EXCERPT_LINES + 5 }, (_, i) => `MIIBOgIBAAJBAK${i}`),
+      '-----END RSA PRIVATE KEY-----',
+    ];
+
+    it('redact a key whose end falls past the line bound', () => {
+      const excerpt = excerptOf(['const pem = `', ...key, '`;']);
+
+      expect(excerpt).toBe(`const pem = \`\n${REDACTED}\n\`;`);
+    });
+
+    it('drop everything from a key the span holds only the start of', () => {
+      const excerpt = excerptOf(['before', ...key.slice(0, 3)]);
+
+      expect(excerpt).toBe(`before\n${REDACTED}`);
+    });
+
+    it('redact a token that straddles the character bound', () => {
+      const token = `ghp_${'A'.repeat(36)}`;
+      const excerpt = excerptOf([`${'x'.repeat(MAX_EXCERPT_CHARS - 20)} ${token}`]);
+
+      expect(excerpt).not.toContain('ghp_');
+      expect(excerpt).not.toContain('AAAA');
+      expect(excerpt).toContain(REDACTED);
+    });
   });
 
   describe('a binary conflict', () => {
-    it('is an overlapping edit with no span, since there are no lines to place', async () => {
+    it('is a whole-file edit with no span, since there are no lines to place', async () => {
       const request = await pair(
         () => write('img.bin', Buffer.from([0, 1, 2, 3])),
         () => write('img.bin', Buffer.from([0, 1, 2, 4])),
@@ -398,7 +477,7 @@ describe('textual conflicts', () => {
 
       const [finding] = (await analyze(request)).findings;
 
-      expect(finding!.rule).toBe('overlapping-edit');
+      expect(finding!.rule).toBe('whole-file-edit');
       expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
       expect(provenanceOf(finding!).conflictTypes).toEqual(
         expect.arrayContaining(['CONFLICT (binary)', 'CONFLICT (contents)']),
@@ -608,7 +687,7 @@ describe('textual conflicts', () => {
   });
 
   describe('a symlink changed two ways', () => {
-    it('is an overlapping edit with no span, since a target is not lines', async () => {
+    it('is a whole-file edit with no span, since a target is not lines', async () => {
       const request = await pair(
         () => symlinkSync('target-0', join(dir, 'link')),
         () => {
@@ -623,7 +702,7 @@ describe('textual conflicts', () => {
 
       const [finding] = (await analyze(request)).findings;
 
-      expect(finding!.rule).toBe('overlapping-edit');
+      expect(finding!.rule).toBe('whole-file-edit');
       expect(provenanceOf(finding!).sideA).toMatchObject({ path: 'link', mode: '120000' });
       expect(finding!.evidence.filter((e) => e.type === 'span')).toEqual([]);
     });
@@ -758,7 +837,7 @@ describe('textual conflicts', () => {
           merged: { ...ctx.merged, stages },
         });
 
-        expect(outcome.findings[0]!.rule).toBe('overlapping-edit');
+        expect(outcome.findings[0]!.rule).toBe('whole-file-edit');
         expect(outcome.findings[0]!.evidence.filter((e) => e.type === 'span')).toEqual([]);
       },
     );
@@ -954,7 +1033,7 @@ describe('textual conflicts', () => {
 
       expect(spansOf(finding!, branchA)).toHaveLength(MAX_SPANS_PER_SIDE);
       expect(spansOf(finding!, branchB)).toHaveLength(MAX_SPANS_PER_SIDE);
-      expect(finding!.description).toContain(' 1 further region has no span.');
+      expect(finding!.description).toContain(' 1 region lacks a span on one side or both.');
     });
 
     it('are counted in the description, for a deleted file’s changes', async () => {
@@ -976,7 +1055,7 @@ describe('textual conflicts', () => {
 
       expect(finding!.rule).toBe('delete-vs-modify');
       expect(spansOf(finding!, branchA)).toHaveLength(MAX_SPANS_PER_SIDE);
-      expect(finding!.description).toContain(' 2 further regions have no span.');
+      expect(finding!.description).toContain(' 2 regions lack a span on one side or both.');
     });
 
     it('are all given when there are no more than the bound', async () => {
@@ -1001,7 +1080,7 @@ describe('textual conflicts', () => {
       const [finding] = (await analyze(request)).findings;
 
       expect(spansOf(finding!, branchA)).toHaveLength(2);
-      expect(finding!.description).not.toContain('further');
+      expect(finding!.description).not.toContain('lack');
     });
   });
 

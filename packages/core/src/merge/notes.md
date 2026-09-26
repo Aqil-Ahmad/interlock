@@ -19,14 +19,18 @@ git's prose is reworded between releases; the `-z` type token and the stage set
 are not. Every mapping needs both, so a shape that does not fit never lands in
 the nearest class:
 
-| Token                      | Stages                 | Class                                                |
-| -------------------------- | ---------------------- | ---------------------------------------------------- |
-| `CONFLICT (rename/delete)` | base and one side      | `rename-vs-delete`                                   |
-| `CONFLICT (modify/delete)` | base and one side      | `delete-vs-modify`                                   |
-| `CONFLICT (contents)`      | both sides, no base    | `add-add`                                            |
-| `CONFLICT (contents)`      | base and both sides    | by region: `overlapping-edit` or `adjacent-addition` |
-| `CONFLICT (binary)` too    | as either of the above | the same, with no span                               |
-| anything else              | anything               | `other-conflict`, with no span                       |
+| Token                      | Stages              | Class                                                |
+| -------------------------- | ------------------- | ---------------------------------------------------- |
+| `CONFLICT (rename/delete)` | base and one side   | `rename-vs-delete`                                   |
+| `CONFLICT (modify/delete)` | base and one side   | `delete-vs-modify`                                   |
+| `CONFLICT (contents)`      | both sides, no base | `add-add`                                            |
+| `CONFLICT (contents)`      | base and both sides | by region: `overlapping-edit` or `adjacent-addition` |
+| `CONFLICT (binary)` too    | base and both sides | `whole-file-edit`, with no span                      |
+| `CONFLICT (binary)` too    | both sides, no base | `add-add`, with no span                              |
+| anything else              | anything            | `other-conflict`, with no span                       |
+
+A side that is not a regular file — a symlink — has no lines either, and a
+content conflict with a base is `whole-file-edit` for it just as for binary.
 
 `other-conflict` exists because git is certain. A merge whose only conflict is a
 rename on both sides, or a file against a directory, is not clean, and an

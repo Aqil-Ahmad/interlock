@@ -202,8 +202,9 @@ merge-tree` over the two commits reports the conflict — with neither side
   base stage is `add-add`, and a content conflict with one is
   `overlapping-edit` when both sides changed a base line in common and
   `adjacent-addition` otherwise — including when the regions cannot be read,
-  because when it cannot tell it says the weaker thing. A binary conflict is
-  `overlapping-edit` with no span. git merges a rename on one side and an edit
+  because when it cannot tell it says the weaker thing. A content conflict
+  whose sides are not both text — binary, or a symlink — is `whole-file-edit`
+  with no span. git merges a rename on one side and an edit
   on the other cleanly unless the edits collide, so rename/edit is a content
   conflict classified by its regions, whose spans sit at each branch's own
   path. Anything else git reports — `rename/rename`, `file/directory`,
