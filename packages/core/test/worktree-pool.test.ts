@@ -19,7 +19,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createGitRunner } from '../src/git/repo-handle.js';
 import type { GitRunner, ShadowRepo, UserRepo } from '../src/git/repo-handle.js';
 import { ensureShadow } from '../src/git/shadow.js';
-import { createWorktreePool, dependencyDrift, poolPathFor } from '../src/git/worktree-pool.js';
+import {
+  createWorktreePool,
+  DEPENDENCY_FILES,
+  dependencyDrift,
+  poolPathFor,
+} from '../src/git/worktree-pool.js';
 import type {
   PoolSlot,
   SlotOutcome,
@@ -851,6 +856,30 @@ describe('worktree pool', () => {
       const outcome = await look(open(), await request(newKey(), one, baseSha));
 
       expect(outcome.kind).toBe('ran');
+    });
+
+    it('counts every file that changes what an install resolves, at any depth', async () => {
+      // Each name on its own commit, nested, against the base: a set missing
+      // one lets a pair be typechecked against the wrong dependency tree.
+      const names = [...DEPENDENCY_FILES].sort();
+      // Branches by index: git refuses a branch name ending in `.lock`.
+      const commits = names.map((name, index) =>
+        commitOn(`dep-${String(index)}`, baseSha, () =>
+          write(dir, `packages/inner/${name}`, 'x\n'),
+        ),
+      );
+      await refresh();
+
+      for (const [index, name] of names.entries()) {
+        const drift = await dependencyDrift(
+          shadow,
+          runner,
+          treeOf(baseSha),
+          treeOf(commits[index]!),
+        );
+        expect(drift, name).toEqual([`packages/inner/${name}`]);
+      }
+      expect(names).toEqual(expect.arrayContaining(['.yarnrc', 'bunfig.toml']));
     });
 
     it('calls a dependency tree the shadow cannot read stale', async () => {

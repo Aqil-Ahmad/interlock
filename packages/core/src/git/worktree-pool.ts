@@ -65,9 +65,11 @@ export const DEPENDENCY_FILES: ReadonlySet<string> = new Set([
   'pnpm-workspace.yaml',
   '.pnpmfile.cjs',
   'yarn.lock',
+  '.yarnrc',
   '.yarnrc.yml',
   'bun.lock',
   'bun.lockb',
+  'bunfig.toml',
   '.npmrc',
 ]);
 
