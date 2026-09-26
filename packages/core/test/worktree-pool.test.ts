@@ -313,25 +313,36 @@ describe('worktree pool', () => {
       expect(existsSync(join(slot.repo.gitDir, 'logs'))).toBe(false);
     });
 
-    it('updates by delta measurably faster than it fills, once settled', async () => {
+    it('updates by delta, rewriting only the files that differ', async () => {
+      // What makes a delta cheap, asserted directly. Its speed is not: on a
+      // tree small enough for a unit test the work saved is milliseconds, the
+      // same order as the variance of starting a process, and the comparison
+      // passes or fails by chance. The speed is measured at real scale.
       const a1 = commitOn('one', baseSha, () => {
         for (let i = 0; i < 1500; i++) write(dir, `many/m${String(i)}.txt`, `${String(i)}\n`);
       });
       const key = newKey();
       const pool = open();
       const cold = ran(await look(pool, await request(key, a1, baseSha)));
-      // The first update after a fill re-reads every file written in the same
-      // second as the index, which git cannot trust by timestamp; on a small
-      // tree that is cheap, on a large one it is a second pass over the tree.
-      // The claim is about the updates after it.
+      const files = join(cold.value.path, 'many');
+      const stamp = (): Map<string, string> =>
+        new Map(
+          readdirSync(files).map((name) => {
+            const { ino, mtimeMs } = statSync(join(files, name));
+            return [name, `${String(ino)}:${String(mtimeMs)}`];
+          }),
+        );
+      const before = stamp();
       const a2 = commitOn('one', a1, () => write(dir, 'many/m7.txt', 'changed\n'));
-      ran(await look(pool, await request(key, a2, baseSha)));
-      const a3 = commitOn('one', a2, () => write(dir, 'many/m8.txt', 'changed\n'));
-      const delta = ran(await look(pool, await request(key, a3, baseSha)));
 
+      const delta = ran(await look(pool, await request(key, a2, baseSha)));
+
+      const after = stamp();
+      const rewritten = [...after].filter(([name, s]) => before.get(name) !== s).map(([n]) => n);
       expect(cold.fill).toBe('cold');
       expect(delta.fill).toBe('delta');
-      expect(delta.fillMs).toBeLessThan(cold.fillMs);
+      expect(after.size).toBe(1500);
+      expect(rewritten).toEqual(['m7.txt']);
     });
 
     it('leaves the slot usable when the check using it throws', async () => {
