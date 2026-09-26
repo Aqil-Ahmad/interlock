@@ -14,8 +14,10 @@ Everything here exists to make that impossible rather than unlikely.
 `packages/core/src/git/repo-handle.ts` defines `UserRepo` and `ShadowRepo`.
 Mutating functions take a `ShadowRepo`, and only `ensureShadow` produces one —
 or the worktree pool, which derives a handle per slot from the shadow
-`ensureShadow` returned and refuses any other — so a write against a user path is
-a compile error rather than something review has to catch.
+`ensureShadow` returned — so passing a `UserRepo` to a write is a compile error
+rather than something review has to catch. The type is structural: a hand-built
+`ShadowRepo` would typecheck, and the pool can check only the shape of the
+shadow it is given, not where it came from. Never build one by hand.
 
 Never widen a signature to `AnyRepo` to make something typecheck. If a function
 needs to write, it needs a `ShadowRepo`; if it cannot get one, the call site is
@@ -187,7 +189,9 @@ magnitude more than the merge, and unaffordable per check.
   throwaway commits stay unreferenced for `gc`.
 - `reset --hard` is a mutating command, allowed here only because pool
   worktrees belong to the shadow clone. The runtime check still applies.
-- Symlink `node_modules` from the user's checkout instead of installing.
+- Link nothing into a slot. The in-process type checker resolves dependencies
+  from the dependency checkout through its host, and a sandboxed command mounts
+  what it needs; a host symlink does not exist inside the container.
 - `.tsbuildinfo` stays in the slot between checks. That persistence is the
   entire reason continuous checking is affordable, so never clear a slot as a
   "cleanup" step.
@@ -208,10 +212,11 @@ magnitude more than the merge, and unaffordable per check.
   cannot trust those. On a 6,500-file tree that is 0.1–2.8 s, about the fill
   again. Time the updates after it, never the first one alone.
 
-The symlink is only valid while dependencies match. If either branch changed
-`package.json` or the lockfile, that pair needs a slower path with a real
-install — or it skips the semantic check and says why. Silently typechecking
-against the wrong dependency tree produces confident nonsense.
+The dependency checkout is only valid while dependencies match. If either
+branch changed `package.json` or the lockfile, the slot is deps-dirty against
+that checkout's tree, and the pair needs a slower path with a real install — or
+it skips the semantic check and says why. Silently typechecking against the
+wrong dependency tree produces confident nonsense.
 
 ## Conflicts are results, not errors
 
