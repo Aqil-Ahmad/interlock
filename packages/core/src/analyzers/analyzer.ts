@@ -7,7 +7,7 @@ import type {
   Logger,
   SpeculativeRunId,
 } from '@interlock/shared';
-import type { ShadowWorktree } from '../git/shadow.js';
+import type { PoolSlot } from '../git/worktree-pool.js';
 import type { SpeculativeMergeResult } from '../merge/speculative-merge.js';
 
 /**
@@ -42,9 +42,15 @@ export interface AnalyzerContext {
   readonly branchB: BranchRefId;
   readonly changeSetA: ChangeSet;
   readonly changeSetB: ChangeSet;
-  /** The merged tree, checked out in a disposable shadow worktree. */
   readonly merged: SpeculativeMergeResult;
-  readonly worktree: ShadowWorktree;
+  /**
+   * The merged tree on disk, in the pair's pool slot, for an analyzer that
+   * needs real files. Null for a conflicted merge, which never enters a slot,
+   * and for a pair whose dependencies differ from the installed tree. Held for
+   * this run alone: valid until `analyze` settles, and never executed on the
+   * host.
+   */
+  readonly slot: PoolSlot | null;
   readonly logger: Logger;
   /** Aborted when the run is superseded by newer snapshots. */
   readonly signal: AbortSignal;
