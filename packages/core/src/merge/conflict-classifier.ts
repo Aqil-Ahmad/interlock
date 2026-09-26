@@ -14,7 +14,12 @@ import { runRequired } from '../git/repo-handle.js';
 import type { GitRunner, ShadowRepo } from '../git/repo-handle.js';
 import { chunkPaths } from '../git/worktree.js';
 import { alignLines } from './line-diff.js';
-import { scanConflictRegions } from './speculative-merge.js';
+import {
+  REGULAR_MODES,
+  scanConflictRegions,
+  TYPE_BINARY,
+  TYPE_CONTENTS,
+} from './speculative-merge.js';
 import type {
   ConflictRegionLines,
   ConflictStage,
@@ -128,16 +133,11 @@ export const MAX_BLOB_BYTES = 1024 * 1024;
  */
 const MAX_ALIGN_EDITS = 1000;
 
-const TYPE_CONTENTS = 'CONFLICT (contents)';
-const TYPE_BINARY = 'CONFLICT (binary)';
 const TYPE_MODIFY_DELETE = 'CONFLICT (modify/delete)';
 const TYPE_RENAME_DELETE = 'CONFLICT (rename/delete)';
 
 /** How far git looks for a NUL before calling content binary. */
 const BINARY_SNIFF_LENGTH = 8000;
-
-/** Modes whose blob is text a line can be read from; a symlink holds a target. */
-const REGULAR_MODES: ReadonlySet<string> = new Set(['100644', '100755']);
 
 const TITLES: Readonly<Record<TextualConflictClass, string>> = {
   'overlapping-edit': 'Both branches changed the same lines',
@@ -293,15 +293,24 @@ function groupConflicts(merged: SpeculativeMergeResult): Conflict[] {
       types.set(path, set);
     }
   }
+  // Indexed once each: the repository decides how many paths conflict, and a
+  // lookup per path over every stage or message is quadratic in a number a
+  // hostile one chooses, all of it paid before the per-run bound applies.
+  const stages = new Map<string, (ConflictStage | undefined)[]>();
+  for (const stage of merged.stages) {
+    const byNumber = stages.get(stage.path) ?? [undefined, undefined, undefined];
+    byNumber[stage.stage - 1] ??= stage;
+    stages.set(stage.path, byNumber);
+  }
+  const origins = movedFromIndex(merged);
   return merged.conflictedPaths.map((path) => {
-    const stage = (n: 1 | 2 | 3): ConflictStage | undefined =>
-      merged.stages.find((s) => s.path === path && s.stage === n);
+    const [base, ours, theirs] = stages.get(path) ?? [];
     return {
-      path: movedFrom(path, merged),
+      path: origins.get(path) ?? path,
       recorded: [path],
-      base: stage(1),
-      ours: stage(2),
-      theirs: stage(3),
+      base,
+      ours,
+      theirs,
       types: [...(types.get(path) ?? [])],
     };
   });
@@ -312,19 +321,22 @@ function conflictMessages(merged: SpeculativeMergeResult): MergeMessage[] {
 }
 
 /**
- * The path a moved-aside file came from, or the path itself.
+ * The path each moved-aside file came from.
  *
  * git names both in the message about the move — `d~<commit>` beside `d` — so
  * the original is read off that pairing rather than off the shape of the name,
- * which a real file can share.
+ * which a real file can share. The first message pairing a path wins.
  */
-function movedFrom(path: string, merged: SpeculativeMergeResult): string {
+function movedFromIndex(merged: SpeculativeMergeResult): Map<string, string> {
+  const origins = new Map<string, string>();
   for (const message of conflictMessages(merged)) {
-    if (!message.paths.includes(path)) continue;
-    const original = message.paths.find((other) => path.startsWith(`${other}~`));
-    if (original !== undefined) return original;
+    for (const path of message.paths) {
+      if (origins.has(path)) continue;
+      const original = message.paths.find((other) => path.startsWith(`${other}~`));
+      if (original !== undefined) origins.set(path, original);
+    }
   }
-  return path;
+  return origins;
 }
 
 /**
@@ -853,7 +865,11 @@ class BlobReader {
       ]);
       byOid = new Map();
       for (const [path, entry] of parseListing(listing.stdout)) {
-        byOid.set(entry.oid, [...(byOid.get(entry.oid) ?? []), path]);
+        // In place: every empty `.gitkeep` shares one blob, and copying the list
+        // per duplicate is quadratic in how many there are.
+        const paths = byOid.get(entry.oid);
+        if (paths === undefined) byOid.set(entry.oid, [path]);
+        else paths.push(path);
       }
       this.#listings.set(commit, byOid);
     }

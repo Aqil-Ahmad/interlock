@@ -116,12 +116,16 @@ const EXIT_CONFLICTED = 1;
  */
 const EXIT_USAGE = 129;
 
-const TYPE_CONTENTS = 'CONFLICT (contents)';
+/** git's type token for a content conflict, as the `-z` messages carry it. */
+export const TYPE_CONTENTS = 'CONFLICT (contents)';
 /**
  * Reported alongside `CONFLICT (contents)` for the same file, not instead of it,
  * so `contents` alone does not mean there are markers to read.
  */
-const TYPE_BINARY = 'CONFLICT (binary)';
+export const TYPE_BINARY = 'CONFLICT (binary)';
+
+/** Modes whose blob is text a line can be read from; a symlink holds a target, a gitlink a commit. */
+export const REGULAR_MODES: ReadonlySet<string> = new Set(['100644', '100755']);
 
 /** The length git writes markers at unless a `conflict-marker-size` says otherwise. */
 const MIN_MARKER_LENGTH = 7;
@@ -340,11 +344,10 @@ async function readConflictBlocks(
       ...chunk,
     ]);
     for (const entry of listing.stdout.split('\0')) {
-      // `<mode> SP <type> SP <object> TAB <path>`; a symlink or a submodule
-      // holds a target or a commit, never markers.
+      // `<mode> SP <type> SP <object> TAB <path>`.
       const tab = entry.indexOf('\t');
-      const [mode, type, oid] = entry.slice(0, tab).split(' ');
-      if (tab === -1 || type !== 'blob' || (mode !== '100644' && mode !== '100755')) continue;
+      const [mode = '', type, oid] = entry.slice(0, tab).split(' ');
+      if (tab === -1 || type !== 'blob' || !REGULAR_MODES.has(mode)) continue;
       const blob = await runRequired(runner, shadow, ['cat-file', 'blob', oid!]);
       blocks.push(...parseConflictRegions(entry.slice(tab + 1), blob.stdout));
     }
