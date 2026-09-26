@@ -95,6 +95,15 @@ export interface BranchSnapshot extends EventBase {
    */
   readonly treeOid: string | null;
   /**
+   * The commit `HEAD` named when the tree was captured; null where it is unborn
+   * or the worktree could not be read.
+   *
+   * The tree is this commit plus the uncommitted work, so it is the only
+   * correct parent for a commit of it — and the branch's head may have moved
+   * by the time anything reads this.
+   */
+  readonly headSha: string | null;
+  /**
    * The diff computed from that tree, by id — the row itself is in the store.
    *
    * `null` when there was no tree to diff, or no merge base to diff it against.
@@ -145,6 +154,24 @@ export interface AnalyzerCompleted extends EventBase {
   readonly analyzer: AnalyzerKind;
   readonly verdict: AnalyzerVerdict;
   readonly durationMs: number;
+}
+
+/**
+ * A clean merge judged worth a semantic check, and given one of the pool's
+ * slots for it.
+ *
+ * Recorded whether or not a semantic analyzer runs, so the rate at which clean
+ * merges escalate — the number that decides whether continuous checking fits a
+ * laptop — is measurable from the log.
+ */
+export interface RunEscalated extends EventBase {
+  readonly type: 'run.escalated';
+  readonly runId: SpeculativeRunId;
+  readonly mergePairId: MergePairId;
+  /** The overlap that justified it; a clean merge with none never escalates. */
+  readonly reason: 'common-file' | 'common-directory';
+  /** The hot pair whose slot this took, when the set was full. */
+  readonly evicted: MergePairId | null;
 }
 
 export interface RunFinished extends EventBase {
@@ -211,6 +238,7 @@ export type InterlockEvent =
   | RunStarted
   | MergeCompleted
   | AnalyzerCompleted
+  | RunEscalated
   | RunFinished
   | FindingRaised
   | FindingResolved

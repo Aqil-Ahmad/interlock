@@ -3,6 +3,8 @@ import type { GitRunner, UserRepo } from '@interlock/core';
 import { isInterlockError, matchesGlob, silentLogger } from '@interlock/shared';
 import type { BranchRef, Logger, Repo } from '@interlock/shared';
 import type { EventBus } from '../bus/index.js';
+import { createShadowRegistry } from '../shadows.js';
+import type { ShadowRegistry } from '../shadows.js';
 import type { Store } from '../store/index.js';
 import { createSnapshotPipeline } from './snapshot.js';
 
@@ -31,6 +33,11 @@ export interface SweepOptions {
   readonly runner: GitRunner;
   /** Root of Interlock's data dir; shadow paths are derived from it. */
   readonly dataDir: string;
+  /**
+   * The shadows captures are written into. The daemon shares one registry
+   * between this and the run pipeline; left out, the sweep keeps its own.
+   */
+  readonly shadows?: ShadowRegistry;
   readonly logger?: Logger;
   /** Passed through to the snapshot pipeline; see its own options. */
   readonly recaptureAfterMs?: number;
@@ -70,6 +77,7 @@ export function createSweep(options: SweepOptions): Sweep {
     store,
     bus,
     runner,
+    shadows: options.shadows ?? createShadowRegistry({ runner, dataDir }),
     ...(options.logger === undefined ? {} : { logger: options.logger }),
     ...(options.recaptureAfterMs === undefined
       ? {}

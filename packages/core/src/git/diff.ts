@@ -9,7 +9,7 @@ import type {
   SnapshotId,
 } from '@interlock/shared';
 import { assertObjectId, runRequired } from './repo-handle.js';
-import type { GitRunner, UserRepo } from './repo-handle.js';
+import type { GitRunOptions, GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
 
 /**
  * ChangeSet extraction: the normalised diff of a branch against its merge-base,
@@ -62,6 +62,17 @@ export interface DiffOptions {
     readonly id: SnapshotId;
     readonly treeOid: string;
   };
+  /**
+   * The shadow the snapshot was captured into. Its tree is there and not in the
+   * user's store, and the shadow borrows the user's objects, so reading through
+   * it sees both.
+   */
+  readonly objectStore?: ShadowRepo;
+}
+
+/** What each diff is run with: the redirection a snapshot in the shadow needs. */
+function runOptionsOf(options: DiffOptions): GitRunOptions {
+  return options.objectStore === undefined ? {} : { objectStore: options.objectStore };
 }
 
 /**
@@ -77,15 +88,14 @@ export async function extractChangeSet(
   options: DiffOptions,
 ): Promise<ChangeSet> {
   const target = resolveTarget(branch, mergeBaseSha, options);
-  const { runner } = options;
 
-  const named = await readNameStatus(repo, runner, mergeBaseSha, target);
+  const named = await readNameStatus(repo, options, mergeBaseSha, target);
   // Ordered identically to `named`: both come from one diff with one set of
   // options, so hunks are matched by position rather than by parsing a path out
   // of a patch header, which git quotes and escapes for awkward names.
   const [binary, hunks] = await Promise.all([
-    readBinaryPaths(repo, runner, mergeBaseSha, target),
-    readHunks(repo, runner, mergeBaseSha, target),
+    readBinaryPaths(repo, options, mergeBaseSha, target),
+    readHunks(repo, options, mergeBaseSha, target),
   ]);
 
   const files: FileChange[] = alignHunks(named, hunks).map((entry) => ({
@@ -121,7 +131,7 @@ export async function touchedPaths(
   options: DiffOptions,
 ): Promise<string[]> {
   const target = resolveTarget(branch, mergeBaseSha, options);
-  const named = await readNameStatus(repo, options.runner, mergeBaseSha, target);
+  const named = await readNameStatus(repo, options, mergeBaseSha, target);
 
   const paths = new Set<string>();
   for (const entry of named) {
@@ -207,18 +217,16 @@ export interface NamedChange {
 
 async function readNameStatus(
   repo: UserRepo,
-  runner: GitRunner,
+  options: DiffOptions,
   base: string,
   target: string,
 ): Promise<NamedChange[]> {
-  const result = await runRequired(runner, repo, [
-    ...DIFF_BASE,
-    '--name-status',
-    '-z',
-    base,
-    target,
-    '--',
-  ]);
+  const result = await runRequired(
+    options.runner,
+    repo,
+    [...DIFF_BASE, '--name-status', '-z', base, target, '--'],
+    runOptionsOf(options),
+  );
   return parseNameStatus(result.stdout);
 }
 
@@ -291,18 +299,16 @@ function kindOf(letter: string): ChangeKind {
  */
 async function readBinaryPaths(
   repo: UserRepo,
-  runner: GitRunner,
+  options: DiffOptions,
   base: string,
   target: string,
 ): Promise<Set<string>> {
-  const result = await runRequired(runner, repo, [
-    ...DIFF_BASE,
-    '--numstat',
-    '-z',
-    base,
-    target,
-    '--',
-  ]);
+  const result = await runRequired(
+    options.runner,
+    repo,
+    [...DIFF_BASE, '--numstat', '-z', base, target, '--'],
+    runOptionsOf(options),
+  );
   return parseBinaryPaths(result.stdout);
 }
 
@@ -353,11 +359,16 @@ export function parseBinaryPaths(stdout: string): Set<string> {
  */
 async function readHunks(
   repo: UserRepo,
-  runner: GitRunner,
+  options: DiffOptions,
   base: string,
   target: string,
 ): Promise<Hunk[][]> {
-  const result = await runRequired(runner, repo, [...DIFF_BASE, '--unified=0', base, target, '--']);
+  const result = await runRequired(
+    options.runner,
+    repo,
+    [...DIFF_BASE, '--unified=0', base, target, '--'],
+    runOptionsOf(options),
+  );
   return parseHunks(result.stdout);
 }
 
