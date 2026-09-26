@@ -4,6 +4,12 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-26 — CodeRabbit on the pool: three taken
+
+- **Taken — a slot-shaped name was taken as proof a registration was the pool's.** git names a registration after its checkout's basename, so a shadow worktree elsewhere could carry one and lose its registration. One is removed only when its `gitdir` points into the pool, or is missing, which no live worktree can be.
+- **Taken — the git skill still told slots to symlink `node_modules`,** against the ADR-0005 amendment. It says to link nothing, and keeps deps-dirty against the dependency checkout.
+- **Taken — the skill called the `ShadowRepo` guarantee total.** The type is structural; passing a `UserRepo` is the compile error, and the pool checks the shadow's shape, not where it came from.
+
 ## 2026-09-26 — second review of the pool: four taken, two rejected
 
 - **Taken — `load()` ran `git worktree prune` over the whole shadow.** It forgot every missing worktree, not only the pool's. Orphaned registrations are removed by slot name now, and a worktree of the shadow that is not a slot is left alone.
