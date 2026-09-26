@@ -4,6 +4,10 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-26 — the pool's timing test was flaky by construction
+
+- **Fixed — "delta faster than cold" failed on CI (98 ms against 94).** A one-file delta reset is 7.8 ms inside git; the rest of its wall time is starting a process, which varies by tens of ms, and a 1,500-file cold fill saves about as much. The test now asserts the mechanism instead: after a delta every file but the changed one keeps its inode and mtime. The speed claim stays with ADR-0005's real-scale measurements. Aging the files to rule out racy-git re-reads was tried first and made no difference.
+
 ## 2026-09-26 — CodeRabbit on the pool: three taken
 
 - **Taken — a slot-shaped name was taken as proof a registration was the pool's.** git names a registration after its checkout's basename, so a shadow worktree elsewhere could carry one and lose its registration. One is removed only when its `gitdir` points into the pool, or is missing, which no live worktree can be.
