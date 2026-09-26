@@ -8,7 +8,7 @@ import type {
   SpeculativeRunId,
 } from '@interlock/shared';
 import type { GitRunner } from '../git/repo-handle.js';
-import type { ShadowWorktree } from '../git/shadow.js';
+import type { PoolSlot } from '../git/worktree-pool.js';
 import type {
   SpeculativeMergeRequest,
   SpeculativeMergeResult,
@@ -50,11 +50,13 @@ export interface AnalyzerContext {
   readonly mergeRequest: SpeculativeMergeRequest;
   readonly merged: SpeculativeMergeResult;
   /**
-   * The merged tree checked out, for an analyzer that has to execute it; null
-   * when the pair has no slot. The merge itself needs no checkout, so an
-   * analyzer that reads only what git wrote runs on every pair without one.
+   * The merged tree on disk, in the pair's pool slot, for an analyzer that
+   * needs real files. Null for a conflicted merge, which never enters a slot,
+   * and for a pair whose dependencies differ from the installed tree. Held for
+   * this run alone: valid until `analyze` settles, and never executed on the
+   * host.
    */
-  readonly worktree: ShadowWorktree | null;
+  readonly slot: PoolSlot | null;
   /** Reads the shadow; `mergeRequest.shadow` is the only repository it is given. */
   readonly runner: GitRunner;
   readonly logger: Logger;

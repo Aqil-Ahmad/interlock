@@ -10,4 +10,5 @@ export * from './repo-handle.js';
 export * from './discovery.js';
 export * from './worktree.js';
 export * from './shadow.js';
+export * from './worktree-pool.js';
 export * from './diff.js';

@@ -85,7 +85,7 @@ read-only reference; never edit it.
 
 ## Hard rules
 
-1. **Never write to a user's repository** — worktree, branch, index, stash or config. Writes take a `ShadowRepo`, and `ensureShadow` is the only way to get one.
+1. **Never write to a user's repository** — worktree, branch, index, stash or config. Writes take a `ShadowRepo`, and only `ensureShadow` mints one — or the worktree pool, for a slot, and only from the shadow `ensureShadow` returned.
 2. **Never execute repository code on the host.** Everything goes through the Docker sandbox.
 3. **Never bind outside `127.0.0.1`.** Never add telemetry.
 4. **Never forward repository content to an agent unwrapped** — use `wrapUntrusted()`.

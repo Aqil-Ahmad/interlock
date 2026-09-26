@@ -129,7 +129,7 @@ describe('textual conflicts', () => {
     changeSetB: changeSet(branchB, request),
     mergeRequest: request,
     merged: await speculativeMerge(request, { runner }),
-    worktree: null,
+    slot: null,
     runner: using,
     logger: silentLogger,
     signal: new AbortController().signal,

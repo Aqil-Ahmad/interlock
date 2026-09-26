@@ -8,9 +8,10 @@ import type { Logger } from '@interlock/shared';
 /**
  * Typed handles separating readable user repositories from writable shadows.
  *
- * Mutating functions take a {@link ShadowRepo}, and `ensureShadow` is the only
- * way to obtain one, so a mutation against a user path is a type error rather
- * than something review has to catch.
+ * Mutating functions take a {@link ShadowRepo}, and only `ensureShadow` mints
+ * one — or the worktree pool, deriving a slot's from the shadow `ensureShadow`
+ * returned — so a mutation against a user path is a type error rather than
+ * something review has to catch.
  */
 
 /** A user's repository. Read-only, always. */
@@ -560,7 +561,7 @@ function realTargetOf(indexFile: string): string | null {
  * a sibling named `..foo` as an escape and calls a path inside the repository
  * outside it.
  */
-function isWithin(parent: string, child: string): boolean {
+export function isWithin(parent: string, child: string): boolean {
   if (child === parent) return true;
   const rel = relative(parent, child);
   if (rel === '' || isAbsolute(rel)) return false;

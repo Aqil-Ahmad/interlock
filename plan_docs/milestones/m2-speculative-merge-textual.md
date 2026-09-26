@@ -240,11 +240,81 @@ merge-tree` over the two commits reports the conflict — with neither side
   a command the runner refused surfaces as the bug it is.
   **Constraints:** evidence is machine-checkable — spans and tool output, never prose alone. The fixture lands before the rule it exercises. Excerpts are bounded; repository content stays out of titles and descriptions.
 
-- [ ] **Per-pair worktree pool**
+- [x] **Per-pair worktree pool**
+      **Files:** `packages/core/src/git/worktree-pool.ts`, `packages/core/src/git/shadow.ts`, `packages/core/src/analyzers/analyzer.ts`
+      **What:** an LRU pool of persistent per-pair worktrees cut from the shadow, under `<dataDir>/worktrees/<repoId>/`, default size 4, set per pool. A slot holds a clean pair's merged tree on disk for a semantic check to read. See ADR-0005.
+
+  The input is a clean `SpeculativeMergeResult` and the two commits it merged;
+  a conflicted one is a caller error, since a tree with markers in it is not
+  worth compiling. Which pairs are worth a slot is the scheduler's decision, not
+  the pool's — the overlap test lives there. The merge is `speculativeMerge`'s;
+  the pool wraps its tree with `commit-tree -p A -p B` and `reset --hard`s the
+  slot to that commit. A first fill is `worktree add --detach --no-checkout`
+  and then the same reset, so every write into a slot is one git process the
+  runner can kill: `worktree add` checks out in a child that outlives its
+  parent when the parent is killed.
+
+  Slot handles are `ShadowRepo`s whose root is the slot and whose git dir is
+  the shadow's `worktrees/<name>`. They are minted by the pool from a handle
+  `ensureShadow` returned, and nowhere else.
+
+  Dependencies are compared between the merged tree and the tree of the
+  checkout whose installed `node_modules` a check would borrow, over every
+  `package.json`, lockfile and package-manager config. The merged tree, not
+  either side: it is what gets compiled, and a side's change that does not
+  survive the merge cannot affect it — while the side-wise rule would skip the
+  commonest pair there is, one branch adding a dependency in the checkout it
+  was installed in. A difference skips the pair with the paths that differ,
+  before any slot is touched, so a pair that cannot be checked never evicts one
+  that can. The slow path with a real install belongs to the sandbox.
+
+  **Done when:**
+  - a second check of the same pair rewrites only the files that differ —
+    inode and mtime of every unchanged file are unmoved — and first fill
+    against update is timed on a real repository through a shadow, with that
+    repository byte-identical afterwards and both numbers in `log.md`.
+    Updates are measurably faster than the fill once settled: the first one
+    after a fill re-reads every file written in the same second as the index,
+    which git cannot trust by timestamp, and on a large tree that costs about
+    as much as the fill — so it is priced with the fill, not with the updates;
+  - untracked and ignored files planted in a slot (a `.tsbuildinfo`, a
+    `.turbo/` cache) survive updates;
+  - eviction is least-recently-used, never takes a slot in use, is logged and
+    returned with its bytes on disk and the age of its build state, and leaves
+    no administrative files in the shadow;
+  - a reset killed with `SIGKILL` (a stale `index.lock`) and one killed by the
+    runner's timeout (a half-written tree) both leave a slot the next check
+    repairs with its build state intact; a slot whose administrative directory
+    is gone, or whose `add` was interrupted, is discarded and filled again;
+  - a deps-dirty pair and a deps-clean pair both get their verdict;
+  - two checks of one pair, raced for real, run one after the other;
+  - a pool whose slots would resolve inside the user's repository — a data
+    dir inside a checkout, or a symlink into one — refuses before creating
+    anything;
+  - a pool opened over slots a previous process left adopts them rather than
+    orphaning them;
+  - the untouched cycle fills a slot and updates it.
+
+  **Constraints:** slots keep a **detached HEAD** so no branch ref moves, and
+  the shadow sets `core.logAllRefUpdates=false`, since a slot has a worktree
+  and git would otherwise keep a `HEAD` reflog there that pins every throwaway
+  commit for 90 days. `reset --hard` is mutating and is permitted only because
+  slots belong to the shadow clone — the runtime `isMutatingCommand` check and
+  `user-repo-untouched.test.ts` both still apply unchanged. Nothing in a slot is
+  executed on the host, and the pool links no `node_modules`: how dependencies
+  reach a check is the sandbox's.
+
+- [ ] **Shadow garbage collection**
       **Files:** `packages/core/src/git/shadow.ts`
-      **What:** an LRU pool of persistent per-pair worktrees under the data dir, default size 4, configurable. A pair enters only after the overlap filter marks it worth watching. Update a slot by delta: `merge-tree --write-tree` → `commit-tree` → `reset --hard` inside that pair's worktree, so only changed files are rewritten. See ADR-0005.
-      **Done when:** a second check of the same pair rewrites only the files that differ and is measurably faster than the first; `.tsbuildinfo` survives between checks of a slot; eviction is logged with its cost; and an aborted run leaves the slot usable rather than half-written.
-      **Constraints:** pool worktrees keep a **detached HEAD** so no branch ref moves. `reset --hard` is a mutating command and is permitted here only because pool worktrees belong to the shadow clone — the runtime `isMutatingCommand` check and `user-repo-untouched.test.ts` both still apply unchanged. Garbage collection in the shadow treats commits held by pool slots, and snapshot commits a queued check still needs, as roots — nothing references them by ref. If either branch or the merge touches `package.json` or the lockfile, mark the pair `deps-dirty` and route to a slow install path, or skip the semantic check and say why; the symlinked `node_modules` is wrong for that pair and typechecking against it produces confident nonsense.
+      **What:** reclaim unreferenced objects in the shadow and bound its disk use, pool slots included.
+      **Done when:** throwaway pool commits and spent snapshot commits are collected, and the shadow's size stays bounded across a day of continuous checks.
+      **Constraints:** a live slot's `HEAD` and index are already roots for git's own `prune` — verified, a worktree's `HEAD` is walked — but a snapshot commit a queued check still needs is referenced by nothing and must be made a root before anything collects. Never collect the user's store: the shadow borrows it through alternates.
+
+- [ ] **`ensureShadow` refuses a data dir inside the repository**
+      **Files:** `packages/core/src/git/shadow.ts`
+      **What:** refuse to create or refresh a shadow whose path resolves inside the checkout it mirrors, or inside that checkout's git directory, before anything is written.
+      **Done when:** a data dir inside the checkout, one inside the main checkout of a linked worktree, and one reached through a symlink are each refused with nothing created, matching the pool's refusal.
+      **Constraints:** hard rule 1. Today a data dir configured inside a checkout puts the whole bare clone into the user's worktree as untracked files; the pool refuses the same case, `ensureShadow` does not.
 
 - [ ] **Scheduler v1**
       **Files:** `packages/daemon/src/scheduler/`

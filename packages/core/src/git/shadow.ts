@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { InterlockError, notImplemented } from '@interlock/shared';
+import { InterlockError } from '@interlock/shared';
 import type { RepoId } from '@interlock/shared';
 import { runRequired } from './repo-handle.js';
 import type { GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
@@ -54,6 +54,10 @@ const SHADOW_CONFIG: readonly (readonly [string, string])[] = [
   // both sides, which is what tells two additions next to each other from two
   // edits of the same line.
   ['merge.conflictStyle', 'diff3'],
+  // A bare repository keeps no reflogs, but a pool slot is a worktree of this
+  // one and git would give it a `HEAD` reflog — one entry per update, each
+  // pinning a throwaway commit against `prune` for ninety days.
+  ['core.logAllRefUpdates', 'false'],
 ];
 
 /**
@@ -106,7 +110,8 @@ export function shadowPathFor(id: RepoId, dataDir: string): string {
 }
 
 /**
- * The only way to obtain a writable repository handle.
+ * The only way to obtain a shadow clone. Every other writable handle — a pool
+ * slot's — is derived from one this returned.
  *
  * Creates the clone if it is absent or unusable, then refreshes it from the
  * user repo. Fetching *from* a repository reads it: git runs `upload-pack`
@@ -266,7 +271,8 @@ async function isUsableShadow(
   return alternatesOf(shadow.rootPath) === source.objectsDir;
 }
 
-function alternatesOf(shadowPath: string): string | null {
+/** The object store a shadow borrows, as its alternates file names it, or null. */
+export function alternatesOf(shadowPath: string): string | null {
   try {
     return readFileSync(alternatesFileOf(shadowPath), 'utf8').trim();
   } catch {
@@ -344,25 +350,4 @@ async function syncConfig(shadow: ShadowRepo, runner: GitRunner): Promise<void> 
       await runRequired(runner, shadow, ['config', key, value]);
     }
   }
-}
-
-/** A disposable checkout inside the shadow clone, used for one merge attempt. */
-export interface ShadowWorktree {
-  readonly path: string;
-  readonly shadow: ShadowRepo;
-  /** Removes the worktree and prunes its administrative files. */
-  dispose(): Promise<void>;
-}
-
-export function createShadowWorktree(
-  _shadow: ShadowRepo,
-  _atCommit: string,
-  _options: ShadowOptions,
-): Promise<ShadowWorktree> {
-  return notImplemented('createShadowWorktree');
-}
-
-/** Reclaim worktrees and objects beyond the disk quota, oldest-unused first. */
-export function collectGarbage(_shadow: ShadowRepo, _options: ShadowOptions): Promise<number> {
-  return notImplemented('collectGarbage');
 }

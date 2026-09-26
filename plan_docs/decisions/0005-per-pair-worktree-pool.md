@@ -103,3 +103,19 @@ ones. Stickiness is now a cost control of the same rank as overlap filtering.
 - **One pool slot per branch rather than per pair** — cheaper on disk, but a
   merged tree belongs to a pair, not a branch, so the incremental state would be
   invalidated by every partner change anyway.
+
+## Amendment — dependencies do not reach a slot through a symlink
+
+The decision above says `node_modules` is symlinked from the user's checkout
+into each slot. The pool, as built, links nothing, because each check reaches
+dependencies its own way. The in-process LanguageService resolves modules
+through its host, which can answer from the dependency checkout directly; the
+sandboxed build and tests mount what they need, and a symlink written on the
+host names a path that does not exist inside the container unless it is mounted
+at the same place. A link in the slot would serve neither and would be one more
+thing a `reset --hard` has to leave alone.
+
+What the pool keeps is the `deps-dirty` decision, made against the tree of the
+checkout whose installed dependencies a check borrows: the merged tree is
+compared with it, and a pair whose dependency files differ is skipped before any
+slot is touched.
