@@ -318,9 +318,33 @@ merge-tree` over the two commits reports the conflict — with neither side
 
 - [ ] **Scheduler v1**
       **Files:** `packages/daemon/src/scheduler/`
-      **What:** decide which pairs get merged, and which clean merges are worth a semantic check. Debounce, mark pairs stale when a branch moves, abort superseded runs, cap concurrency. Rank candidates by file overlap first, then symbol overlap.
-      **Done when:** with 5 branches under continuous edit, work stays inside the CPU budget, no pair is analysed twice for the same snapshot pair, and both the escalation rate and the pool eviction rate are reported.
-      **Constraints:** the daemon's snapshots have to be captured with `objectStore` set to the repository's shadow before any of them reaches a merge; captured without it, as the watcher does today, the tree sits unreferenced in the user's store for their `gc` to reap. This is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason. **Prefer re-checking a hot pooled pair over rotating a new one in.** Stickiness is a cost control of the same rank as overlap filtering, because every eviction discards incremental compiler state and the next check of that pair pays the cold cost again — round-robin fairness across pairs is the worst available strategy.
+      **What:** decide which pairs get merged, and which clean merges would be worth a semantic check; and wire the run pipeline that executes a pair — shadow, the sides' commits, `speculativeMerge` against the pair's merge base, textual classification, and the run, its Findings and its events persisted with `causedBy` — into the daemon. Debounce per branch with a ceiling, mark pairs stale when a branch moves, discard superseded results, cap concurrency, back off infrastructure failures, and rank by file overlap.
+
+  Rewritten before starting, for five reasons. **Symbol overlap** needs the
+  AST layer, which comes later: v1 ranks by file overlap alone — a common file,
+  a common directory, or one side's file being the other's directory — through
+  the pure `pairOverlap()` deferred in M1 until it had a consumer. A pair with
+  definitely none is never merged, since no textual conflict can come of it; a
+  pair whose overlap is unknown, and every branch against the default branch,
+  is merged at low priority. **No semantic analyzer exists**: v1 decides
+  escalation and records it, so the rate is measurable, and runs nothing.
+  **"Pool eviction rate"** cannot come from the pool, which only evicts when a
+  semantic check claims a slot: the scheduler keeps the pool-sized set of hot
+  escalated pairs itself, sticky, and reports the evictions that set makes —
+  the ones the pool will make once something runs in it. **"The same snapshot
+  pair"** is by content, not id: a `SnapshotId` is minted per capture, so
+  identity is the two tree ids and the merge base. And **aborting** has nothing
+  to abort: no layer below takes a signal, so a run superseded mid-flight
+  finishes, is recorded `superseded`, and has its result discarded rather than
+  persisted — a superseded result was never shown, so the same content may be
+  merged once more. Real cancellation waits for a compiler worth killing.
+
+  The watcher's captures move into the shadow's object store, and
+  `branch.snapshot` gains the head each tree was captured against, so a run
+  commits the watcher's own tree instead of hashing the worktree a second time.
+
+  **Done when:** a scheduler driven by an injected clock and fake runs is shown to debounce with a ceiling, rank by overlap, never queue a pair twice, never complete two analyses of one pair for the same content, discard and record superseded runs, back off an infrastructure failure with one `infra.failure` per streak, retry `SNAPSHOT_STALE` at once, and keep a hot pair over a new one; the daemon, with two worktrees editing the same function, raises a textual Finding within 60 s, end to end; and a bench with 5 branches under continuous edit reports idle CPU against the 2% budget, edit-to-Finding latency against 60 s, CPU under edit, queue depth, escalation rate and eviction rate, with the numbers in `log.md`.
+  **Constraints:** the daemon's snapshots have to be captured with `objectStore` set to the repository's shadow before any of them reaches a merge; captured without it, as the watcher does today, the tree sits unreferenced in the user's store for their `gc` to reap. This is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason. **Prefer re-checking a hot pooled pair over rotating a new one in.** Stickiness is a cost control of the same rank as overlap filtering, because every eviction discards incremental compiler state and the next check of that pair pays the cold cost again — round-robin fairness across pairs is the worst available strategy.
 
 - [ ] **Analyzer result caching**
       **Files:** `packages/daemon/src/store/`

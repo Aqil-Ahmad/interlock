@@ -30,7 +30,20 @@ export interface EventBusOptions {
   readonly onRecord?: (record: EventRecord) => void;
 }
 
-type AnyHandler = (event: InterlockEvent) => void | Promise<void>;
+type AnyHandler = (event: InterlockEvent, id: EventId) => void | Promise<void>;
+
+export interface PublishOptions {
+  /**
+   * The event this one follows from, when it is not the one being dispatched.
+   *
+   * Causality is otherwise captured from the dispatch in progress, which holds
+   * only while a subscriber publishes before its first `await`. Work that runs
+   * later — off a timer, after a debounce — has no dispatch in progress and
+   * names its cause here, or the log loses the thread from a Finding back to
+   * the edit that produced it.
+   */
+  readonly causedBy?: EventId;
+}
 
 export class EventBus {
   readonly #handlers = new Map<InterlockEventType | '*', Set<AnyHandler>>();
@@ -47,7 +60,7 @@ export class EventBus {
   /** Subscribe to one event type. */
   on<T extends InterlockEventType>(
     type: T,
-    handler: (event: EventOf<T>) => void | Promise<void>,
+    handler: (event: EventOf<T>, id: EventId) => void | Promise<void>,
   ): Subscription {
     return this.#add(type, handler as AnyHandler);
   }
@@ -63,7 +76,7 @@ export class EventBus {
    * Resolves once every subscriber has settled, so tests can await a publish
    * instead of sleeping. Rejections are logged, never propagated.
    */
-  async publish(event: InterlockEvent): Promise<EventId> {
+  async publish(event: InterlockEvent, options: PublishOptions = {}): Promise<EventId> {
     const id = ulid<EventId>();
     const record: EventRecord = {
       id,
@@ -71,7 +84,7 @@ export class EventBus {
       type: event.type,
       payload: event,
       at: event.at,
-      causedBy: this.#currentCause,
+      causedBy: options.causedBy ?? this.#currentCause,
     };
 
     this.#onRecord?.(record);
@@ -87,7 +100,7 @@ export class EventBus {
       await Promise.all(
         handlers.map(async (handler) => {
           try {
-            await handler(event);
+            await handler(event, id);
           } catch (error) {
             this.#logger.error('subscriber failed', {
               eventType: event.type,

@@ -10,6 +10,11 @@ import type { ApiServer } from './api/index.js';
 import { EventBus } from './bus/index.js';
 import { createSessionRegistry } from './hooks/index.js';
 import { publishRuntime, unpublishRuntime } from './runtime-file.js';
+import { createScheduler } from './scheduler/index.js';
+import type { Scheduler } from './scheduler/index.js';
+import { createRunPipeline } from './scheduler/run-pipeline.js';
+import type { RunPipeline } from './scheduler/run-pipeline.js';
+import { createShadowRegistry } from './shadows.js';
 import { openStore } from './store/index.js';
 import type { Store } from './store/index.js';
 import { createWatcher } from './watcher/index.js';
@@ -21,8 +26,10 @@ import type { Watcher } from './watcher/index.js';
  * which keeps the rest of the codebase testable without a running system.
  *
  * Startup order matters — data-dir hold → store (migrations must succeed) →
- * bus → API → watcher → scheduler. Shutdown is the reverse and must abort in-flight runs
- * and dispose shadow worktrees, or the next start inherits stale locks.
+ * bus → API → scheduler → watcher. The scheduler listens before the watcher's
+ * first pass, or the branches that pass announces are never planned. Shutdown
+ * stops the watcher first, so nothing new is scheduled, then lets the runs in
+ * flight land before the store closes under them.
  */
 
 export interface DaemonOptions {
@@ -68,6 +75,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
   let store: Store | null = null;
   let api: ApiServer | null = null;
   let watcher: Watcher | null = null;
+  let pipeline: RunPipeline | null = null;
+  let scheduler: Scheduler | null = null;
   let runtime: DaemonRuntime | null = null;
   /**
    * Reaps agent sessions on the same cadence the watcher reconciles on.
@@ -135,11 +144,27 @@ export function createDaemon(options: DaemonOptions): Daemon {
           });
         }, cadence);
 
+        // One shadow per repository for everything that writes objects: the
+        // watcher's captures and the commits a run merges must be one store.
+        const shadows = createShadowRegistry({ runner, dataDir: config.dataDir });
+        const runs = createRunPipeline({ store, bus, runner, shadows, logger: options.logger });
+        pipeline = runs;
+        runs.attach();
+        scheduler = createScheduler({
+          config,
+          bus,
+          logger: options.logger,
+          plan: (repoId, branchRefId) => runs.plan(repoId, branchRefId),
+          runPair: (request, signal) => runs.runPair(request, signal),
+        });
+        scheduler.start();
+
         watcher = createWatcher({
           config,
           store,
           bus,
           runner,
+          shadows,
           logger: options.logger,
           ...(options.sweepIntervalMs === undefined
             ? {}
@@ -189,6 +214,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // never advertises a daemon that has already dropped its port.
     await watcher?.stop();
     watcher = null;
+
+    // Runs in flight write to the store, so they land before it closes.
+    await scheduler?.stop();
+    scheduler = null;
+    pipeline?.detach();
+    pipeline = null;
 
     if (reaper !== null) {
       clearInterval(reaper);

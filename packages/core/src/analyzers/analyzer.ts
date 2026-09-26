@@ -44,8 +44,12 @@ export interface AnalyzerContext {
   readonly runId: SpeculativeRunId;
   readonly branchA: BranchRefId;
   readonly branchB: BranchRefId;
-  readonly changeSetA: ChangeSet;
-  readonly changeSetB: ChangeSet;
+  /**
+   * Each side's diff against its merge base with the default branch; null for
+   * a branch with no worktree to diff, which the watcher never snapshots.
+   */
+  readonly changeSetA: ChangeSet | null;
+  readonly changeSetB: ChangeSet | null;
   /** The merge as it was asked for: the shadow, both commits and the merge base. */
   readonly mergeRequest: SpeculativeMergeRequest;
   readonly merged: SpeculativeMergeResult;
