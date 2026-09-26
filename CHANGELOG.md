@@ -6,7 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The daemon now merges in-flight branches against each other and against the default branch as they change, and records a textual-conflict Finding — with each branch's spans — for every pair git cannot merge, uncommitted work included. A pair is checked about two seconds after its branches go quiet, or within ten seconds for one that never does; pairs whose changes have nothing in common are not merged at all. A Finding that stops reproducing is resolved.
+
 ### Changed
+
+- The watcher writes the objects of its snapshots into Interlock's own shadow clone rather than into the repository's object database, so nothing is written under a watched repository's `.git` at all.
 
 - git 2.41 or later is required. Speculative merges run `git merge-tree` against a supplied merge base, reading the repository's attributes from a commit, which older git cannot do; with an older one the daemon reports the toolchain as unsupported rather than a failed merge. macOS's bundled git is 2.39.
 
