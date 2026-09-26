@@ -110,7 +110,8 @@ export function shadowPathFor(id: RepoId, dataDir: string): string {
 }
 
 /**
- * The only way to obtain a writable repository handle.
+ * The only way to obtain a shadow clone. Every other writable handle — a pool
+ * slot's — is derived from one this returned.
  *
  * Creates the clone if it is absent or unusable, then refreshes it from the
  * user repo. Fetching *from* a repository reads it: git runs `upload-pack`
@@ -270,7 +271,8 @@ async function isUsableShadow(
   return alternatesOf(shadow.rootPath) === source.objectsDir;
 }
 
-function alternatesOf(shadowPath: string): string | null {
+/** The object store a shadow borrows, as its alternates file names it, or null. */
+export function alternatesOf(shadowPath: string): string | null {
   try {
     return readFileSync(alternatesFileOf(shadowPath), 'utf8').trim();
   } catch {

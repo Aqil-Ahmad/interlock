@@ -9,13 +9,13 @@ import {
   statSync,
 } from 'node:fs';
 import { lstat, readdir } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { InterlockError, isUlid, silentLogger } from '@interlock/shared';
+import { basename, dirname, join } from 'node:path';
+import { InterlockError, isUlid, silentLogger, ULID_PATTERN } from '@interlock/shared';
 import type { Logger, MergePairKey, RepoId } from '@interlock/shared';
 import type { SpeculativeMergeResult } from '../merge/speculative-merge.js';
-import { assertObjectId, runRequired } from './repo-handle.js';
+import { assertObjectId, isWithin, runRequired } from './repo-handle.js';
 import type { GitRunner, ShadowRepo } from './repo-handle.js';
-import { shadowPathFor } from './shadow.js';
+import { alternatesOf, shadowPathFor } from './shadow.js';
 
 /**
  * The per-pair worktree pool: a few persistent checkouts cut from the shadow,
@@ -71,11 +71,14 @@ export const DEPENDENCY_FILES: ReadonlySet<string> = new Set([
   '.npmrc',
 ]);
 
+/** One ULID, unanchored, taken from the shared definition so the two cannot drift. */
+const ULID = ULID_PATTERN.source.replace(/^\^|\$$/gu, '');
+
 /** Two ULIDs joined by a colon, which is the only shape `makePairKey` produces. */
-const PAIR_KEY = /^([0-9A-HJKMNP-TV-Z]{26}):([0-9A-HJKMNP-TV-Z]{26})$/u;
+const PAIR_KEY = new RegExp(`^(${ULID}):(${ULID})$`, 'u');
 
 /** A slot's directory name: the pair key with the colon made path-neutral. */
-const SLOT_NAME = /^([0-9A-HJKMNP-TV-Z]{26})-([0-9A-HJKMNP-TV-Z]{26})$/u;
+const SLOT_NAME = new RegExp(`^(${ULID})-(${ULID})$`, 'u');
 
 export interface WorktreePoolOptions {
   readonly runner: GitRunner;
@@ -613,21 +616,13 @@ function assertRealShadow(shadow: ShadowRepo, repoId: RepoId, dataDir: string): 
 function protectedDirOf(shadow: ShadowRepo, path: string): string | null {
   const target = resolveDeepest(path);
   const dirs = [shadow.originPath];
-  const objects = alternatesOf(shadow.gitDir);
+  const objects = alternatesOf(shadow.rootPath);
   if (objects !== null) {
     const gitDir = dirname(objects);
     dirs.push(gitDir);
     if (basename(gitDir) === '.git') dirs.push(dirname(gitDir));
   }
   return dirs.find((dir) => isWithin(resolveDeepest(dir), target)) ?? null;
-}
-
-function alternatesOf(gitDir: string): string | null {
-  try {
-    return readFileSync(join(gitDir, 'objects', 'info', 'alternates'), 'utf8').trim();
-  } catch {
-    return null;
-  }
 }
 
 function resolveDeepest(path: string): string {
@@ -643,14 +638,6 @@ function resolveDeepest(path: string): string {
       current = parent;
     }
   }
-}
-
-/** True when `child` is `parent` or beneath it, on whole path segments. */
-function isWithin(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const rel = relative(parent, child);
-  if (rel === '' || isAbsolute(rel)) return false;
-  return rel !== '..' && !rel.startsWith(`..${sep}`);
 }
 
 function slotNameOf(key: MergePairKey): string {

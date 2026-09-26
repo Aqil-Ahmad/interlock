@@ -12,9 +12,10 @@ Everything here exists to make that impossible rather than unlikely.
 ## The two handle types
 
 `packages/core/src/git/repo-handle.ts` defines `UserRepo` and `ShadowRepo`.
-Mutating functions take a `ShadowRepo`, and `ensureShadow` is the only function
-that produces one, so a write against a user path is a compile error rather than
-something review has to catch.
+Mutating functions take a `ShadowRepo`, and only `ensureShadow` produces one —
+or the worktree pool, which derives a handle per slot from the shadow
+`ensureShadow` returned and refuses any other — so a write against a user path is
+a compile error rather than something review has to catch.
 
 Never widen a signature to `AnyRepo` to make something typecheck. If a function
 needs to write, it needs a `ShadowRepo`; if it cannot get one, the call site is
