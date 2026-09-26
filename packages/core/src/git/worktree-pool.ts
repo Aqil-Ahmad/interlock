@@ -332,9 +332,6 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
       );
     }
 
-    // Administrative entries whose checkout has gone, from before this process.
-    await runRequired(runner, shadow, ['worktree', 'prune']);
-
     const found: Entry[] = [];
     for (const name of readdirSync(canonicalPool)) {
       const times = slotTimesOf(canonicalPool, adminRoot, name);
@@ -345,6 +342,15 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
       }
       found.push({ name, key: keyOfSlot(name), ...times, holders: 0 });
     }
+    // Registrations whose checkout has gone — deleted by hand, or never made by
+    // an `add` killed early — removed by name rather than by `worktree prune`,
+    // which reconciles every worktree the shadow has. Only slot-shaped names
+    // are the pool's to remove, and nothing fills a slot before this has run.
+    const present = new Set(readdirSync(canonicalPool));
+    for (const name of existsSync(adminRoot) ? readdirSync(adminRoot) : []) {
+      if (SLOT_NAME.test(name) && !present.has(name)) removeChild(adminRoot, join(adminRoot, name));
+    }
+
     found.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
     for (const entry of found) slots.set(entry.name, entry);
 
@@ -530,6 +536,9 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
         });
       } catch (error) {
         // A slot that never reached the disk holds nothing worth its place.
+        // Only while this check is its sole holder: another check of the same
+        // pair, waiting on the lock, still needs the entry to find, and will
+        // make the add this one could not.
         if (entry.filledAt === null && entry.holders === 1) slots.delete(name);
         throw error;
       } finally {
@@ -579,14 +588,16 @@ export async function dependencyDrift(
 }
 
 /**
- * Refuse a handle that is not the shadow `ensureShadow` put at this data dir.
+ * Refuse a handle that is not shaped like the shadow `ensureShadow` puts at
+ * this data dir.
  *
- * Checked at run time because every slot handle is derived from this one. A
- * slot handle passed back in as a shadow fails the bare check, since its git
- * directory is not its root; a shadow for another repository or data dir
- * fails the path check. The id has to be a ULID before either: it becomes the
- * pool's directory, whose every entry that is not a slot is deleted, and an id
- * of `..` would make that the data dir itself.
+ * Shape, not provenance: the check is that the handle is marked a shadow, is
+ * bare, and sits exactly where `ensureShadow` would put this repository's —
+ * which a value that has been through `JSON.parse` can fail, and a caller
+ * building one by hand can pass. A slot handle passed back in fails the bare
+ * check, since its git directory is not its root. The id has to be a ULID
+ * first: it becomes the pool's directory, whose every entry that is not a slot
+ * is deleted, and an id of `..` would make that the data dir itself.
  */
 function assertRealShadow(shadow: ShadowRepo, repoId: RepoId, dataDir: string): void {
   if (
@@ -627,6 +638,13 @@ function protectedDirOf(shadow: ShadowRepo, path: string): string | null {
   return dirs.find((dir) => isWithin(resolveDeepest(dir), target)) ?? null;
 }
 
+/**
+ * `path` with its deepest existing ancestor resolved and the rest joined back.
+ *
+ * Any failure to resolve is read as "does not exist yet", unreadable included:
+ * a directory this process cannot read is one it cannot create a slot inside
+ * either, so the refusal it might have missed is made by `mkdir` instead.
+ */
 function resolveDeepest(path: string): string {
   const rest: string[] = [];
   let current = path;

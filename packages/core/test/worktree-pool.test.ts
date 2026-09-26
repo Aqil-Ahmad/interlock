@@ -639,20 +639,47 @@ describe('worktree pool', () => {
 
     it('opens once, however many checks it serves', async () => {
       const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
-      const calls: string[][] = [];
-      const counting: GitRunner = {
-        run: (target, args, options) => {
-          calls.push([...args]);
-          return runner.run(target, args, options);
-        },
-      };
-      const pool = open({ runner: counting });
+      const pool = open();
       const slotRequest = await request(newKey(), a, baseSha);
+      await look(pool, slotRequest);
+      // Opening clears anything in the pool directory that is not a slot, so
+      // a stray that survives a second check is proof it did not open again.
+      writeFileSync(join(poolDir(), 'stray'), 'x');
 
       await look(pool, slotRequest);
-      await look(pool, slotRequest);
 
-      expect(calls.filter((argv) => argv[0] === 'worktree' && argv[1] === 'prune')).toHaveLength(1);
+      expect(readdirSync(poolDir())).toContain('stray');
+    });
+
+    it('leaves a worktree of the shadow that is not a slot alone', async () => {
+      // Orphaned registrations are removed by name, not by `worktree prune`,
+      // which would reconcile every worktree the shadow has.
+      const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
+      await refresh();
+      gitIn(shadow.rootPath, 'worktree', 'add', '--detach', join(base, 'elsewhere'), baseSha);
+      rmSync(join(base, 'elsewhere'), { recursive: true, force: true });
+
+      await look(open(), await request(newKey(), a, baseSha));
+
+      expect(adminDirs()).toContain('elsewhere');
+    });
+
+    it('refills a slot whose shadow was rebuilt from under it', async () => {
+      // A rebuild deletes the shadow, and with it every slot's registration,
+      // so a slot cannot outlive it: the checkout points at nothing, is
+      // discarded and filled again from the new shadow.
+      const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
+      const key = newKey();
+      const first = ran(await look(open(), await request(key, a, baseSha)));
+      expect(first.fill).toBe('cold');
+      rmSync(shadow.rootPath, { recursive: true, force: true });
+      await refresh();
+
+      const again = ran(await look(open(), await request(key, a, baseSha)));
+
+      expect(again.fill).toBe('cold');
+      expect(readFileSync(join(again.value.path, 'src', 'f1.ts'), 'utf8')).toBe('v1\n');
+      expect(adminDirs()).toEqual([again.value.path.split('/').pop()]);
     });
 
     it('clears out anything in the pool directory that is not a slot', async () => {
