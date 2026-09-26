@@ -4,6 +4,13 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-26 — review of the pool: all taken
+
+- **Taken — two security helpers were copies.** `isWithin`, the whole-segment containment test that already had its `..foo` bug fixed once, and `alternatesOf` were duplicated from the runner and the shadow. Both are exported from where they were and imported here, so a fix lands once.
+- **Taken — the ULID character class was spelled out twice** beside a shared `ULID_PATTERN` the file already depended on through `isUlid`. The pair key and slot name patterns are built from it.
+- **Taken — hard rule 1 had become false.** It said `ensureShadow` is the only way to get a `ShadowRepo`, and the pool mints one per slot. The rule, the skill and the runner's and shadow's docs now say the pool derives slot handles only from the shadow `ensureShadow` returned — a narrower statement of the same posture, not a change to it.
+- **Taken — `.yarnrc` and `bunfig.toml` were missing from the dependency files.** Both change what an install resolves. Nothing tested which names were in the set at all, so a test now commits each one nested in a package and expects drift, and fails when any is removed.
+
 ## 2026-09-26 — the per-pair worktree pool
 
 - **Task rewritten before coding.** The overlap test that admits a pair is the scheduler's, not the pool's, and the merge is `speculativeMerge`'s: the pool takes a clean result and its two commits. Garbage collection became its own task rather than a `notImplemented` stub nobody had started; `ShadowWorktree`, `createShadowWorktree` and `collectGarbage` are gone, and `AnalyzerContext.worktree` became `slot: PoolSlot | null`.
