@@ -4,6 +4,14 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-26 — third review of the classifier: four taken, three stale
+
+- **Taken — a side's unplaced region shifted every later span onto the wrong region.** Nulls were dropped before pairing, so A's span for region 2 sat beside B's for region 1, and the omitted count missed regions placed on one side only. Spans are region-aligned now, with a null where a side has none; the count is regions without a span on both sides, the bound included.
+- **Taken — binary and symlink content conflicts were `overlapping-edit`.** Neither has lines, so nothing says the same lines were written twice; they are `whole-file-edit`, high, with no span.
+- **Taken, and worse than reported — excerpts were cut before they were redacted.** A key cut at the line bound lost its END marker and a token cut at the character bound fell below its minimum length, so neither matched and both were stored. The span is redacted whole first, and a key the span holds only the start of is dropped from its BEGIN.
+- **Taken — the merged file's entry was one `ls-tree` per conflict.** One listing covers every text conflict.
+- **Stale — the git-facing half untested; the class moving with shadow age; the code unseen.** `textual-conflicts.test.ts` runs real merges through real shadows throughout, and `syncConfig` sets diff3 on every refresh.
+
 ## 2026-09-26 — second review of the classifier: all taken
 
 - **Taken — merge-tree's type tokens and the regular-file modes lived in two modules.** `TYPE_CONTENTS`, `TYPE_BINARY` and `REGULAR_MODES` are exported from `speculative-merge.ts`, which reads that output first, and the classifier imports them; the merge's own inline `100644`/`100755` check uses the set too.
