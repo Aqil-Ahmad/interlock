@@ -637,6 +637,17 @@ describe('worktree pool', () => {
       expect(adminDirs()).toHaveLength(1);
     });
 
+    it('forgets a registration an interrupted add left without a checkout', async () => {
+      const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
+      const gone = ran(await look(open(), await request(newKey(), a, baseSha))).value;
+      rmSync(gone.path, { recursive: true, force: true });
+      rmSync(join(gone.repo.gitDir, 'gitdir'));
+
+      await look(open(), await request(newKey(), a, baseSha));
+
+      expect(adminDirs()).not.toContain(gone.path.split('/').pop());
+    });
+
     it('opens once, however many checks it serves', async () => {
       const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
       const pool = open();
@@ -662,6 +673,19 @@ describe('worktree pool', () => {
       await look(open(), await request(newKey(), a, baseSha));
 
       expect(adminDirs()).toContain('elsewhere');
+    });
+
+    it('leaves a slot-shaped worktree of the shadow outside the pool alone', async () => {
+      // git names a registration after its checkout's basename, so a
+      // worktree elsewhere can carry a name the pool would give a slot.
+      const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'v1\n'));
+      await refresh();
+      const name = `${ulid()}-${ulid()}`;
+      gitIn(shadow.rootPath, 'worktree', 'add', '--detach', join(base, name), baseSha);
+
+      await look(open(), await request(newKey(), a, baseSha));
+
+      expect(adminDirs()).toContain(name);
     });
 
     it('refills a slot whose shadow was rebuilt from under it', async () => {

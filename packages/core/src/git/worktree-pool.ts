@@ -343,12 +343,18 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
       found.push({ name, key: keyOfSlot(name), ...times, holders: 0 });
     }
     // Registrations whose checkout has gone — deleted by hand, or never made by
-    // an `add` killed early — removed by name rather than by `worktree prune`,
-    // which reconciles every worktree the shadow has. Only slot-shaped names
-    // are the pool's to remove, and nothing fills a slot before this has run.
+    // an `add` killed early — removed one by one rather than by `worktree
+    // prune`, which reconciles every worktree the shadow has. git names a
+    // registration after its checkout's basename, so a slot-shaped name is not
+    // enough: one is the pool's only when it points into the pool, or points
+    // nowhere, which no live worktree can. Nothing fills a slot before this.
     const present = new Set(readdirSync(canonicalPool));
     for (const name of existsSync(adminRoot) ? readdirSync(adminRoot) : []) {
-      if (SLOT_NAME.test(name) && !present.has(name)) removeChild(adminRoot, join(adminRoot, name));
+      if (!SLOT_NAME.test(name) || present.has(name)) continue;
+      const checkout = checkoutOf(join(adminRoot, name));
+      if (checkout === null || checkout === join(canonicalPool, name, '.git')) {
+        removeChild(adminRoot, join(adminRoot, name));
+      }
     }
 
     found.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
@@ -709,6 +715,15 @@ function slotTimesOf(
     const filledAt = statSync(join(admin, 'commondir')).mtimeMs;
     const index = join(admin, 'index');
     return { filledAt, lastUsedAt: existsSync(index) ? statSync(index).mtimeMs : filledAt };
+  } catch {
+    return null;
+  }
+}
+
+/** The checkout a registration names, or null when it names none. */
+function checkoutOf(adminDir: string): string | null {
+  try {
+    return readFileSync(join(adminDir, 'gitdir'), 'utf8').trim();
   } catch {
     return null;
   }
