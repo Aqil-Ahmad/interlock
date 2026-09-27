@@ -101,6 +101,15 @@ type LastPublished =
        */
       readonly branchRefId: BranchRefId;
       readonly treeOid: string;
+      /**
+       * The head that tree was captured against.
+       *
+       * A commit of exactly the work in the worktree, or a rebase that leaves
+       * the files alone, moves the head and not the tree. Downstream commits the
+       * tree on this head and merges from its ancestry, so the old one would
+       * merge against a merge base the branch has left.
+       */
+      readonly headSha: string | null;
       readonly snapshotId: SnapshotId;
       readonly at: number;
       readonly changed: boolean;
@@ -149,6 +158,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       if (
         previous?.kind === 'tree' &&
         sameBranch &&
+        previous.headSha === branch.headSha &&
         !previous.changed &&
         now() - previous.at < recaptureAfterMs
       ) {
@@ -166,7 +176,12 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       const marked = lastSeen.get(branch.worktreePath);
       const changedDuringCapture = marked?.kind === 'tree' && marked.changed;
 
-      if (previous?.kind === 'tree' && sameBranch && previous.treeOid === snapshot.treeOid) {
+      if (
+        previous?.kind === 'tree' &&
+        sameBranch &&
+        previous.treeOid === snapshot.treeOid &&
+        previous.headSha === snapshot.headSha
+      ) {
         // Same content, so the clock restarts: without this the ceiling stays
         // expired and every later pass hashes the worktree again.
         lastSeen.set(branch.worktreePath, {
@@ -193,6 +208,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
           kind: 'tree',
           branchRefId: branch.id,
           treeOid: snapshot.treeOid,
+          headSha: snapshot.headSha,
           snapshotId,
           at: now(),
           changed: changedDuringCapture,
@@ -212,6 +228,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
         kind: 'tree',
         branchRefId: branch.id,
         treeOid: snapshot.treeOid,
+        headSha: snapshot.headSha,
         snapshotId,
         at: now(),
         changed: changedDuringCapture,

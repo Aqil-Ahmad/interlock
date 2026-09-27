@@ -232,6 +232,26 @@ describe('run pipeline', () => {
       expect(published('run.started')).toHaveLength(before);
     });
 
+    it('is new content at the same trees on a different merge base', async () => {
+      await run();
+      // Both branches re-parented onto a newer main with their trees untouched:
+      // the trees match, the base does not, and the merge is a different one.
+      writeFileSync(join(root, 'other.ts'), lines('main moved'));
+      git(root, 'commit', '-qam', 'main moves');
+      const newBase = git(root, 'rev-parse', 'HEAD').trim();
+      for (const side of ['a', 'b']) {
+        const cwd = join(base, side);
+        git(cwd, 'add', '-A');
+        git(cwd, 'commit', '-qm', `${side} work`);
+        const tree = git(cwd, 'rev-parse', 'HEAD^{tree}').trim();
+        const moved = git(cwd, 'commit-tree', tree, '-p', newBase, '-m', 'rebased').trim();
+        git(cwd, 'reset', '-q', '--hard', moved);
+      }
+      await observe();
+
+      expect((await run()).kind).toBe('analysed');
+    });
+
     it('keeps one Finding across runs while the conflict stands, and resolves it when it goes', async () => {
       await run();
       const [first] = await store.listOpenFindings((await repo()).id);
