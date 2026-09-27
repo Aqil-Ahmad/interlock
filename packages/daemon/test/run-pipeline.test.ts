@@ -781,6 +781,68 @@ describe('run pipeline', () => {
       }
     });
 
+    it('misses under another build of the code that merges and classifies', async () => {
+      await run();
+      const { runner: watched, calls } = recording();
+      const other = createRunPipeline({
+        store,
+        bus,
+        runner: watched,
+        shadows,
+        logger: silentLogger,
+        build: 'another build',
+      });
+      lastKey = null;
+
+      const { result, git: asked } = await runAlone(other, calls);
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: false });
+      expect(merges(asked)).toBe(1);
+    });
+
+    it('misses once the shadow is rebuilt, whose commits its evidence named', async () => {
+      await run();
+      const handle = { kind: 'user' as const, rootPath: root, gitDir: join(root, '.git') };
+      const before = await shadows.get(handle, (await repo()).id);
+      rmSync(before.rootPath, { recursive: true, force: true });
+      shadows.forget((await repo()).id);
+      await observe();
+      lastKey = null;
+
+      const result = await run();
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: false });
+      const rebuilt = await shadows.get(handle, (await repo()).id);
+      expect(rebuilt.generation).not.toBe(before.generation);
+      // Evidence from this clone, naming commits it holds.
+      const evidence = (await openFinding()).evidence.find((e) => e.type === 'merge-conflict');
+      if (evidence?.type !== 'merge-conflict') throw new Error('no merge evidence');
+      for (const commit of [evidence.commitA, evidence.commitB]) {
+        expect(git(rebuilt.rootPath, 'cat-file', '-t', commit).trim()).toBe('commit');
+      }
+    });
+
+    it('discards a hit whose pair moved while it was being recorded', async () => {
+      await run();
+      await edit('a', '5');
+      await run();
+      const elsewhere = await openFinding();
+      await edit('a', '1');
+      const moved = new AbortController();
+      const listening = bus.on('run.analyzer-completed', (event) => {
+        if (event.cachedFrom !== undefined) moved.abort();
+      });
+
+      const result = await run(moved.signal);
+      listening.unsubscribe();
+
+      expect(result).toEqual({ kind: 'superseded' });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'superseded' });
+      // Nothing written: the Finding still says what the last completed run found.
+      expect(await openFinding()).toEqual(elsewhere);
+    });
+
     it('keeps nothing from an analyzer that could not run', async () => {
       const failing: GitRunner = {
         run: (target, args, options) =>

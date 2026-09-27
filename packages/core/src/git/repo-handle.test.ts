@@ -83,6 +83,7 @@ describe('createGitRunner refusals', () => {
     rootPath: '/shadow',
     gitDir: '/shadow/.git',
     originPath: '/repo',
+    generation: 'test',
   };
   // A path that cannot exist, so a refusal is proven by the rejection reason
   // rather than by git happening to fail afterwards.

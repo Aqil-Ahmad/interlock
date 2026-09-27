@@ -659,6 +659,51 @@ describe('ensureShadow', () => {
     ]);
   });
 
+  describe('generation', () => {
+    const generationOf = (shadowPath: string): string =>
+      gitIn(shadowPath, 'config', 'interlock.generation').trim();
+
+    it('names the clone, and keeps its name across refreshes', async () => {
+      const first = await ensureShadow(repo, { runner, dataDir, repoId });
+      const again = await ensureShadow(repo, { runner, dataDir, repoId });
+
+      expect(first.generation).not.toBe('');
+      expect(again.generation).toBe(first.generation);
+      expect(generationOf(first.rootPath)).toBe(first.generation);
+    });
+
+    it('is new for a clone rebuilt from scratch', async () => {
+      const first = await ensureShadow(repo, { runner, dataDir, repoId });
+      rmSync(first.rootPath, { recursive: true, force: true });
+
+      const rebuilt = await ensureShadow(repo, { runner, dataDir, repoId });
+
+      expect(rebuilt.generation).not.toBe(first.generation);
+    });
+
+    it('gives one to a clone made before generations, and keeps it', async () => {
+      const first = await ensureShadow(repo, { runner, dataDir, repoId });
+      gitIn(first.rootPath, 'config', '--unset', 'interlock.generation');
+
+      const adopted = await ensureShadow(repo, { runner, dataDir, repoId });
+      const kept = await ensureShadow(repo, { runner, dataDir, repoId });
+
+      // Its commits are all still in it, so a name of its own is all it lacks.
+      expect(adopted.generation).not.toBe('');
+      expect(kept.generation).toBe(adopted.generation);
+    });
+
+    it('does not take an empty value for a name', async () => {
+      const first = await ensureShadow(repo, { runner, dataDir, repoId });
+      gitIn(first.rootPath, 'config', 'interlock.generation', '');
+
+      const renamed = await ensureShadow(repo, { runner, dataDir, repoId });
+
+      expect(renamed.generation).not.toBe('');
+      expect(generationOf(first.rootPath)).toBe(renamed.generation);
+    });
+  });
+
   it('can author a commit, which needs an identity nothing else can supply', async () => {
     const shadow = await ensureShadow(repo, { runner, dataDir, repoId });
     const tree = gitIn(shadow.rootPath, 'rev-parse', 'refs/remotes/user/main^{tree}').trim();

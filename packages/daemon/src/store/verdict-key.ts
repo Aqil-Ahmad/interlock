@@ -13,6 +13,12 @@ export interface VerdictKeyParts {
   readonly treeB: string;
   /** The same two trees merged from another base are another merge. */
   readonly mergeBaseSha: string;
+  /**
+   * The shadow clone's generation. A verdict keeps its run's evidence, which
+   * names commits made in that clone; a rebuilt clone has none of them, so its
+   * verdicts are reached again rather than served naming commits that are gone.
+   */
+  readonly shadowGeneration: string;
 }
 
 /**
@@ -36,7 +42,13 @@ export function verdictKey(parts: VerdictKeyParts): string {
   const a = [parts.branchA, parts.treeA] as const;
   const b = [parts.branchB, parts.treeB] as const;
   const [first, second] = parts.branchA < parts.branchB ? [a, b] : [b, a];
-  return JSON.stringify([parts.fingerprint, ...first, ...second, parts.mergeBaseSha]);
+  return JSON.stringify([
+    parts.fingerprint,
+    parts.shadowGeneration,
+    ...first,
+    ...second,
+    parts.mergeBaseSha,
+  ]);
 }
 
 /** What an analyzer's verdict depends on besides the content. */
@@ -44,7 +56,10 @@ export interface Toolchain {
   readonly analyzer: string;
   /** Bumped with the analyzer's logic, so a fixed bug stops being served. */
   readonly version: number;
-  /** Each tool the verdict came through, with its version: `git 2.55.0`. */
+  /**
+   * Each thing the verdict came through, with its version: `git 2.55.0`, and
+   * the build of the code that merged and classified.
+   */
   readonly tools: readonly string[];
 }
 

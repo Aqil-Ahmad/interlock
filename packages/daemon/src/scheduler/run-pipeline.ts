@@ -2,6 +2,7 @@ import {
   captureDirtyState,
   commitSnapshotInShadow,
   assertObjectId,
+  coreBuildId,
   extractChangeSet,
   gitVersion,
   isObjectId,
@@ -74,6 +75,11 @@ export interface RunPipelineOptions {
   readonly runner: GitRunner;
   readonly shadows: ShadowRegistry;
   readonly logger?: Logger;
+  /**
+   * The build verdicts are keyed under: `@interlock/core`'s own by default,
+   * since that is the code that merges and classifies.
+   */
+  readonly build?: string;
 }
 
 /** A branch's content as the watcher last announced it. */
@@ -124,6 +130,7 @@ interface Skip {
 
 export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   const { store, bus, runner, shadows } = options;
+  const build = options.build ?? coreBuildId();
   const log = (options.logger ?? silentLogger).child('run-pipeline');
 
   const announced = new Map<BranchRefId, Announced>();
@@ -330,12 +337,12 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     };
   };
 
-  /** The textual analyzer's fingerprint: its version and the git that merges. */
+  /** The textual analyzer's fingerprint: its version, the git that merges, and this build. */
   const textualFingerprint = async (shadow: ShadowRepo): Promise<string> =>
     toolchainFingerprint({
       analyzer: textualAnalyzer.name,
       version: textualAnalyzer.version,
-      tools: [`git ${await gitVersion(runner, shadow)}`],
+      tools: [`git ${await gitVersion(runner, shadow)}`, `interlock-core ${build}`],
     });
 
   const recapture = async (
@@ -479,6 +486,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         branchB: b.branch.id,
         treeB: b.treeOid,
         mergeBaseSha,
+        shadowGeneration: shadow.generation,
       });
 
     const cached = await store.getCachedVerdict(keyOf(idA, idB, base));
@@ -751,6 +759,12 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         },
         { causedBy: started },
       );
+      // The discard point, as for a run: a branch that moved while the hit was
+      // recorded leaves its verdict describing content already gone.
+      if (signal.aborted) {
+        await finish('superseded', {});
+        return { kind: 'superseded' };
+      }
       const now = new Date().toISOString();
       const raised = cached.findings.map((finding): Finding => ({
         ...finding,

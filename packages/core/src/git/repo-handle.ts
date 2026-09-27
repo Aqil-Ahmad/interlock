@@ -28,6 +28,12 @@ export interface ShadowRepo {
   readonly gitDir: string;
   /** The user repo this shadow mirrors. */
   readonly originPath: string;
+  /**
+   * Which clone this is: new every time the shadow is created, so anything
+   * naming commits made in it — a Finding's evidence, a cached verdict — can
+   * tell a rebuilt clone, which has none of them, from the one it knew.
+   */
+  readonly generation: string;
 }
 
 export type AnyRepo = UserRepo | ShadowRepo;

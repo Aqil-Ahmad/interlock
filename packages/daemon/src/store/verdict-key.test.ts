@@ -16,6 +16,7 @@ describe('verdictKey', () => {
     branchB: high,
     treeB: 'b'.repeat(40),
     mergeBaseSha: 'c'.repeat(40),
+    shadowGeneration: 'g1',
   };
 
   it('does not depend on which side is passed first', () => {
@@ -41,6 +42,7 @@ describe('verdictKey', () => {
     ['the merge base', { mergeBaseSha: 'e'.repeat(40) }],
     ['the pair', { branchB: ulid<BranchRefId>() }],
     ['the toolchain', { fingerprint: 'other' }],
+    ['the shadow clone', { shadowGeneration: 'g2' }],
   ] as const)('differs with %s', (_, change) => {
     expect(verdictKey({ ...parts, ...change })).not.toBe(verdictKey(parts));
   });

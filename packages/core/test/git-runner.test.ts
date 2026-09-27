@@ -466,6 +466,7 @@ describe('git runner against a real repository', () => {
       rootPath: target,
       gitDir: target,
       originPath: dir,
+      generation: 'test',
     };
 
     vi.stubEnv('HOME', home);
@@ -508,7 +509,13 @@ describe('git runner against a real repository', () => {
         join(store, 'objects', 'info', 'alternates'),
         `${realpathSync(join(dir, '.git', 'objects'))}\n`,
       );
-      shadow = { kind: 'shadow', rootPath: store, gitDir: store, originPath: dir };
+      shadow = {
+        kind: 'shadow',
+        rootPath: store,
+        gitDir: store,
+        originPath: dir,
+        generation: 'test',
+      };
     });
 
     afterEach(() => {
@@ -578,6 +585,7 @@ describe('git runner against a real repository', () => {
         rootPath: inside,
         gitDir: inside,
         originPath: dir,
+        generation: 'test',
       };
 
       const error = await rejection(
@@ -594,6 +602,7 @@ describe('git runner against a real repository', () => {
         rootPath: join(store, 'absent'),
         gitDir: join(store, 'absent'),
         originPath: dir,
+        generation: 'test',
       };
 
       const error = await rejection(
@@ -615,6 +624,7 @@ describe('git runner against a real repository', () => {
       rootPath: shadowPath,
       gitDir: join(shadowPath, '.git'),
       originPath: dir,
+      generation: 'test',
     };
     const marker = join(shadowPath, 'hook-fired');
     writeFileSync(
