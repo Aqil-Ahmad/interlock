@@ -1,4 +1,4 @@
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { isWithin, runRequired } from './repo-handle.js';
 import type { GitRunner, UserRepo } from './repo-handle.js';
@@ -35,6 +35,11 @@ export async function repositoryDirsOf(repo: UserRepo, runner: GitRunner): Promi
  * a checkout whose git directory is kept apart is named by nothing on the
  * repository's side, but its `.git` file points at the shared git directory, so
  * from inside it git answers with a directory `dirs` holds. Read-only.
+ *
+ * Git is asked only when some ancestor holds a `.git`, and then it has to
+ * answer: a failure there — an ownership refusal, a filesystem boundary git
+ * will not cross — throws rather than reads as "outside". Outside is decided by
+ * the absence of a `.git`, never by the wording of an error.
  */
 export async function repositoryDirHolding(
   path: string,
@@ -43,18 +48,26 @@ export async function repositoryDirHolding(
 ): Promise<string | null> {
   const direct = dirHolding(path, dirs);
   if (direct !== null) return direct;
+  const [existing] = deepestExisting(path);
+  if (!hasGitAbove(existing)) return null;
   // The runner reads nothing from a handle but `rootPath`, and which git
   // directory this is, is what is being asked.
-  const probe: UserRepo = { kind: 'user', rootPath: deepestExisting(path)[0], gitDir: '' };
-  const answer = await runner.run(probe, [
+  const probe: UserRepo = { kind: 'user', rootPath: existing, gitDir: '' };
+  const answer = await runRequired(runner, probe, [
     'rev-parse',
     '--path-format=absolute',
     '--git-common-dir',
   ]);
-  // Outside every repository, which is where a data dir belongs.
-  if (answer.exitCode !== 0) return null;
   const holder = pathOf(answer.stdout);
   return dirHolding(holder, dirs) !== null ? holder : null;
+}
+
+/** Whether `dir` or any directory above it holds a `.git`, file or directory. */
+function hasGitAbove(dir: string): boolean {
+  for (let current = dir; ; current = dirname(current)) {
+    if (existsSync(join(current, '.git'))) return true;
+    if (dirname(current) === current) return false;
+  }
 }
 
 /** A path git printed, less the one newline it ends with: the path may end in another. */
