@@ -565,6 +565,19 @@ describe('scheduler', () => {
       expect(scheduler.stats.analysed).toBe(1);
     });
 
+    it('tells it at the first new content, not when the branch settles', async () => {
+      make();
+      const [x, y] = [branch(), branch()];
+      plans.set(x, { candidates: [candidate(x, y, 'file')], declined: 0 });
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+
+      await changed(y);
+
+      expect(held[0]!.signal.aborted).toBe(true);
+    });
+
     it('leaves runs of pairs the moving branch is not in alone', async () => {
       make({ concurrency: 2 });
       const [x, y, z, w] = [branch(), branch(), branch(), branch()];
@@ -649,6 +662,21 @@ describe('scheduler', () => {
       await settle();
 
       expect(published('infra.failure')).toHaveLength(2);
+    });
+
+    it('keeps the thread from a retry back to what scheduled the pair', async () => {
+      make();
+      const [x, y] = [branch(), branch()];
+      plans.set(x, { candidates: [candidate(x, y, 'file')], declined: 0 });
+      answer = () => ({ kind: 'infra-failure', component: 'c', message: 'down' });
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+
+      const [first, retry] = published('pair.scheduled');
+      expect(retry!.payload).toMatchObject({ reason: 'retry' });
+      expect(retry!.causedBy).toBe(first!.id);
+      expect(published('infra.failure')[0]!.causedBy).toBe(first!.id);
     });
 
     it('caps the backoff', async () => {
@@ -1047,9 +1075,13 @@ describe('scheduler', () => {
       await Promise.resolve();
       expect(stopped).toBe(false);
       expect(held[0]!.signal.aborted).toBe(true);
-      held[0]!.resolve({ kind: 'superseded' });
+      // A failure landing after stop would ask for a retry nothing will run.
+      const scheduledBefore = published('pair.scheduled').length;
+      held[0]!.resolve({ kind: 'infra-failure', component: 'c', message: 'late' });
       held.length = 0;
       await stopping;
+      expect(published('pair.scheduled')).toHaveLength(scheduledBefore);
+      expect(scheduler.queueDepth).toBe(0);
 
       await changed(x);
       clock.advance(10_000);

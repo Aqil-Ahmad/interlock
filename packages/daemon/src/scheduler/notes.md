@@ -58,6 +58,11 @@ Two exceptions are always planned, at least one tier up:
   conflicting edit is exactly what removes the overlap. Declined, such a pair
   would keep its Finding open forever.
 
+A branch no worktree holds is never snapshotted, so its change set is its
+committed changes alone, diffed from its head once per head. Without one, every
+old local branch in a repository would read as `unknown`, and unknown is always
+merged — each of them, on every settle.
+
 Change sets are diffed against each branch's merge base with the default
 branch, not the pair's. For a branch cut from another the change set only
 grows, so the comparison errs towards overlap — towards merging — which is the
@@ -68,7 +73,9 @@ Planning upserts each pair's row with `stale: true`; a completed run clears it.
 
 ## 3. Invalidate
 
-When a branch settles, every run in flight that contains it is aborted.
+As soon as a branch reports new content, every run in flight that contains it
+is aborted — not when it settles, which would let a run landing inside the
+debounce save results for content already gone.
 Nothing below the scheduler takes a signal — not the runner, not the merge — so
 an abort cannot stop a 5 ms merge mid-flight. It tells the run to discard its
 result when it lands: the run is recorded `superseded`, not `failed`, and
@@ -78,7 +85,9 @@ killing.
 
 Findings are not marked stale on every edit. Doing so would empty the list
 while agents type; a Finding stays open until a completed run says otherwise,
-and the pair's row carries the staleness.
+and the pair's row carries the staleness. A branch that disappears — merged and
+deleted, as every agent branch ends — has its Findings resolved as
+`branch-gone` before its rows are deleted, since the delete cascades to them.
 
 ## 4. Queue and admit
 
@@ -115,6 +124,11 @@ that one's id, `firstSeenAt` and run; an open one not reproduced is resolved.
 The watcher announces a tree again when the head under it moves, even if the
 files did not: a commit of exactly the work on disk, or a rebase, changes the
 ancestry a merge base comes from without changing the tree.
+
+A commit made for a tree is cached, and checked before it is reused: a shadow
+rebuilt while the daemon runs keeps its path and loses every commit in it. A
+merge that finds a commit missing gives the shadow up, so the next attempt
+resolves it afresh.
 
 A tree the shadow does not hold is captured again inside the run, once — the
 remedy for `SNAPSHOT_STALE`. If that still fails, the scheduler retries the pair

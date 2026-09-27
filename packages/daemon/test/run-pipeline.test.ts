@@ -230,6 +230,35 @@ describe('run pipeline', () => {
 
       expect(again.kind).toBe('duplicate');
       expect(published('run.started')).toHaveLength(before);
+      // Planning marked it stale; content already analysed leaves it current.
+      const a = await branchNamed('a');
+      const b = await branchNamed('b');
+      const [pair] = (await store.listMergePairs(a.repoId)).filter(
+        (p) => p.key === makePairKey(a.id, b.id),
+      );
+      expect(pair!.stale).toBe(false);
+    });
+
+    it('resolves a gone branch’s Findings before its rows go, and says why', async () => {
+      await run();
+      const [finding] = await store.listOpenFindings((await repo()).id);
+      const b = await branchNamed('b');
+      const resolvedDuringDelete: string[] = [];
+      bus.on('finding.resolved', async (event) => {
+        const stored = await store.getFinding(event.findingId);
+        resolvedDuringDelete.push(stored!.status);
+      });
+
+      git(root, 'worktree', 'remove', '--force', join(base, 'b'));
+      git(root, 'branch', '-D', 'b');
+      await observe().catch(() => undefined);
+
+      const resolved = published('finding.resolved').at(-1)!;
+      expect(resolved.payload).toMatchObject({ findingId: finding!.id, reason: 'branch-gone' });
+      const disappeared = published('branch.disappeared').at(-1)!;
+      expect(disappeared.payload).toMatchObject({ branchRefId: b.id });
+      expect(resolved.causedBy).toBe(disappeared.id);
+      expect(resolvedDuringDelete).toEqual(['resolved']);
     });
 
     it('is new content at the same trees on a different merge base', async () => {
@@ -409,18 +438,45 @@ describe('run pipeline', () => {
       expect(git(shadow.rootPath, 'cat-file', '-t', tree).trim()).toBe('tree');
     });
 
-    it('merges a branch with no worktree at its head', async () => {
-      git(root, 'branch', 'bare', 'main');
+    /** A branch with one commit changing `path`, and no worktree left holding it. */
+    const bareBranch = (name: string, path: string, content: string): void => {
+      const scratch = join(base, `scratch-${name}`);
+      git(root, 'worktree', 'add', '-q', '-b', name, scratch);
+      writeFileSync(join(scratch, path), content);
+      git(scratch, 'commit', '-qam', `${name} work`);
+      git(root, 'worktree', 'remove', '--force', scratch);
+    };
+
+    it('merges a branch with no worktree at its head, ranked by what it committed', async () => {
+      bareBranch('bare', 'total.ts', body('committed'));
       writeFileSync(join(base, 'a', 'total.ts'), body('1'));
       await observe();
       const [a, bare] = [await branchNamed('a'), await branchNamed('bare')];
+      expect(bare.worktreePath).toBeNull();
       const { candidates } = await pipeline.plan(a.repoId, a.id);
       const candidate = candidates.find((c) => c.pair.a === bare.id || c.pair.b === bare.id)!;
-      expect(candidate.overlap.tier).toBe('unknown');
+      expect(candidate.overlap).toEqual({ tier: 'file', commonFiles: ['total.ts'] });
 
       const result = await pipeline.runPair(request(candidate), new AbortController().signal);
 
-      expect(result).toMatchObject({ kind: 'analysed', clean: true });
+      expect(result).toMatchObject({ kind: 'analysed', clean: false });
+    });
+
+    it('declines old branches no worktree holds when they have nothing in common', async () => {
+      for (let n = 0; n < 10; n++) git(root, 'branch', `old${String(n)}`, 'main');
+      bareBranch('elsewhere', 'other.ts', lines('unrelated'));
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      await observe();
+      const a = await branchNamed('a');
+
+      const { candidates, declined } = await pipeline.plan(a.repoId, a.id);
+
+      expect(declined).toBe(12);
+      const names = new Map(
+        (await store.listBranchRefs(a.repoId)).map((branch) => [branch.id, branch.name]),
+      );
+      const others = candidates.map((c) => names.get(c.pair.a === a.id ? c.pair.b : c.pair.a));
+      expect(others).toEqual(['main']);
     });
 
     it('captures a side again when the tree it was told of is not in the shadow', async () => {
@@ -501,6 +557,59 @@ describe('run pipeline', () => {
         kind: 'skipped',
         reason: 'unrelated',
       });
+    });
+
+    it('recovers a side whose files never changed after the shadow is rebuilt', async () => {
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      writeFileSync(join(base, 'b', 'total.ts'), body('2'));
+      await observe();
+      expect((await run()).kind).toBe('analysed');
+      const handle = { kind: 'user' as const, rootPath: root, gitDir: join(root, '.git') };
+      rmSync((await shadows.get(handle, (await repo()).id)).rootPath, {
+        recursive: true,
+        force: true,
+      });
+      // The watcher notices on its next capture, gives the shadow up, and the
+      // one after rebuilds it; nothing on disk changed in between.
+      await observe().catch(() => undefined);
+      await observe().catch(() => undefined);
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        lastKey = null;
+        expect((await run()).kind).toBe('analysed');
+      }
+    });
+
+    it('gives up a shadow a merge could not find its commits in', async () => {
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      writeFileSync(join(base, 'b', 'total.ts'), body('2'));
+      await observe();
+      await run();
+      const handle = { kind: 'user' as const, rootPath: root, gitDir: join(root, '.git') };
+      const before = await shadows.get(handle, (await repo()).id);
+      // The merge fails, and the check that follows finds a commit missing.
+      let merged = false;
+      const stale: GitRunner = {
+        run: (target, args, options) => {
+          if (args.includes('merge-tree')) {
+            merged = true;
+            return Promise.resolve({ stdout: '', stderr: '', exitCode: 2 });
+          }
+          if (merged && args[0] === 'cat-file' && args[1] === '-e') {
+            return Promise.resolve({ stdout: '', stderr: '', exitCode: 1 });
+          }
+          return runner.run(target, args, options);
+        },
+      };
+      const other = build(stale);
+      lastKey = null;
+
+      await expect(run(new AbortController().signal, other)).rejects.toMatchObject({
+        code: 'SNAPSHOT_STALE',
+      });
+      other.detach();
+
+      expect(await shadows.get(handle, (await repo()).id)).not.toBe(before);
     });
 
     it('recovers when the shadow is removed from under it', async () => {

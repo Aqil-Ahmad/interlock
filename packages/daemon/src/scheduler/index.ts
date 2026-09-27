@@ -288,6 +288,12 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
 
   const onBranchEvent = (repoId: RepoId | null, branch: BranchRefId, id: EventId): void => {
     if (repoId === null) return;
+    // The content a run in flight merged is already gone. Waiting for the
+    // branch to settle would let a run that lands inside the debounce save
+    // results for it.
+    for (const run of running.values()) {
+      if (involves(run.candidate, branch)) run.controller.abort();
+    }
     const now = clock.now();
     const known = pending.get(branch);
     const entry: PendingSettle = known ?? { repoId, firstAt: now, cause: id, timer: null };
@@ -343,6 +349,9 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
     reason: 'branch-moved' | 'manual' | 'retry',
     cause: EventId | null,
   ): Promise<void> => {
+    // A run landing after `stop` would otherwise queue its retry, and publish
+    // it, into a scheduler nothing will ever pump again.
+    if (!active) return;
     // Never merged: git conflicts only where both sides changed a path or its
     // parent, so a pair with nothing in common cannot conflict textually, and
     // without an overlap reason it is not a semantic candidate either.
@@ -430,8 +439,8 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
       resolve(options.runPair(request, controller.signal));
     })
       .then(
-        (result) => land(candidate, result),
-        (error: unknown) => fail(candidate, error),
+        (result) => land(candidate, result, cause),
+        (error: unknown) => fail(candidate, error, cause),
       )
       .catch((error: unknown) => {
         log.error('handling a run outcome failed', { reason: reasonOf(error) });
@@ -443,7 +452,12 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
     running.set(key, { candidate, controller, done });
   };
 
-  const land = async (candidate: PairCandidate, result: PairRunResult): Promise<void> => {
+  /** `cause` is the `pair.scheduled` the run answered, which a retry follows from. */
+  const land = async (
+    candidate: PairCandidate,
+    result: PairRunResult,
+    cause: EventId,
+  ): Promise<void> => {
     const key = candidate.pair.key;
     if (result.kind !== 'infra-failure') {
       backoff.delete(key);
@@ -469,12 +483,12 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
         log.debug('pair skipped', { mergePairId: candidate.pair.id, reason: result.reason });
         return;
       case 'infra-failure':
-        await backOff(candidate, result.component, 'INFRA_FAILURE', result.message);
+        await backOff(candidate, cause, result.component, 'INFRA_FAILURE', result.message);
         return;
     }
   };
 
-  const fail = async (candidate: PairCandidate, error: unknown): Promise<void> => {
+  const fail = async (candidate: PairCandidate, error: unknown, cause: EventId): Promise<void> => {
     const key = candidate.pair.key;
     if (isInterlockError(error) && error.code === 'SNAPSHOT_STALE') {
       // Stale means capture again, and the retry does — at once, since waiting
@@ -482,12 +496,12 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
       const tries = (staleRetries.get(key) ?? 0) + 1;
       staleRetries.set(key, tries);
       if (tries <= STALE_RETRIES) {
-        await enqueue(candidate, 'retry', null);
+        await enqueue(candidate, 'retry', cause);
         return;
       }
     }
     if (isInterlockError(error) && (error.infra || error.code === 'SNAPSHOT_STALE')) {
-      await backOff(candidate, 'run-pipeline', error.code, error.message);
+      await backOff(candidate, cause, 'run-pipeline', error.code, error.message);
       return;
     }
     // Neither the environment nor stale content: a bug. Retrying would repeat
@@ -498,6 +512,7 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
 
   const backOff = async (
     candidate: PairCandidate,
+    cause: EventId,
     component: string,
     code: string,
     message: string,
@@ -513,16 +528,19 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
     // Once per streak: an environment that is down stays down across retries,
     // and saying so on every one fills the log with the same sentence.
     if (state.failures === 1) {
-      await bus.publish({
-        type: 'infra.failure',
-        repoId: candidate.pair.repoId,
-        at: new Date(clock.now()).toISOString(),
-        component,
-        code,
-        message,
-      });
+      await bus.publish(
+        {
+          type: 'infra.failure',
+          repoId: candidate.pair.repoId,
+          at: new Date(clock.now()).toISOString(),
+          component,
+          code,
+          message,
+        },
+        { causedBy: cause },
+      );
     }
-    await enqueue(candidate, 'retry', null);
+    await enqueue(candidate, 'retry', cause);
   };
 
   /**

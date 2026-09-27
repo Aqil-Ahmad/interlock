@@ -1,6 +1,7 @@
 import {
   captureDirtyState,
   commitSnapshotInShadow,
+  extractChangeSet,
   mergeBase,
   openUserRepo,
   runRequired,
@@ -95,8 +96,16 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
    * later merge of it.
    */
   const commits = new Map<string, string>();
+  /**
+   * Committed-only change sets for branches no worktree holds, by head.
+   *
+   * The watcher snapshots only checked-out branches, so without these every
+   * other local branch — a repository's old, finished ones — reads as unknown
+   * overlap, and unknown is always merged: every one of them, on every settle.
+   */
+  const committed = new Map<string, ChangeSet | null>();
+  const subscriptions: Subscription[] = [];
   const handles = new Map<RepoId, Promise<UserRepo>>();
-  let subscription: Subscription | null = null;
 
   const handleOf = (repo: Repo): Promise<UserRepo> => {
     const known = handles.get(repo.id);
@@ -112,9 +121,42 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   const repoOf = async (repoId: RepoId): Promise<Repo | null> =>
     (await store.listRepos()).find((repo) => repo.id === repoId) ?? null;
 
-  const changeSetOf = async (branch: BranchRef): Promise<ChangeSet | null> => {
-    const id = announced.get(branch.id)?.changeSetId ?? null;
-    return id === null ? null : store.getChangeSet(id);
+  const changeSetOf = async (
+    repo: Repo,
+    handle: UserRepo,
+    branch: BranchRef,
+  ): Promise<ChangeSet | null> => {
+    if (branch.worktreePath !== null) {
+      const id = announced.get(branch.id)?.changeSetId ?? null;
+      return id === null ? null : store.getChangeSet(id);
+    }
+    const key = `${branch.id}:${branch.headSha}`;
+    if (committed.has(key)) return committed.get(key)!;
+    const found = await committedChanges(repo, handle, branch);
+    remember(committed, key, found);
+    return found;
+  };
+
+  /**
+   * A branch's committed changes against its merge base with the default
+   * branch — the same comparison the watcher's change sets make.
+   *
+   * Null where the default branch does not resolve: `mergeBase` raises for a
+   * revision it cannot find, and a guess here would rank a pair on nothing.
+   */
+  const committedChanges = async (
+    repo: Repo,
+    handle: UserRepo,
+    branch: BranchRef,
+  ): Promise<ChangeSet | null> => {
+    let base: string | null;
+    try {
+      base = await mergeBase(handle, branch.headSha, repo.defaultBranch, { runner });
+    } catch (error) {
+      if (!isInterlockError(error) || error.code !== 'GIT_COMMAND_FAILED') throw error;
+      return null;
+    }
+    return base === null ? null : extractChangeSet(handle, branch, base, { runner });
   };
 
   /**
@@ -131,7 +173,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     shadow: ShadowRepo,
     branch: BranchRef,
   ): Promise<SideOrSkip> => {
-    const changeSet = await changeSetOf(branch);
+    const changeSet = await changeSetOf(repo, handle, branch);
     if (branch.worktreePath === null) {
       const tree = await runRequired(runner, shadow, [
         'rev-parse',
@@ -197,13 +239,21 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   ): Promise<string> => {
     const key = `${treeOid}:${headSha}`;
     const known = commits.get(key);
-    if (known !== undefined) return known;
+    // Checked, not trusted: a shadow rebuilt while the daemon runs keeps its
+    // path and loses every commit made in it, and a cached one would fail
+    // every merge of a side that never changes again — usually the default
+    // branch, and every pair against it.
+    if (known !== undefined) {
+      const present = await runner.run(shadow, ['cat-file', '-e', `${known}^{commit}`]);
+      if (present.exitCode === 0) return known;
+      commits.delete(key);
+    }
     const made = await commitSnapshotInShadow(
       shadow,
       { treeOid, headSha, clean: false, takenAs: 'whole-tree', capturedAt },
       { runner },
     );
-    commits.set(key, made.commitSha);
+    remember(commits, key, made.commitSha);
     return made.commitSha;
   };
 
@@ -220,14 +270,14 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         makePairKey(finding.attribution.branchA, finding.attribution.branchB),
       ),
     );
-    const movedChanges = await changeSetOf(moved);
+    const movedChanges = await changeSetOf(repo, handle, moved);
 
     const candidates: PairCandidate[] = [];
     let declined = 0;
     for (const other of branches) {
       if (other.id === moved.id) continue;
       const target = moved.name === repo.defaultBranch || other.name === repo.defaultBranch;
-      const overlap = pairOverlap(movedChanges, await changeSetOf(other));
+      const overlap = pairOverlap(movedChanges, await changeSetOf(repo, handle, other));
       const key = makePairKey(moved.id, other.id);
       const openFindings = withFindings.has(key);
       // Declined before git is asked for a merge base, which would be the only
@@ -287,7 +337,12 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     // the same work differ while the trees they hashed to do not. The sides are
     // always in the pair's own order, so the key needs no sorting.
     const contentKey = JSON.stringify([sideA.treeOid, sideB.treeOid, base]);
-    if (!request.isNew(contentKey)) return { kind: 'duplicate', contentKey };
+    if (!request.isNew(contentKey)) {
+      // Planning marked the pair stale because a side moved; a side that moved
+      // back to content already analysed leaves the last run describing it.
+      await store.upsertMergePair({ ...pair, mergeBaseSha: base, stale: false });
+      return { kind: 'duplicate', contentKey };
+    }
 
     const stored = await store.upsertMergePair({
       ...pair,
@@ -345,7 +400,15 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         commitB: sideB.commit,
         mergeBaseSha: base,
       };
-      const merged = await speculativeMerge(mergeRequest, { runner });
+      let merged;
+      try {
+        merged = await speculativeMerge(mergeRequest, { runner });
+      } catch (error) {
+        // A commit the shadow no longer has: the shadow was rebuilt or removed
+        // under its handle, and the next attempt should resolve it afresh.
+        if (isInterlockError(error) && error.code === 'SNAPSHOT_STALE') shadows.forget(repo.id);
+        throw error;
+      }
       const mergedEvent = await bus.publish(
         {
           type: 'run.merge-completed',
@@ -530,24 +593,70 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     return ids;
   };
 
+  const resolveGone = async (
+    repoId: RepoId,
+    branch: BranchRefId,
+    cause: EventId,
+  ): Promise<void> => {
+    const now = new Date().toISOString();
+    for (const finding of await store.listOpenFindings(repoId)) {
+      const { branchA, branchB } = finding.attribution;
+      if (branchA !== branch && branchB !== branch) continue;
+      await store.upsertFinding({
+        ...finding,
+        status: 'resolved',
+        resolvedAt: now,
+        updatedAt: now,
+      });
+      await bus.publish(
+        { type: 'finding.resolved', repoId, at: now, findingId: finding.id, reason: 'branch-gone' },
+        { causedBy: cause },
+      );
+    }
+  };
+
   return {
     attach(): void {
-      subscription ??= bus.on('branch.snapshot', (event) => {
-        announced.set(event.branchRefId, {
-          treeOid: event.treeOid,
-          headSha: event.headSha,
-          changeSetId: event.changeSetId,
-          at: event.at,
-        });
-      });
+      if (subscriptions.length > 0) return;
+      subscriptions.push(
+        bus.on('branch.snapshot', (event) => {
+          announced.set(event.branchRefId, {
+            treeOid: event.treeOid,
+            // Absent from events stored before the field existed.
+            headSha: event.headSha ?? null,
+            changeSetId: event.changeSetId,
+            at: event.at,
+          });
+        }),
+        // Awaited by the sweep before the branch's rows are deleted, and with
+        // them — by cascade — its Findings; resolved here first, so the log
+        // says how each one ended.
+        bus.on('branch.disappeared', async (event, id) => {
+          announced.delete(event.branchRefId);
+          if (event.repoId !== null) await resolveGone(event.repoId, event.branchRefId, id);
+        }),
+      );
     },
 
     detach(): void {
-      subscription?.unsubscribe();
-      subscription = null;
+      for (const subscription of subscriptions.splice(0)) subscription.unsubscribe();
     },
 
     plan,
     runPair,
   };
+}
+
+/**
+ * How many entries each of the pipeline's caches keeps.
+ *
+ * One per tree edited, or head committed, for as long as the daemon runs would
+ * be a leak; the oldest is the least likely to be merged again.
+ */
+const CACHE_ENTRIES = 1024;
+
+function remember<V>(cache: Map<string, V>, key: string, value: V): void {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > CACHE_ENTRIES) cache.delete(cache.keys().next().value!);
 }

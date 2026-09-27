@@ -4,6 +4,16 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-27 — review of scheduler v1: six taken, one half right
+
+- **Taken — a shadow rebuilt under the daemon broke every pair with a side that never changed.** The commit cache was trusted for ever; a rebuilt shadow keeps its path and loses its commits. A cached commit is now checked (`cat-file -e`) before reuse, a merge that finds one missing gives the shadow up, and both caches are bounded at 1,024 entries. Pinned with the reviewer's probe: rebuild, then three runs with nothing on disk changed.
+- **Taken — every local branch without a worktree was merged on every settle.** Only checked-out branches got change sets, so the rest read as `unknown`, and unknown always runs; the bench missed it because all its branches had worktrees. Such a branch now gets its committed changes, diffed once per head; with ten stale branches and one unrelated, planning declines all eleven.
+- **Half right — Findings of a deleted branch were not left open**: deleting the branch cascades and deletes them. But nothing said so. They are now resolved as `branch-gone` from the `branch.disappeared` handler, which the sweep awaits before deleting, with the event as their cause.
+- **Taken — runs abort at a branch's first new content**, not at its settle, so a run landing inside the debounce no longer saves results for content already gone.
+- **Taken, minor:** a retry and its `infra.failure` keep the `pair.scheduled` they answer as their cause; a duplicate clears the pair's `stale`; nothing is queued or published once the scheduler has stopped.
+- **Noted — `branch.snapshot` gained `headSha`, and the log is persisted.** Events stored before it lack the field; the run pipeline reads a missing one as null, and any future replay has to do the same.
+- **Merged `origin/dev`** (the data-dir guard): `daemon.ts`'s start moved into `begin()`, and the scheduler's wiring moved with it.
+
 ## 2026-09-27 — scheduler v1 and the run pipeline
 
 - **Rewrote the task before starting, five ways.** Symbol overlap needs the AST layer, so v1 ranks by file overlap through the `pairOverlap()` deferred from M1. No semantic analyzer exists, so escalation is decided and recorded as `run.escalated`, and nothing runs. The pool evicts only when a check claims a slot, so "pool eviction rate" is the scheduler's own pool-sized hot set, sticky, and the evictions it makes. "The same snapshot pair" is by content — both trees and the merge base — since a `SnapshotId` is minted per capture. And nothing below the scheduler takes a signal, so superseding discards a result when it lands and records the run `superseded`.
