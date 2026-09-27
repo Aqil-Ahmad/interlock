@@ -239,10 +239,25 @@ describe('run pipeline', () => {
       expect(pair!.stale).toBe(false);
     });
 
+    it('listens once however often it is attached', () => {
+      const before = bus.handlerCount;
+      pipeline.attach();
+      expect(bus.handlerCount).toBe(before);
+      pipeline.detach();
+      expect(bus.handlerCount).toBe(before - 2);
+    });
+
     it('resolves a gone branch’s Findings before its rows go, and says why', async () => {
+      // A second pair's Finding, which the branch going does not touch.
+      writeFileSync(join(root, 'total.ts'), body('on main'));
+      await observe();
+      await runWith('main');
+      lastKey = null;
       await run();
-      const [finding] = await store.listOpenFindings((await repo()).id);
       const b = await branchNamed('b');
+      const finding = (await store.listOpenFindings((await repo()).id)).find((f) =>
+        [f.attribution.branchA, f.attribution.branchB].includes(b.id),
+      );
       const resolvedDuringDelete: string[] = [];
       bus.on('finding.resolved', async (event) => {
         const stored = await store.getFinding(event.findingId);
@@ -259,6 +274,11 @@ describe('run pipeline', () => {
       expect(disappeared.payload).toMatchObject({ branchRefId: b.id });
       expect(resolved.causedBy).toBe(disappeared.id);
       expect(resolvedDuringDelete).toEqual(['resolved']);
+      const main = await branchNamed('main');
+      const open = await store.listOpenFindings((await repo()).id);
+      expect(open.map((f) => [f.attribution.branchA, f.attribution.branchB].sort())).toEqual([
+        [(await branchNamed('a')).id, main.id].sort(),
+      ]);
     });
 
     it('is new content at the same trees on a different merge base', async () => {
@@ -460,6 +480,62 @@ describe('run pipeline', () => {
       const result = await pipeline.runPair(request(candidate), new AbortController().signal);
 
       expect(result).toMatchObject({ kind: 'analysed', clean: false });
+    });
+
+    it('diffs a branch no worktree holds once per head, however often it is planned', async () => {
+      bareBranch('bare', 'total.ts', body('committed'));
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      await observe();
+      let diffs = 0;
+      const counting: GitRunner = {
+        run: (target, args, options) => {
+          if (args[0] === 'diff' && args.includes('--name-status')) diffs += 1;
+          return runner.run(target, args, options);
+        },
+      };
+      const other = build(counting);
+      const a = await branchNamed('a');
+
+      await other.plan(a.repoId, a.id);
+      await other.plan(a.repoId, a.id);
+      other.detach();
+
+      expect(diffs).toBe(1);
+    });
+
+    it('reads a branch no worktree holds as unknown when the default branch does not resolve', async () => {
+      bareBranch('bare', 'total.ts', body('committed'));
+      await observe();
+      const [a, bare] = [await branchNamed('a'), await branchNamed('bare')];
+      const failing: GitRunner = {
+        run: (target, args, options) =>
+          args[0] === 'merge-base' && args.includes('main')
+            ? Promise.resolve({ stdout: '', stderr: '', exitCode: 128 })
+            : runner.run(target, args, options),
+      };
+      const other = build(failing);
+
+      const { candidates } = await other.plan(a.repoId, a.id);
+      other.detach();
+
+      const candidate = candidates.find((c) => c.pair.a === bare.id || c.pair.b === bare.id);
+      expect(candidate?.overlap.tier).toBe('unknown');
+    });
+
+    it('lets any other failure diffing a branch no worktree holds through', async () => {
+      bareBranch('bare', 'total.ts', body('committed'));
+      await observe();
+      const a = await branchNamed('a');
+      const broken: GitRunner = {
+        run: (target, args, options) =>
+          args[0] === 'merge-base' && args.includes('main')
+            ? Promise.reject(new TypeError('a bug'))
+            : runner.run(target, args, options),
+      };
+      const other = build(broken);
+
+      await expect(other.plan(a.repoId, a.id)).rejects.toThrow('a bug');
+      other.detach();
     });
 
     it('declines old branches no worktree holds when they have nothing in common', async () => {

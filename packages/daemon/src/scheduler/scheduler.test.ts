@@ -717,6 +717,10 @@ describe('scheduler', () => {
       await settle();
 
       expect(scheduler.stats.started).toBe(4);
+      const [first, ...retries] = published('pair.scheduled');
+      expect(retries.slice(0, 3).map((record) => record.causedBy)).toEqual(
+        Array.from({ length: 3 }, (_, index) => (index === 0 ? first!.id : retries[index - 1]!.id)),
+      );
       expect(published('infra.failure')).toHaveLength(1);
       expect(published('infra.failure')[0]!.payload).toMatchObject({ code: 'SNAPSHOT_STALE' });
     });
