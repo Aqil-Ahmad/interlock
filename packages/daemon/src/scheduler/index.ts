@@ -65,6 +65,8 @@ export type PairRunResult =
       readonly runId: SpeculativeRunId;
       readonly contentKey: string;
       readonly clean: boolean;
+      /** Answered from a verdict reached on the same content; nothing was merged. */
+      readonly cached: boolean;
       readonly findingCount: number;
       /** The run's `run.finished`, which an escalation follows from. */
       readonly finished: EventId;
@@ -110,6 +112,8 @@ export interface SchedulerStats {
   readonly noOverlap: number;
   readonly started: number;
   readonly analysed: number;
+  /** Analyses answered from the verdict cache, which merged nothing. */
+  readonly cacheHits: number;
   readonly clean: number;
   readonly duplicates: number;
   readonly superseded: number;
@@ -254,6 +258,7 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
     noOverlap: 0,
     started: 0,
     analysed: 0,
+    cacheHits: 0,
     clean: 0,
     duplicates: 0,
     superseded: 0,
@@ -466,6 +471,7 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
     switch (result.kind) {
       case 'analysed':
         counts.analysed += 1;
+        if (result.cached) counts.cacheHits += 1;
         analysedAt.set(key, result.contentKey);
         if (result.clean) {
           counts.clean += 1;

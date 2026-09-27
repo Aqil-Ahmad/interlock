@@ -13,6 +13,7 @@ import type { Analyzer, AnalyzerContext, AnalyzerOutcome } from './analyzer.js';
 export const textualAnalyzer: Analyzer = {
   kind: 'textual',
   name: 'textual',
+  version: 1,
 
   appliesTo: (context: AnalyzerContext) => !context.merged.clean,
 

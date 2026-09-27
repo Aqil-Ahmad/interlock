@@ -411,34 +411,52 @@ export function eventParams(record: EventRecord): Params {
 
 // --- Analyzer cache ---------------------------------------------------------
 
+/** A verdict as the cache holds it. */
+export interface CachedVerdict {
+  readonly result: AnalyzerResult;
+  /** The run whose analysis produced it, and whose merge outcome a hit reuses. */
+  readonly runId: SpeculativeRunId;
+  /**
+   * The analyzer's Findings as it produced them, before reconciliation gave
+   * any of them an existing Finding's identity. A hit reconciles these.
+   */
+  readonly findings: readonly Finding[];
+}
+
 /**
  * `cached` is true for every result read from here — it describes how the
  * caller obtained the result, not what the result was, so it is answered rather
  * than stored.
  */
-export function toAnalyzerResult(row: Row): AnalyzerResult {
+export function toCachedVerdict(row: Row): CachedVerdict {
   return {
-    analyzer: oneOf(row, 'analyzer', ANALYZER_KINDS),
-    verdict: oneOf(row, 'verdict', ANALYZER_VERDICTS),
-    findingIds: json<FindingId[]>(row, 'finding_ids'),
-    durationMs: num(row, 'duration_ms'),
-    cached: true,
-    diagnostic: textOrNull(row, 'diagnostic'),
+    result: {
+      analyzer: oneOf(row, 'analyzer', ANALYZER_KINDS),
+      verdict: oneOf(row, 'verdict', ANALYZER_VERDICTS),
+      findingIds: json<FindingId[]>(row, 'finding_ids'),
+      durationMs: num(row, 'duration_ms'),
+      cached: true,
+      diagnostic: textOrNull(row, 'diagnostic'),
+    },
+    runId: text(row, 'run_id') as SpeculativeRunId,
+    findings: json<Finding[]>(row, 'findings'),
   };
 }
 
 export function analyzerCacheParams(
   key: string,
-  result: AnalyzerResult,
+  verdict: CachedVerdict,
   createdAt: string,
 ): Params {
   return {
     key,
-    analyzer: result.analyzer,
-    verdict: result.verdict,
-    finding_ids: JSON.stringify(result.findingIds),
-    duration_ms: result.durationMs,
-    diagnostic: result.diagnostic,
+    analyzer: verdict.result.analyzer,
+    verdict: verdict.result.verdict,
+    finding_ids: JSON.stringify(verdict.result.findingIds),
+    duration_ms: verdict.result.durationMs,
+    diagnostic: verdict.result.diagnostic,
+    run_id: verdict.runId,
+    findings: JSON.stringify(verdict.findings),
     created_at: createdAt,
   };
 }

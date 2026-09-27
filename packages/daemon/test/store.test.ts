@@ -27,6 +27,9 @@ import type {
 } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SCHEMA_VERSION, openStore, runMigrations } from '../src/store/index.js';
+import { INITIAL_SCHEMA } from '../src/store/migrations/001-initial.js';
+import { addSessionLiveness } from '../src/store/migrations/002-session-liveness.js';
+import { addAnalyzerCacheRun } from '../src/store/migrations/003-analyzer-cache-run.js';
 import type { Store } from '../src/store/index.js';
 import { rejection } from './support/rejection.js';
 
@@ -734,21 +737,36 @@ describe('store', () => {
   });
 
   describe('the analyzer cache', () => {
+    let runId: SpeculativeRunId;
+    let raised: Finding;
     const result: AnalyzerResult = {
-      analyzer: 'typecheck',
-      verdict: 'clean',
+      analyzer: 'textual',
+      verdict: 'findings',
       findingIds: [],
       durationMs: 900,
       cached: false,
       diagnostic: null,
     };
 
-    it('reports a stored verdict as cached however it was stored', async () => {
-      await store.putCachedVerdict('snapA:snapB:typecheck:node24', result);
+    beforeEach(async () => {
+      const repoId = (await store.upsertRepo(repo())).id;
+      const a = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/a', name: 'a' })))
+        .id;
+      const b = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/b', name: 'b' })))
+        .id;
+      const origin = run((await store.upsertMergePair(pair(repoId, a, b))).id);
+      runId = origin.id;
+      await store.upsertRun(origin);
+      raised = finding(runId, a, b);
+    });
 
-      expect(await store.getCachedVerdict('snapA:snapB:typecheck:node24')).toEqual({
-        ...result,
-        cached: true,
+    it('keeps the analyzer output and the run it came from, and reports it cached', async () => {
+      await store.putCachedVerdict('k', { result, runId, findings: [raised] });
+
+      expect(await store.getCachedVerdict('k')).toEqual({
+        result: { ...result, cached: true },
+        runId,
+        findings: [raised],
       });
     });
 
@@ -757,12 +775,101 @@ describe('store', () => {
     });
 
     it('overwrites a verdict for the same key', async () => {
-      await store.putCachedVerdict('k', result);
-      await store.putCachedVerdict('k', { ...result, verdict: 'timeout', diagnostic: 'gave up' });
+      await store.putCachedVerdict('k', { result, runId, findings: [raised] });
+      await store.putCachedVerdict('k', {
+        result: { ...result, verdict: 'clean' },
+        runId,
+        findings: [],
+      });
 
       const stored = await store.getCachedVerdict('k');
-      expect(stored?.verdict).toBe('timeout');
-      expect(stored?.diagnostic).toBe('gave up');
+      expect(stored?.result.verdict).toBe('clean');
+      expect(stored?.findings).toEqual([]);
+    });
+
+    it.each(['infra-failure', 'timeout', 'skipped'] as const)(
+      'never keeps a %s verdict, which says nothing about the content',
+      async (verdict) => {
+        await store.putCachedVerdict('k', { result, runId, findings: [raised] });
+
+        const kept = await store.putCachedVerdict('k', {
+          result: { ...result, verdict, diagnostic: 'docker is down' },
+          runId,
+          findings: [],
+        });
+
+        // Refused outright, and the verdict about the content stands.
+        expect(kept).toBe(false);
+        expect((await store.getCachedVerdict('k'))?.result.verdict).toBe('findings');
+        expect(
+          await store.putCachedVerdict('fresh', {
+            result: { ...result, verdict },
+            runId,
+            findings: [],
+          }),
+        ).toBe(false);
+        expect(await store.getCachedVerdict('fresh')).toBeNull();
+      },
+    );
+
+    it('goes with the run it came from', async () => {
+      await store.putCachedVerdict('k', { result, runId, findings: [] });
+
+      // Finished long ago and holding no open finding, so retention takes it.
+      await store.prune('2099-01-01T00:00:00.000Z');
+
+      expect(await store.getRun(runId)).toBeNull();
+      expect(await store.getCachedVerdict('k')).toBeNull();
+    });
+
+    it('refuses a verdict naming a run that does not exist', async () => {
+      await expect(
+        store.putCachedVerdict('k', { result, runId: ulid<SpeculativeRunId>(), findings: [] }),
+      ).rejects.toThrow(/FOREIGN KEY/u);
+    });
+  });
+
+  describe('the analyzer cache migration', () => {
+    /** A store at schema 2, holding a verdict keyed the old way, by snapshot id. */
+    const atVersion2 = (path: string): DatabaseSync => {
+      const db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+      db.exec(INITIAL_SCHEMA);
+      addSessionLiveness(db);
+      db.exec('PRAGMA user_version = 2');
+      db.exec(`INSERT INTO analyzer_cache (key, analyzer, verdict, finding_ids, duration_ms, diagnostic, created_at)
+        VALUES ('snapA:snapB:textual:git', 'textual', 'clean', '[]', 1, NULL, '${T.early}')`);
+      return db;
+    };
+
+    const columns = (db: DatabaseSync): string[] =>
+      db
+        .prepare("SELECT name FROM pragma_table_info('analyzer_cache')")
+        .all()
+        .map((row) => String((row as { name: unknown }).name));
+
+    it('adds the run and the output, and drops verdicts that could never be hit', () => {
+      const db = atVersion2(join(dataDir, 'v2.db'));
+      try {
+        expect(runMigrations(db, silentLogger)).toBe(SCHEMA_VERSION);
+
+        expect(columns(db)).toEqual(expect.arrayContaining(['run_id', 'findings']));
+        expect(db.prepare('SELECT count(*) AS n FROM analyzer_cache').get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+    });
+
+    it('applies again to a database that already has it', () => {
+      const db = atVersion2(join(dataDir, 'again.db'));
+      try {
+        runMigrations(db, silentLogger);
+        // The loser of two daemons starting at once applies it after the
+        // winner has committed it.
+        expect(() => addAnalyzerCacheRun(db)).not.toThrow();
+        expect(columns(db).filter((name) => name === 'run_id')).toHaveLength(1);
+      } finally {
+        db.close();
+      }
     });
   });
 
@@ -807,12 +914,16 @@ describe('store', () => {
       await store.upsertFinding(raised);
       await store.upsertSession(session(repoId, { branchRefId: a }));
       await store.putCachedVerdict('k', {
-        analyzer: 'build',
-        verdict: 'clean',
-        findingIds: [],
-        durationMs: 1,
-        cached: false,
-        diagnostic: null,
+        result: {
+          analyzer: 'build',
+          verdict: 'clean',
+          findingIds: [],
+          durationMs: 1,
+          cached: false,
+          diagnostic: null,
+        },
+        runId,
+        findings: [],
       });
     });
 
@@ -1065,17 +1176,32 @@ describe('store', () => {
     });
 
     it('drops cached verdicts past the window', async () => {
+      const repoId = (await store.upsertRepo(repo())).id;
+      const a = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/a', name: 'a' })))
+        .id;
+      const b = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/b', name: 'b' })))
+        .id;
+      // A run still holding an open finding, so retention keeps it: what goes
+      // is the verdict, by its own age rather than by its run's.
+      const held = run((await store.upsertMergePair(pair(repoId, a, b))).id);
+      await store.upsertRun(held);
+      await store.upsertFinding(finding(held.id, a, b));
       await store.putCachedVerdict('k', {
-        analyzer: 'build',
-        verdict: 'clean',
-        findingIds: [],
-        durationMs: 1,
-        cached: false,
-        diagnostic: null,
+        result: {
+          analyzer: 'build',
+          verdict: 'clean',
+          findingIds: [],
+          durationMs: 1,
+          cached: false,
+          diagnostic: null,
+        },
+        runId: held.id,
+        findings: [],
       });
 
       // Written now, so a cutoff in the future is what puts it out of window.
       expect(await store.prune('2099-01-01T00:00:00.000Z')).toBe(1);
+      expect(await store.getRun(held.id)).not.toBeNull();
       expect(await store.getCachedVerdict('k')).toBeNull();
     });
 

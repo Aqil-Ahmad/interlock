@@ -3,7 +3,10 @@ import type { FindingId, MergePairId, SnapshotId, SpeculativeRunId } from '../id
 /**
  * One execution of merge + analyzers for a MergePair at specific snapshots.
  *
- * Runs are the cache unit, keyed by (snapshotA, snapshotB, analyzer, toolchain).
+ * A run's verdicts are cached per analyzer on the content they judged — each
+ * side's tree, the merge base, the pair in its own order and the analyzer's
+ * toolchain — never on snapshot ids, which are minted per capture. A run
+ * answered from that cache is still a run: its results say `cached`.
  */
 export interface SpeculativeRun {
   readonly id: SpeculativeRunId;

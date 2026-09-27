@@ -154,6 +154,12 @@ export interface AnalyzerCompleted extends EventBase {
   readonly analyzer: AnalyzerKind;
   readonly verdict: AnalyzerVerdict;
   readonly durationMs: number;
+  /**
+   * The run whose analysis of the same content this reused, for a verdict
+   * served from the cache; absent where the analyzer ran. What a hit's
+   * Findings trace back to beyond the hit itself.
+   */
+  readonly cachedFrom?: SpeculativeRunId;
 }
 
 /**

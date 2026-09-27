@@ -12,6 +12,7 @@ import type {
   MergePairId,
   InterlockError,
   RepoId,
+  SpeculativeRunId,
 } from '@interlock/shared';
 import { makePairKey } from '@interlock/shared';
 import {
@@ -26,7 +27,7 @@ import {
   oneOf,
   text,
   textOrNull,
-  toAnalyzerResult,
+  toCachedVerdict,
   toBranchRef,
   toMergePair,
 } from './rows.js';
@@ -183,12 +184,16 @@ describe('analyzer cache', () => {
   };
 
   it('answers `cached` rather than storing it', () => {
-    const params = analyzerCacheParams('k', result, '2026-01-01T00:00:00.000Z');
+    const params = analyzerCacheParams(
+      'k',
+      { result, runId: ulid<SpeculativeRunId>(), findings: [] },
+      '2026-01-01T00:00:00.000Z',
+    );
 
     expect(params).not.toHaveProperty('cached');
     // A result that reached this table was cached by the act of reading it, so
     // storing the flag would only record how some earlier caller got it.
-    expect(toAnalyzerResult({ ...params }).cached).toBe(true);
+    expect(toCachedVerdict({ ...params }).result.cached).toBe(true);
   });
 });
 

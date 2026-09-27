@@ -31,7 +31,7 @@ import {
   runParams,
   sessionParams,
   text,
-  toAnalyzerResult,
+  toCachedVerdict,
   toBranchRef,
   toChangeSet,
   toEventRecord,
@@ -42,7 +42,9 @@ import {
   toRun,
   toSession,
 } from './rows.js';
-import type { Row } from './rows.js';
+import type { CachedVerdict, Row } from './rows.js';
+
+export type { CachedVerdict } from './rows.js';
 
 /**
  * SQLite persistence.
@@ -128,9 +130,24 @@ export interface Store {
    */
   readEvents(since?: EventRecord['id']): AsyncIterable<EventRecord>;
 
-  /** Cached analyzer verdict for (snapshotA, snapshotB, analyzer, toolchain). */
-  getCachedVerdict(key: string): Promise<SpeculativeRun['analyzerResults'][number] | null>;
-  putCachedVerdict(key: string, result: SpeculativeRun['analyzerResults'][number]): Promise<void>;
+  /**
+   * The verdict an analyzer reached on some content, keyed by `verdictKey`:
+   * the pair in its own order, each side's tree, the merge base, the analyzer
+   * and its toolchain fingerprint. Content never goes stale — another tree is
+   * another key — so an entry is invalidated only by a new fingerprint, and
+   * removed with the run it came from or by {@link Store.prune}.
+   */
+  getCachedVerdict(key: string): Promise<CachedVerdict | null>;
+  /**
+   * Remember a verdict, and say whether it was worth remembering.
+   *
+   * Only a verdict about the content is: `clean` or `findings`. An
+   * `infra-failure` or a `timeout` describes the environment at one moment, and
+   * cached it would turn a transient outage into a permanent answer for that
+   * content; `skipped` describes nothing. Those are refused here, once, rather
+   * than at every call site.
+   */
+  putCachedVerdict(key: string, verdict: CachedVerdict): Promise<boolean>;
 
   /** Enforce retention: prune old runs and events beyond the configured window. */
   prune(before: string): Promise<number>;
@@ -143,6 +160,9 @@ export interface StoreOptions {
   readonly path: string;
   readonly logger?: Logger;
 }
+
+/** The verdicts {@link Store.putCachedVerdict} keeps: the ones about the content. */
+const CACHEABLE_VERDICTS: ReadonlySet<AnalyzerResult['verdict']> = new Set(['clean', 'findings']);
 
 /** The in-memory database SQLite recognises by name rather than by path. */
 const MEMORY_PATH = ':memory:';
@@ -451,14 +471,16 @@ class SqliteStore implements Store {
 
       getVerdict: db.prepare('SELECT * FROM analyzer_cache WHERE key = ?'),
       putVerdict: db.prepare(`
-        INSERT INTO analyzer_cache (key, analyzer, verdict, finding_ids, duration_ms, diagnostic, created_at)
-        VALUES (:key, :analyzer, :verdict, :finding_ids, :duration_ms, :diagnostic, :created_at)
+        INSERT INTO analyzer_cache (key, analyzer, verdict, finding_ids, duration_ms, diagnostic, run_id, findings, created_at)
+        VALUES (:key, :analyzer, :verdict, :finding_ids, :duration_ms, :diagnostic, :run_id, :findings, :created_at)
         ON CONFLICT (key) DO UPDATE SET
           analyzer    = excluded.analyzer,
           verdict     = excluded.verdict,
           finding_ids = excluded.finding_ids,
           duration_ms = excluded.duration_ms,
           diagnostic  = excluded.diagnostic,
+          run_id      = excluded.run_id,
+          findings    = excluded.findings,
           created_at  = excluded.created_at`),
 
       pruneEvents: db.prepare('DELETE FROM events WHERE at < ?'),
@@ -624,16 +646,18 @@ class SqliteStore implements Store {
     };
   }
 
-  getCachedVerdict(key: string): Promise<AnalyzerResult | null> {
+  getCachedVerdict(key: string): Promise<CachedVerdict | null> {
     return settled(() => {
       const row = this.#statements.getVerdict.get(key);
-      return row === undefined ? null : toAnalyzerResult(row);
+      return row === undefined ? null : toCachedVerdict(row);
     });
   }
 
-  putCachedVerdict(key: string, result: AnalyzerResult): Promise<void> {
+  putCachedVerdict(key: string, verdict: CachedVerdict): Promise<boolean> {
     return settled(() => {
-      this.#statements.putVerdict.run(analyzerCacheParams(key, result, new Date().toISOString()));
+      if (!CACHEABLE_VERDICTS.has(verdict.result.verdict)) return false;
+      this.#statements.putVerdict.run(analyzerCacheParams(key, verdict, new Date().toISOString()));
+      return true;
     });
   }
 

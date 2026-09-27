@@ -347,9 +347,52 @@ merge-tree` over the two commits reports the conflict — with neither side
   **Constraints:** the daemon's snapshots have to be captured with `objectStore` set to the repository's shadow before any of them reaches a merge; captured without it, as the watcher does today, the tree sits unreferenced in the user's store for their `gc` to reap. This is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason. **Prefer re-checking a hot pooled pair over rotating a new one in.** Stickiness is a cost control of the same rank as overlap filtering, because every eviction discards incremental compiler state and the next check of that pair pays the cold cost again — round-robin fairness across pairs is the worst available strategy.
 
 - [ ] **Analyzer result caching**
-      **Files:** `packages/daemon/src/store/`
-      **What:** cache verdicts on `(snapshotA, snapshotB, analyzer, toolchain)`.
-      **Done when:** re-running an unchanged pair does no work at all.
+      **Files:** `packages/daemon/src/store/`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/core/src/analyzers/`
+      **What:** cache each analyzer's verdict on the content it judged, so re-running a pair at content already analysed — which is what an agent reverting and re-applying a change produces — costs no capture, no commit, no merge and no analyzer.
+
+  Rewritten before starting. **The key as written never hits**: a `SnapshotId`
+  is minted per capture, so identical content gets a new id every time. The key
+  is content: each side's tree, the merge base — the same trees on another base
+  are another merge — the analyzer, and a toolchain fingerprint. **It also names
+  the pair, in the pair's order**: Findings are not copied, so a hit can only
+  point at Findings its own pair raised, and another pair with identical trees —
+  a branch just cut from another — would otherwise be answered with Findings
+  attributed to someone else. The sides always arrive in the pair's order, so a
+  pair is never looked up flipped; the same two trees on swapped sides are a
+  different key, since stages 2 and 3 and the attribution swap with them.
+  Canonicalising and flipping attribution on a hit was rejected: it saves one
+  merge in a case that barely occurs, and flipped Findings would be copies.
+
+  The fingerprint is per analyzer: its name, a version bumped with its logic,
+  and its toolchain — for the textual analyzer the git version, read once per
+  runner. **A hit records a new run, and reconciles the verdict's Findings
+  exactly as a run would**, so what it persists is indistinguishable from the
+  run it replaces. A verdict cannot name Finding ids alone: reconciliation
+  keeps one Finding per conflict and rewrites its evidence on every run, so
+  the Finding a verdict named describes whatever content the pair was checked
+  at last. The verdict keeps the analyzer's output instead, and a hit hands it
+  to the same reconciliation — an open Finding for the same conflict keeps its
+  id, `firstSeenAt` and run, nothing is copied, and the pair's other open
+  Findings are resolved. The scheduler decides escalation on whether the merge
+  was clean, so a verdict also names the run it came from, whose merge outcome
+  the hit reuses; the entry lives as long as that run.
+  `infra-failure`, `timeout` and `skipped` are never cached, and neither is a
+  run that was superseded or threw.
+
+  **Done when:** through a recording runner, a pair whose content goes X → Y → X
+  runs no git at all the third time, and one re-run after a restart runs no
+  capture, commit, merge or analyzer; a bumped analyzer version, a new git
+  version, a different merge base and swapped sides each miss; a hit keeps an
+  open Finding's id and `firstSeenAt` with the cached content's evidence, not
+  the last run's, and traces through `causedBy` to the run it reused;
+  `infra-failure`, `timeout`, `skipped` and `SNAPSHOT_STALE`
+  leave nothing cached; any schema change is a migration shown idempotent; and
+  a hit against a full run on a real repository is timed, both numbers in
+  `log.md`.
+  **Constraints:** Findings stay traceable through `causedBy`. The in-memory
+  de-duplication stays in front of the cache, which it is cheaper than. Nothing
+  in the daemon calls `prune` yet, so no retention window reaches this or any
+  other table; wiring one is its own decision.
 
 - [ ] **False-positive budget**
       **Files:** `packages/daemon/src/store/`, `packages/core/src/advisor/`

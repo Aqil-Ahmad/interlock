@@ -837,6 +837,40 @@ export async function runRequired(
   return result;
 }
 
+/** Each runner's git version, asked once. */
+const versions = new WeakMap<GitRunner, Promise<string>>();
+
+/**
+ * The version of the git a runner invokes, as git reports it — `2.55.0`.
+ *
+ * Part of what a cached verdict is keyed under, since `merge-tree`'s output has
+ * changed between releases. Asked once per runner and kept for the runner's
+ * life: a git upgraded under a running daemon is noticed at the next start.
+ * A failed ask is not kept, so the next caller asks again.
+ *
+ * Takes the shadow because `version` is on no read-only list, and a verb
+ * nothing needs against a user repository stays off it.
+ */
+export function gitVersion(runner: GitRunner, shadow: ShadowRepo): Promise<string> {
+  const known = versions.get(runner);
+  if (known !== undefined) return known;
+  const asking = runRequired(runner, shadow, ['version']).then((result) => {
+    const match = /^git version (\S+)/u.exec(result.stdout);
+    if (match === null) {
+      throw new InterlockError('TOOLCHAIN_UNSUPPORTED', 'git did not report its version', {
+        remedy: 'Report the git in use; its `git version` output differs from the documented form.',
+        infra: true,
+      });
+    }
+    return match[1]!;
+  });
+  versions.set(runner, asking);
+  asking.catch(() => {
+    if (versions.get(runner) === asking) versions.delete(runner);
+  });
+  return asking;
+}
+
 /** Object ids as git writes them: SHA-1 or SHA-256 length, and nothing between. */
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
