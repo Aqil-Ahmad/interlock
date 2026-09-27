@@ -41,9 +41,13 @@ export function pairOverlap(a: ChangeSet | null, b: ChangeSet | null): PairOverl
   const dirsB = directoriesOf(pathsB);
   const sharedDir = [...directoriesOf(pathsA)].some((dir) => dirsB.has(dir));
   // A file on one side where the other has a directory: `d` against `d/x`.
+  // Each side's ancestors built once: inside the callbacks they would be
+  // rebuilt per path, quadratic in the size of a large refactor.
+  const ancestorsA = ancestorsOf(pathsA);
+  const ancestorsB = ancestorsOf(pathsB);
   const fileMeetsDir =
-    [...pathsA].some((path) => ancestorsOf(pathsB).has(path)) ||
-    [...pathsB].some((path) => ancestorsOf(pathsA).has(path));
+    [...pathsA].some((path) => ancestorsB.has(path)) ||
+    [...pathsB].some((path) => ancestorsA.has(path));
   if (sharedDir || fileMeetsDir) return { tier: 'directory', commonFiles: [] };
 
   return { tier: 'none', commonFiles: [] };

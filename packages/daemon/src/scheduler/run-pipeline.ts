@@ -70,6 +70,12 @@ interface Announced {
   readonly headSha: string | null;
   readonly changeSetId: ChangeSetId | null;
   readonly at: string;
+  /**
+   * The watcher captured this tree, so the change set named beside it was
+   * computed from it. False for a tree captured inside a run, which keeps the
+   * last change set for ranking but has no snapshot of its own.
+   */
+  readonly announced: boolean;
 }
 
 /** One side of a pair, ready to merge. */
@@ -79,6 +85,8 @@ interface Side {
   readonly headSha: string;
   readonly treeOid: string;
   readonly changeSet: ChangeSet | null;
+  /** The watcher's snapshot of exactly this tree; null for a side it never snapshotted. */
+  readonly snapshotId: SnapshotId | null;
 }
 
 type SideOrSkip = Side | { readonly skip: 'unreadable' | 'unborn' };
@@ -187,6 +195,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         headSha: branch.headSha,
         treeOid: tree.stdout.trim(),
         changeSet,
+        snapshotId: null,
       };
     }
 
@@ -206,7 +215,14 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
       if (seen.headSha === null) return { skip: 'unborn' };
       commit = await commitOf(shadow, seen.treeOid, seen.headSha, seen.at);
     }
-    return { branch, commit, headSha: seen.headSha, treeOid: seen.treeOid, changeSet };
+    return {
+      branch,
+      commit,
+      headSha: seen.headSha,
+      treeOid: seen.treeOid,
+      changeSet,
+      snapshotId: seen.announced ? (changeSet?.snapshotId ?? null) : null,
+    };
   };
 
   const recapture = async (
@@ -226,6 +242,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
       headSha: snapshot.headSha,
       changeSetId: announced.get(branch.id)?.changeSetId ?? null,
       at: snapshot.capturedAt,
+      announced: false,
     };
     announced.set(branch.id, seen);
     return seen;
@@ -352,8 +369,8 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     const run: SpeculativeRun = {
       id: ulid<SpeculativeRunId>(),
       mergePairId: stored.id,
-      snapshotA: ulid<SnapshotId>(),
-      snapshotB: ulid<SnapshotId>(),
+      snapshotA: sideA.snapshotId ?? ulid<SnapshotId>(),
+      snapshotB: sideB.snapshotId ?? ulid<SnapshotId>(),
       status: 'running',
       mergeOutcome: null,
       analyzerResults: [],
@@ -375,17 +392,26 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     );
     const startedAt = Date.now();
 
+    /** Record how the run ended, and say so: every started run gets a `run.finished`. */
     const finish = async (
-      status: SpeculativeRun['status'],
+      status: 'complete' | 'superseded' | 'failed',
       patch: Partial<SpeculativeRun>,
-    ): Promise<void> => {
-      await store.upsertRun({
-        ...run,
-        ...patch,
-        status,
-        finishedAt: new Date().toISOString(),
-        durationMs: Date.now() - startedAt,
-      });
+    ): Promise<EventId> => {
+      const finishedAt = new Date().toISOString();
+      const durationMs = Date.now() - startedAt;
+      await store.upsertRun({ ...run, ...patch, status, finishedAt, durationMs });
+      return bus.publish(
+        {
+          type: 'run.finished',
+          repoId: repo.id,
+          at: finishedAt,
+          runId: run.id,
+          status,
+          findingCount: patch.findingIds?.length ?? 0,
+          durationMs,
+        },
+        { causedBy: started },
+      );
     };
 
     try {
@@ -479,7 +505,8 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
       }
 
       const findingIds = await reconcileFindings(repo.id, stored, outcome.findings, analyzed);
-      await finish('complete', {
+      await store.upsertMergePair({ ...stored, lastRunAt: new Date().toISOString(), stale: false });
+      const finished = await finish('complete', {
         mergeOutcome,
         findingIds,
         analyzerResults: [
@@ -493,18 +520,6 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
           },
         ],
       });
-      await store.upsertMergePair({ ...stored, lastRunAt: new Date().toISOString(), stale: false });
-      const finished = await bus.publish(
-        {
-          type: 'run.finished',
-          repoId: repo.id,
-          at: new Date().toISOString(),
-          runId: run.id,
-          findingCount: findingIds.length,
-          durationMs: Date.now() - startedAt,
-        },
-        { causedBy: started },
-      );
       return {
         kind: 'analysed',
         runId: run.id,
@@ -626,6 +641,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
             headSha: event.headSha ?? null,
             changeSetId: event.changeSetId,
             at: event.at,
+            announced: true,
           });
         }),
         // Awaited by the sweep before the branch's rows are deleted, and with

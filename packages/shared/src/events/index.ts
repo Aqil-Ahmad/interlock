@@ -174,9 +174,22 @@ export interface RunEscalated extends EventBase {
   readonly evicted: MergePairId | null;
 }
 
+/**
+ * The end of every run that started, however it ended.
+ *
+ * Without one for each, a `run.started` whose result was discarded, or whose
+ * merge failed, reads on replay as a run still in flight.
+ */
 export interface RunFinished extends EventBase {
   readonly type: 'run.finished';
   readonly runId: SpeculativeRunId;
+  /**
+   * `complete` — its Findings were persisted. `superseded` — a branch moved
+   * while it ran, and its result was discarded. `failed` — it could not finish.
+   * Absent from events stored before the field existed, all of which were
+   * `complete`.
+   */
+  readonly status: 'complete' | 'superseded' | 'failed';
   readonly findingCount: number;
   readonly durationMs: number;
 }

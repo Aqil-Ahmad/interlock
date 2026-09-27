@@ -27,10 +27,13 @@ is what makes a branch that never goes quiet — an agent mid-task — get check
 at all.
 
 This is a second, coarser layer. The watcher already debounces signals at
-250 ms with a 2 s ceiling before a snapshot exists. Edit-to-Finding is therefore
-at most the watcher's ceiling, plus the scheduler's, plus the run: about 12 s
-plus a few milliseconds of merge, well inside 60 s. Claims about latency count
-each layer once.
+250 ms with a 2 s ceiling before a snapshot exists. With nothing queued ahead of
+a pair, edit-to-Finding is the watcher's ceiling, plus the scheduler's, plus the
+run: about 12 s plus a few milliseconds of merge. Queue wait comes on top, and
+has no fixed bound — admission is by priority, and aging only guarantees a
+waiting pair eventually outranks new ones — so the 60 s budget is held by
+measurement, not by construction: under five branches of continuous edit, the
+bench measured 7–8 s. Claims about latency count each layer once.
 
 ## 2. Plan, from the branch that settled
 

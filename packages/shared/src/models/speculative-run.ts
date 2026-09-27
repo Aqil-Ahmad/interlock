@@ -8,7 +8,15 @@ import type { FindingId, MergePairId, SnapshotId, SpeculativeRunId } from '../id
 export interface SpeculativeRun {
   readonly id: SpeculativeRunId;
   readonly mergePairId: MergePairId;
-  /** Exact content both sides were at; makes the run reproducible. */
+  /**
+   * The snapshot each side's tree came from: the watcher's own, which its
+   * change set records, so a run traces to the content it merged.
+   *
+   * Minted by the run for a side the watcher never snapshotted — a branch no
+   * worktree holds, or a tree captured inside the run — and naming nothing
+   * else: such a side is identified by its tree alone, which the run does not
+   * yet record.
+   */
   readonly snapshotA: SnapshotId;
   readonly snapshotB: SnapshotId;
   readonly status: RunStatus;

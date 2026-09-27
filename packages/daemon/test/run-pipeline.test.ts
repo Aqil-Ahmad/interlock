@@ -84,6 +84,29 @@ describe('run pipeline', () => {
   const published = (type: EventRecord['type']): EventRecord[] =>
     records.filter((record) => record.type === type);
 
+  /** The run's `run.finished`, checked to follow from its `run.started`. */
+  const endOf = (runId: string): Record<string, unknown> => {
+    const started = published('run.started').find(
+      (record) => (record.payload as { runId: string }).runId === runId,
+    )!;
+    const ends = published('run.finished').filter(
+      (record) => (record.payload as { runId: string }).runId === runId,
+    );
+    expect(ends).toHaveLength(1);
+    expect(ends[0]!.causedBy).toBe(started.id);
+    return ends[0]!.payload as unknown as Record<string, unknown>;
+  };
+
+  /** The snapshot id the watcher's latest change set for a branch records. */
+  const watcherSnapshotOf = async (branchRefId: string): Promise<string | null> => {
+    const last = published('branch.snapshot')
+      .map((record) => record.payload as { branchRefId: string; changeSetId: string | null })
+      .filter((payload) => payload.branchRefId === branchRefId)
+      .at(-1);
+    if (last?.changeSetId == null) return null;
+    return (await store.getChangeSet(last.changeSetId as never))?.snapshotId ?? null;
+  };
+
   beforeEach(async () => {
     base = realpathSync(mkdtempSync(join(tmpdir(), 'interlock-pipeline-')));
     root = join(base, 'repo');
@@ -220,6 +243,12 @@ describe('run pipeline', () => {
       expect(byType('finding.raised').causedBy).toBe(byType('run.analyzer-completed').id);
       expect(byType('run.finished').causedBy).toBe(byType('run.started').id);
       expect(result.kind === 'analysed' && result.finished).toBe(byType('run.finished').id);
+      expect(endOf(stored!.id)).toMatchObject({ status: 'complete', findingCount: 1 });
+      // The watcher's own snapshots, so the run traces to the content it merged.
+      const snapshotA = await watcherSnapshotOf(candidate.pair.a);
+      expect(snapshotA).not.toBeNull();
+      expect(stored!.snapshotA).toBe(snapshotA);
+      expect(stored!.snapshotB).toBe(await watcherSnapshotOf(candidate.pair.b));
     });
 
     it('is a duplicate at the same content, and merges nothing', async () => {
@@ -337,6 +366,7 @@ describe('run pipeline', () => {
       expect(await store.listOpenFindings((await repo()).id)).toEqual([]);
       const started = published('run.started')[0]!.payload as { runId: string };
       expect(await store.getRun(started.runId as never)).toMatchObject({ status: 'superseded' });
+      expect(endOf(started.runId)).toMatchObject({ status: 'superseded', findingCount: 0 });
       // Discarded, so the same content is not a duplicate next time.
       expect((await run()).kind).toBe('analysed');
     });
@@ -419,6 +449,7 @@ describe('run pipeline', () => {
       expect(result).toMatchObject({ kind: 'infra-failure', component: 'analyzer:textual' });
       const started = published('run.started')[0]!.payload as { runId: string };
       expect(await store.getRun(started.runId as never)).toMatchObject({ status: 'failed' });
+      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
       expect(await store.listOpenFindings((await repo()).id)).toEqual([]);
     });
 
@@ -437,6 +468,7 @@ describe('run pipeline', () => {
       other.detach();
       const started = published('run.started')[0]!.payload as { runId: string };
       expect(await store.getRun(started.runId as never)).toMatchObject({ status: 'failed' });
+      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
     });
   });
 
@@ -560,6 +592,10 @@ describe('run pipeline', () => {
       writeFileSync(join(base, 'b', 'total.ts'), body('2'));
       await observe();
       const a = await branchNamed('a');
+      const real = published('branch.snapshot')
+        .map((record) => record.payload as { branchRefId: string; changeSetId: string })
+        .filter((payload) => payload.branchRefId === a.id)
+        .at(-1)!;
       await bus.publish({
         type: 'branch.snapshot',
         repoId: a.repoId,
@@ -567,11 +603,19 @@ describe('run pipeline', () => {
         branchRefId: a.id,
         treeOid: 'f'.repeat(40),
         headSha: a.headSha,
-        changeSetId: null,
+        changeSetId: real.changeSetId as never,
         fileCount: 1,
       });
 
-      expect(await run()).toMatchObject({ kind: 'analysed', clean: false });
+      const result = await run();
+
+      expect(result).toMatchObject({ kind: 'analysed', clean: false });
+      // Captured here, so the watcher's snapshot — of another tree — is not its id.
+      const stored = await store.getRun((result as { runId: string }).runId as never);
+      const watcher = (await store.getChangeSet(real.changeSetId as never))!.snapshotId;
+      const b = await branchNamed('b');
+      const ownSide = a.id < b.id ? stored!.snapshotA : stored!.snapshotB;
+      expect(ownSide).not.toBe(watcher);
     });
 
     it('captures a side the watcher never announced', async () => {
