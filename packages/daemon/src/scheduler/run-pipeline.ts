@@ -1,5 +1,4 @@
 import {
-  assertObjectId,
   captureDirtyState,
   commitSnapshotInShadow,
   extractChangeSet,
@@ -191,9 +190,6 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   ): Promise<SideOrSkip> => {
     const changeSet = await changeSetOf(repo, handle, branch);
     if (branch.worktreePath === null) {
-      // From the store, where its shape is an assumption; shaped like a flag,
-      // git would read it as one.
-      assertObjectId(branch.headSha, 'headSha');
       const tree = await runRequired(runner, shadow, [
         'rev-parse',
         '--verify',

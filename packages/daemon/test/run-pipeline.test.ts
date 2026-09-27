@@ -570,15 +570,14 @@ describe('run pipeline', () => {
       other.detach();
     });
 
-    it('refuses a stored head that is not an object id before git resolves it', async () => {
+    it('refuses a stored head that is not an object id rather than merge what it names now', async () => {
       bareBranch('bare', 'total.ts', body('committed'));
       writeFileSync(join(base, 'a', 'total.ts'), body('1'));
       await observe();
       const [a, bare] = [await branchNamed('a'), await branchNamed('bare')];
       const { candidates } = await pipeline.plan(a.repoId, a.id);
       const candidate = candidates.find((c) => c.pair.a === bare.id || c.pair.b === bare.id)!;
-      // A ref name gets past every check before this one, and git would resolve
-      // it to whatever it names now.
+      // A ref name is a revision `mergeBase` accepts; the merge takes object ids only.
       await store.upsertBranchRef({ ...bare, headSha: 'main' });
 
       await expect(
@@ -592,8 +591,9 @@ describe('run pipeline', () => {
       await observe();
       const [a, bare] = [await branchNamed('a'), await branchNamed('bare')];
       const garbled: GitRunner = {
+        // The bare branch's head alone: the other side's commit asks for trees too.
         run: (target, args, options) =>
-          args[0] === 'rev-parse' && args.at(-1)!.endsWith('^{tree}')
+          args[0] === 'rev-parse' && args.at(-1) === `${bare.headSha}^{tree}`
             ? Promise.resolve({ stdout: 'not a tree\n', stderr: '', exitCode: 0 })
             : runner.run(target, args, options),
       };
