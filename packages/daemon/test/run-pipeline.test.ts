@@ -570,6 +570,43 @@ describe('run pipeline', () => {
       other.detach();
     });
 
+    it('refuses a stored head that is not an object id before git resolves it', async () => {
+      bareBranch('bare', 'total.ts', body('committed'));
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      await observe();
+      const [a, bare] = [await branchNamed('a'), await branchNamed('bare')];
+      const { candidates } = await pipeline.plan(a.repoId, a.id);
+      const candidate = candidates.find((c) => c.pair.a === bare.id || c.pair.b === bare.id)!;
+      // A ref name gets past every check before this one, and git would resolve
+      // it to whatever it names now.
+      await store.upsertBranchRef({ ...bare, headSha: 'main' });
+
+      await expect(
+        pipeline.runPair(request(candidate), new AbortController().signal),
+      ).rejects.toMatchObject({ code: 'GIT_COMMAND_REFUSED' });
+    });
+
+    it('treats a head git names no tree for as infrastructure', async () => {
+      bareBranch('bare', 'total.ts', body('committed'));
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      await observe();
+      const [a, bare] = [await branchNamed('a'), await branchNamed('bare')];
+      const garbled: GitRunner = {
+        run: (target, args, options) =>
+          args[0] === 'rev-parse' && args.at(-1)!.endsWith('^{tree}')
+            ? Promise.resolve({ stdout: 'not a tree\n', stderr: '', exitCode: 0 })
+            : runner.run(target, args, options),
+      };
+      const other = build(garbled);
+      const { candidates } = await other.plan(a.repoId, a.id);
+      const candidate = candidates.find((c) => c.pair.a === bare.id || c.pair.b === bare.id)!;
+
+      await expect(
+        other.runPair(request(candidate), new AbortController().signal),
+      ).rejects.toMatchObject({ code: 'GIT_COMMAND_FAILED', infra: true });
+      other.detach();
+    });
+
     it('declines old branches no worktree holds when they have nothing in common', async () => {
       for (let n = 0; n < 10; n++) git(root, 'branch', `old${String(n)}`, 'main');
       bareBranch('elsewhere', 'other.ts', lines('unrelated'));
