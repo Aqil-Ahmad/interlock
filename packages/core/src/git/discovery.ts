@@ -22,6 +22,8 @@ import type {
   BranchRefId,
 } from '@interlock/shared';
 import { assertRevision, runRequired } from './repo-handle.js';
+import { parseWorktreeList } from './repo-dirs.js';
+import type { WorktreeEntry } from './repo-dirs.js';
 import { shadowPathFor } from './shadow.js';
 import type { GitRunner, UserRepo } from './repo-handle.js';
 
@@ -283,55 +285,6 @@ function configProblem(path: string, message: string, code: string | null = null
     details: { path, code },
     remedy: `Replace ${path} with a readable JSON file, or delete it to fall back to the global configuration.`,
   });
-}
-
-interface WorktreeEntry {
-  readonly path: string;
-  readonly ref: string | null;
-  readonly prunable: boolean;
-  readonly locked: boolean;
-}
-
-/**
- * Parse `git worktree list --porcelain -z`.
- *
- * NUL-separated because a worktree path may contain a newline; blocks are
- * terminated by an empty field.
- */
-function parseWorktreeList(stdout: string): WorktreeEntry[] {
-  const entries: WorktreeEntry[] = [];
-  let path: string | null = null;
-  let ref: string | null = null;
-  let prunable = false;
-  let locked = false;
-
-  const flush = (): void => {
-    if (path !== null) entries.push({ path, ref, prunable, locked });
-    path = null;
-    ref = null;
-    prunable = false;
-    locked = false;
-  };
-
-  for (const field of stdout.split('\0')) {
-    if (field === '') {
-      flush();
-      continue;
-    }
-    const space = field.indexOf(' ');
-    const key = space === -1 ? field : field.slice(0, space);
-    const value = space === -1 ? '' : field.slice(space + 1);
-
-    if (key === 'worktree') {
-      flush();
-      path = value;
-    } else if (key === 'branch') ref = value;
-    else if (key === 'prunable') prunable = true;
-    else if (key === 'locked') locked = true;
-  }
-  flush();
-
-  return entries;
 }
 
 /**

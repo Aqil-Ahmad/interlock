@@ -13,8 +13,9 @@ import { basename, dirname, join } from 'node:path';
 import { InterlockError, isUlid, silentLogger, ULID_PATTERN } from '@interlock/shared';
 import type { Logger, MergePairKey, RepoId } from '@interlock/shared';
 import type { SpeculativeMergeResult } from '../merge/speculative-merge.js';
-import { assertObjectId, isWithin, runRequired } from './repo-handle.js';
-import type { GitRunner, ShadowRepo } from './repo-handle.js';
+import { assertObjectId, runRequired } from './repo-handle.js';
+import type { GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
+import { repositoryDirHolding, repositoryDirsOf } from './repo-dirs.js';
 import { alternatesOf, shadowPathFor } from './shadow.js';
 
 /**
@@ -297,15 +298,22 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
    * a symlink leading into one.
    */
   const load = async (): Promise<string> => {
-    const within = protectedDirOf(shadow, poolPath);
-    if (within !== null) {
+    // The origin is read, never written: the runner takes a user handle for
+    // read-only commands, and reads nothing from it but `rootPath`.
+    const origin: UserRepo = { kind: 'user', rootPath: shadow.originPath, gitDir: '' };
+    const objects = alternatesOf(shadow.rootPath);
+    const dirs = [
+      shadow.originPath,
+      ...(objects === null ? [] : [objects]),
+      ...(await repositoryDirsOf(origin, runner)),
+    ];
+    if ((await repositoryDirHolding(poolPath, dirs, runner)) !== null) {
       throw new InterlockError(
-        'SHADOW_UNAVAILABLE',
+        'CONFIG_INVALID',
         'Refused to put worktrees inside the repository being watched',
         {
           details: { repoId },
           remedy: 'Move the data dir outside every watched repository.',
-          infra: true,
         },
       );
     }
@@ -620,49 +628,6 @@ function assertRealShadow(shadow: ShadowRepo, repoId: RepoId, dataDir: string): 
         remedy: 'Pass the ShadowRepo ensureShadow returned for this repository and data dir.',
       },
     );
-  }
-}
-
-/**
- * The user directory `path` would resolve inside, or null if none.
- *
- * The user's checkout is the shadow's origin, and its git directory is the one
- * holding the store the shadow borrows — named in the alternates file, which
- * also covers a linked worktree, whose main checkout the origin path does not
- * name. `path` need not exist yet, so the deepest part of it that does is what
- * resolves, and the rest is joined back on.
- */
-function protectedDirOf(shadow: ShadowRepo, path: string): string | null {
-  const target = resolveDeepest(path);
-  const dirs = [shadow.originPath];
-  const objects = alternatesOf(shadow.rootPath);
-  if (objects !== null) {
-    const gitDir = dirname(objects);
-    dirs.push(gitDir);
-    if (basename(gitDir) === '.git') dirs.push(dirname(gitDir));
-  }
-  return dirs.find((dir) => isWithin(resolveDeepest(dir), target)) ?? null;
-}
-
-/**
- * `path` with its deepest existing ancestor resolved and the rest joined back.
- *
- * Any failure to resolve is read as "does not exist yet", unreadable included:
- * a directory this process cannot read is one it cannot create a slot inside
- * either, so the refusal it might have missed is made by `mkdir` instead.
- */
-function resolveDeepest(path: string): string {
-  const rest: string[] = [];
-  let current = path;
-  for (;;) {
-    try {
-      return join(realpathSync(current), ...rest);
-    } catch {
-      const parent = dirname(current);
-      if (parent === current) return path;
-      rest.unshift(basename(current));
-      current = parent;
-    }
   }
 }
 

@@ -6,18 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-### Added
-
-- The daemon now merges in-flight branches against each other and against the default branch as they change, and records a textual-conflict Finding — with each branch's spans — for every pair git cannot merge, uncommitted work included. A pair is checked about two seconds after its branches go quiet, or within ten seconds for one that never does; pairs whose changes have nothing in common are not merged at all. A Finding that stops reproducing is resolved.
-
 ### Changed
 
 - The watcher writes the objects of its snapshots into Interlock's own shadow clone rather than into the repository's object database, so nothing is written under a watched repository's `.git` at all.
-
+- A data directory inside a watched repository is refused. The daemon refuses to start with one, before it writes its lock, database or token, and names the repository and `INTERLOCK_DATA_DIR` in the error. Every watched repository counts, along with each of its worktrees, its git directory, and any of them reached through a symlink; a watched path that is not a repository yet is protected as itself.
 - git 2.41 or later is required. Speculative merges run `git merge-tree` against a supplied merge base, reading the repository's attributes from a commit, which older git cannot do; with an older one the daemon reports the toolchain as unsupported rather than a failed merge. macOS's bundled git is 2.39.
 
 ### Added
 
+- The daemon now merges in-flight branches against each other and against the default branch as they change, and records a textual-conflict Finding — with each branch's spans — for every pair git cannot merge, uncommitted work included. A pair is checked about two seconds after its branches go quiet, or within ten seconds for one that never does; pairs whose changes have nothing in common are not merged at all. A Finding that stops reproducing is resolved.
 - One daemon per data directory. A second daemon started against a directory another is already using refuses to start and says so, whatever port it was given; the first keeps running. The claim is released when the daemon exits, including when it is killed outright, so a crash never leaves the directory unusable.
 - Agent session hooks. `interlock hook <start|activity|end> --kind <agent>` reports an agent session to the daemon from the agent's own hook, reading the hook payload from stdin and finding the daemon the way `status` does — so no token or port ever lands in a hook file inside a repository. The daemon maps the session to the worktree it ran in, marks the branch `inferred` unless the hook named it, and reaps sessions whose process is gone or whose heartbeat is older than `sessions.staleAfterMs`. `interlock status` shows which agent is driving each branch. `POST /api/sessions` is the API's first and only write, behind the same token as everything else, with the body capped and every field checked.
 - The daemon reads `config.json` from its data dir, so `repos` can be set without editing source. The data dir comes from `INTERLOCK_DATA_DIR` — the same variable `interlock status` reads — and a `dataDir` key inside the file is refused. An unknown key at any level, a section that is not an object, and a malformed file each refuse to load and name what is wrong; a missing file means the defaults, a file that exists but cannot be read does not. `~/` is expanded in repository paths; any other relative path is refused.
