@@ -284,8 +284,9 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     if (base === null) return { kind: 'skipped', reason: 'unrelated' };
 
     // Content, not ids: a snapshot id is minted per capture, so two captures of
-    // the same work differ while the trees they hashed to do not.
-    const contentKey = JSON.stringify([...[sideA.treeOid, sideB.treeOid].sort(), base]);
+    // the same work differ while the trees they hashed to do not. The sides are
+    // always in the pair's own order, so the key needs no sorting.
+    const contentKey = JSON.stringify([sideA.treeOid, sideB.treeOid, base]);
     if (!request.isNew(contentKey)) return { kind: 'duplicate', contentKey };
 
     const stored = await store.upsertMergePair({

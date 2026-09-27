@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGitRunner } from '@interlock/core';
 import type { GitRunner } from '@interlock/core';
-import { silentLogger, ulid } from '@interlock/shared';
+import { makePairKey, silentLogger, ulid } from '@interlock/shared';
 import type { BranchRef, EventId, EventRecord, Repo, SpanEvidence } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventBus } from '../src/bus/index.js';
@@ -65,18 +65,21 @@ describe('run pipeline', () => {
     isNew: (key) => key !== lastKey,
   });
 
-  /** Plan from `a`, and run the pair it forms with `b`. */
-  const run = async (
+  /** Plan from `a`, and run the pair it forms with `other`. */
+  const runWith = async (
+    other: string,
     signal: AbortSignal = new AbortController().signal,
     using: RunPipeline = pipeline,
   ): Promise<PairRunResult> => {
-    const [a, b] = [await branchNamed('a'), await branchNamed('b')];
+    const [a, b] = [await branchNamed('a'), await branchNamed(other)];
     const { candidates } = await using.plan(a.repoId, a.id);
     const candidate = candidates.find((c) => c.pair.a === b.id || c.pair.b === b.id)!;
     const result = await using.runPair(request(candidate), signal);
     if (result.kind === 'analysed') lastKey = result.contentKey;
     return result;
   };
+  const run = (signal?: AbortSignal, using?: RunPipeline): Promise<PairRunResult> =>
+    runWith('b', signal, using);
 
   const published = (type: EventRecord['type']): EventRecord[] =>
     records.filter((record) => record.type === type);
@@ -269,6 +272,68 @@ describe('run pipeline', () => {
       expect((await run()).kind).toBe('analysed');
     });
 
+    it('discards a result whose pair was invalidated while the merge ran', async () => {
+      const controller = new AbortController();
+      const invalidating: GitRunner = {
+        run: (target, args, options) => {
+          if (args.includes('merge-tree')) controller.abort();
+          return runner.run(target, args, options);
+        },
+      };
+      const other = build(invalidating);
+
+      const result = await run(controller.signal, other);
+      other.detach();
+
+      expect(result.kind).toBe('superseded');
+      expect(published('run.merge-completed')).toHaveLength(1);
+      expect(await store.listOpenFindings((await repo()).id)).toEqual([]);
+      const started = published('run.started')[0]!.payload as { runId: string };
+      expect(await store.getRun(started.runId as never)).toMatchObject({ status: 'superseded' });
+    });
+
+    it('commits a side’s tree once, however many pairs it is merged in', async () => {
+      let commits = 0;
+      const counting: GitRunner = {
+        run: (target, args, options) => {
+          if (args.includes('commit-tree')) commits += 1;
+          return runner.run(target, args, options);
+        },
+      };
+      const other = build(counting);
+      await run(new AbortController().signal, other);
+      expect(commits).toBe(2);
+
+      writeFileSync(join(base, 'b', 'total.ts'), body('3'));
+      await observe();
+      await run(new AbortController().signal, other);
+      other.detach();
+
+      expect(commits).toBe(3);
+    });
+
+    it('leaves another pair’s Findings alone when it resolves its own', async () => {
+      writeFileSync(join(root, 'total.ts'), body('on main'));
+      await observe();
+      await run();
+      lastKey = null;
+      await runWith('main');
+      const main = await branchNamed('main');
+      const b = await branchNamed('b');
+      const before = await store.listOpenFindings((await repo()).id);
+      expect(before).toHaveLength(2);
+
+      writeFileSync(join(root, 'total.ts'), body('items.length'));
+      await observe();
+      await runWith('main');
+
+      const open = await store.listOpenFindings((await repo()).id);
+      expect(open).toHaveLength(1);
+      const [survivor] = open;
+      expect([survivor!.attribution.branchA, survivor!.attribution.branchB]).toContain(b.id);
+      expect([survivor!.attribution.branchA, survivor!.attribution.branchB]).not.toContain(main.id);
+    });
+
     it('reports an analyzer that could not read the merge as infrastructure', async () => {
       // `ls-tree -l` is the classifier's own read; the merge never asks for sizes.
       const failing: GitRunner = {
@@ -386,6 +451,53 @@ describe('run pipeline', () => {
       });
 
       expect(await run()).toEqual({ kind: 'skipped', reason: 'unreadable' });
+    });
+
+    it('skips a pair whose histories stopped sharing an ancestor after it was planned', async () => {
+      git(root, 'checkout', '-q', '--orphan', 'lonely');
+      git(root, 'commit', '-qm', 'alone', '--allow-empty');
+      git(root, 'checkout', '-q', 'main');
+      await observe();
+      const [a, lonely] = [await branchNamed('a'), await branchNamed('lonely')];
+      const [x, y] = a.id < lonely.id ? [a.id, lonely.id] : [lonely.id, a.id];
+      const candidate: PairCandidate = {
+        pair: {
+          id: ulid(),
+          repoId: a.repoId,
+          a: x,
+          b: y,
+          key: makePairKey(x, y),
+          mergeBaseSha: 'e'.repeat(40),
+          priority: 0,
+          lastRunAt: null,
+          stale: true,
+        },
+        overlap: { tier: 'unknown', commonFiles: [] },
+        target: false,
+        openFindings: false,
+      };
+
+      expect(await pipeline.runPair(request(candidate), new AbortController().signal)).toEqual({
+        kind: 'skipped',
+        reason: 'unrelated',
+      });
+    });
+
+    it('recovers when the shadow is removed from under it', async () => {
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      writeFileSync(join(base, 'b', 'total.ts'), body('2'));
+      await observe();
+      const handle = { kind: 'user' as const, rootPath: root, gitDir: join(root, '.git') };
+      const shadow = await shadows.get(handle, (await repo()).id);
+      rmSync(shadow.rootPath, { recursive: true, force: true });
+
+      // The first capture after the removal fails, and gives the shadow up.
+      writeFileSync(join(base, 'a', 'total.ts'), body('10'));
+      writeFileSync(join(base, 'b', 'total.ts'), body('20'));
+      await observe().catch(() => undefined);
+      await observe().catch(() => undefined);
+
+      expect(await run()).toMatchObject({ kind: 'analysed', clean: false });
     });
 
     it('skips a pair whose branch has gone', async () => {

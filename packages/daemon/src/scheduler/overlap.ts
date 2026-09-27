@@ -38,9 +38,8 @@ export function pairOverlap(a: ChangeSet | null, b: ChangeSet | null): PairOverl
   const commonFiles = [...pathsA].filter((path) => pathsB.has(path)).sort();
   if (commonFiles.length > 0) return { tier: 'file', commonFiles };
 
-  const dirsA = new Set([...pathsA].map(parentOf).filter((dir) => dir !== ''));
-  const dirsB = new Set([...pathsB].map(parentOf).filter((dir) => dir !== ''));
-  const sharedDir = [...dirsA].some((dir) => dirsB.has(dir));
+  const dirsB = directoriesOf(pathsB);
+  const sharedDir = [...directoriesOf(pathsA)].some((dir) => dirsB.has(dir));
   // A file on one side where the other has a directory: `d` against `d/x`.
   const fileMeetsDir =
     [...pathsA].some((path) => ancestorsOf(pathsB).has(path)) ||
@@ -61,11 +60,15 @@ function pathsOf(changeSet: ChangeSet): Set<string> {
 }
 
 /**
- * The directory a path sits in; `''` for the repository root.
- *
- * The root is left out of the comparison: every repository's top-level files
- * share it, and a tier every pair reaches ranks nothing.
+ * The directories paths sit in, the repository root left out: every
+ * repository's top-level files share it, and a tier every pair reaches ranks
+ * nothing.
  */
+function directoriesOf(paths: ReadonlySet<string>): Set<string> {
+  return new Set([...paths].map(parentOf).filter((dir) => dir !== ''));
+}
+
+/** The directory a path sits in; `''` for the repository root. */
 function parentOf(path: string): string {
   const slash = path.lastIndexOf('/');
   return slash === -1 ? '' : path.slice(0, slash);

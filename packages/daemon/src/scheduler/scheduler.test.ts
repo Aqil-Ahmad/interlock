@@ -219,6 +219,23 @@ describe('scheduler', () => {
       expect(clock.now()).toBe(10_000);
     });
 
+    it('ignores a branch event that names no repository', async () => {
+      make();
+      await bus.publish({
+        type: 'branch.snapshot',
+        repoId: null,
+        at: '',
+        branchRefId: branch(),
+        treeOid: 'c'.repeat(40),
+        headSha: 'd'.repeat(40),
+        changeSetId: null,
+        fileCount: 1,
+      });
+      clock.advance(10_000);
+      await settle();
+      expect(planned).toEqual([]);
+    });
+
     it('listens to heads moving and branches appearing, not to unreadable worktrees', async () => {
       make();
       const [x, y, z] = [branch(), branch(), branch()];
@@ -347,6 +364,55 @@ describe('scheduler', () => {
       expect([next.a, next.b]).toContain(t);
     });
 
+    it('runs pairs of equal priority in the order they were asked for', async () => {
+      make();
+      const [x, y, z, w] = [branch(), branch(), branch(), branch()];
+      plans.set(x, {
+        candidates: [candidate(x, y, 'file'), candidate(x, z, 'file'), candidate(x, w, 'file')],
+        declined: 0,
+      });
+      const order: BranchRefId[] = [];
+      answer = (request) => {
+        const { a, b } = request.candidate.pair;
+        order.push(a === x ? b : a);
+        return analysed(request);
+      };
+
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+
+      expect(order).toEqual([y, z, w]);
+    });
+
+    it('keeps a pair’s age when it is asked for again', async () => {
+      make();
+      const [x, t, blocker, f, g] = [branch(), branch(), branch(), branch(), branch()];
+      plans.set(blocker, { candidates: [candidate(blocker, g, 'file')], declined: 0 });
+      await changed(blocker);
+      clock.advance(2_000);
+      await settle();
+
+      plans.set(x, { candidates: [candidate(x, t, 'none', true)], declined: 0 });
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+      // Asked again just before the fresh pair arrives: still the older request.
+      clock.advance(85_000);
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+      plans.set(f, { candidates: [candidate(f, g, 'file')], declined: 0 });
+      await changed(f);
+      clock.advance(2_000);
+      await settle();
+
+      held[0]!.resolve({ kind: 'skipped', reason: 'unrelated' });
+      await settle();
+      const next = held[1]!.request.candidate.pair;
+      expect([next.a, next.b]).toContain(t);
+    });
+
     it('prefers re-checking a hot pair over a new one of the same overlap', async () => {
       make({ poolSize: 1 });
       const [x, y, z] = [branch(), branch(), branch()];
@@ -439,6 +505,25 @@ describe('scheduler', () => {
       await settle();
       expect(held).toHaveLength(2);
       expect(scheduler.queueDepth).toBe(3);
+    });
+
+    it('holds a second request for a running pair until it lands, even with a slot free', async () => {
+      make({ concurrency: 2 });
+      const [x, y] = [branch(), branch()];
+      plans.set(x, { candidates: [candidate(x, y, 'file')], declined: 0 });
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+
+      expect(held).toHaveLength(1);
+      expect(scheduler.queueDepth).toBe(1);
+      answer = (request) => analysed(request);
+      held[0]!.resolve({ kind: 'superseded' });
+      await settle();
+      expect(scheduler.stats.started).toBe(2);
     });
 
     it('names the branch event a scheduled pair follows from', async () => {
@@ -542,6 +627,27 @@ describe('scheduler', () => {
       await changed(x);
       clock.advance(2_000);
       await settle();
+      expect(published('infra.failure')).toHaveLength(2);
+    });
+
+    it('ends a streak on any result that is not a failure, a duplicate included', async () => {
+      make();
+      const [x, y] = [branch(), branch()];
+      plans.set(x, { candidates: [candidate(x, y, 'file')], declined: 0 });
+      const down: PairRunResult = { kind: 'infra-failure', component: 'c', message: 'down' };
+      answer = () => down;
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+      answer = () => ({ kind: 'duplicate', contentKey: 'k' });
+      clock.advance(5_000);
+      await settle();
+
+      answer = () => down;
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+
       expect(published('infra.failure')).toHaveLength(2);
     });
 
@@ -751,6 +857,107 @@ describe('scheduler', () => {
       expect(scheduler.stats.deferred).toBe(0);
     });
 
+    it('names a directory overlap as its reason', async () => {
+      make();
+      const { x } = clean('directory');
+      answer = (request) => analysed(request, 'c', true);
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+      expect(published('run.escalated')[0]!.payload).toMatchObject({ reason: 'common-directory' });
+    });
+
+    it('counts a hot pair checked again as used, so it does not go idle', async () => {
+      make({ poolSize: 1 });
+      answer = (request) => analysed(request, `${clock.now()}`, true);
+      const kept = clean('file');
+      await changed(kept.x);
+      clock.advance(2_000);
+      await settle();
+      clock.advance(9 * 60_000);
+      await changed(kept.x);
+      clock.advance(2_000);
+      await settle();
+
+      clock.advance(2 * 60_000);
+      const newcomer = clean('file');
+      await changed(newcomer.x);
+      clock.advance(2_000);
+      await settle();
+
+      expect(scheduler.stats.evictions).toBe(0);
+      expect(scheduler.stats.deferred).toBe(1);
+    });
+
+    it('evicts the hot pair that overlaps least', async () => {
+      make({ poolSize: 2 });
+      answer = (request) => analysed(request, `${clock.now()}`, true);
+      const weak = clean('directory');
+      await changed(weak.x);
+      clock.advance(2_000);
+      await settle();
+      const strong = clean('file');
+      await changed(strong.x);
+      clock.advance(2_000);
+      await settle();
+
+      const newcomer = clean('file');
+      await changed(newcomer.x);
+      clock.advance(2_000);
+      await settle();
+
+      expect(published('run.escalated')[2]!.payload).toMatchObject({
+        evicted: weak.pair.pair.id,
+      });
+    });
+
+    it('among hot pairs that overlap alike, evicts the one unused longest', async () => {
+      make({ poolSize: 2 });
+      answer = (request) => analysed(request, `${clock.now()}`, true);
+      const older = clean('directory');
+      await changed(older.x);
+      clock.advance(2_000);
+      await settle();
+      const newer = clean('directory');
+      await changed(newer.x);
+      clock.advance(2_000);
+      await settle();
+
+      const newcomer = clean('file');
+      await changed(newcomer.x);
+      clock.advance(2_000);
+      await settle();
+
+      expect(published('run.escalated')[2]!.payload).toMatchObject({
+        evicted: older.pair.pair.id,
+      });
+    });
+
+    it('frees a hot pair’s slot when one of its branches disappears', async () => {
+      make({ poolSize: 1 });
+      answer = (request) => analysed(request, `${clock.now()}`, true);
+      const gone = clean('file');
+      await changed(gone.x);
+      clock.advance(2_000);
+      await settle();
+      await bus.publish({
+        type: 'branch.disappeared',
+        repoId,
+        at: '',
+        branchRefId: gone.x,
+        reason: 'deleted',
+      });
+
+      const newcomer = clean('file');
+      await changed(newcomer.x);
+      clock.advance(2_000);
+      await settle();
+
+      expect(scheduler.stats.escalations).toBe(2);
+      expect(scheduler.stats.evictions).toBe(0);
+      expect(scheduler.stats.deferred).toBe(0);
+    });
+
     it('reports no rates before there is anything to divide', () => {
       make();
       expect(scheduler.stats.escalationRate).toBeNull();
@@ -849,15 +1056,20 @@ describe('scheduler', () => {
       expect(planned).toEqual([x]);
     });
 
-    it('starts once however often it is started', async () => {
+    it('starts once however often it is started, and stops completely', async () => {
       make();
       scheduler.start();
+      answer = (request) => analysed(request);
       const [x, y] = [branch(), branch()];
       plans.set(x, { candidates: [candidate(x, y, 'file')], declined: 0 });
       await changed(x);
       clock.advance(2_000);
       await settle();
       expect(planned).toEqual([x]);
+
+      const handlers = bus.handlerCount;
+      await scheduler.stop();
+      expect(bus.handlerCount).toBe(handlers - 4);
     });
   });
 });
