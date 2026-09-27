@@ -13,6 +13,7 @@ Short entries: done, decided, blocked. Newest first.
 - **Taken, minor:** a retry and its `infra.failure` keep the `pair.scheduled` they answer as their cause; a duplicate clears the pair's `stale`; nothing is queued or published once the scheduler has stopped.
 - **Noted — `branch.snapshot` gained `headSha`, and the log is persisted.** Events stored before it lack the field; the run pipeline reads a missing one as null, and any future replay has to do the same.
 - **Merged `origin/dev`** (the data-dir guard): `daemon.ts`'s start moved into `begin()`, and the scheduler's wiring moved with it.
+- **Mutation of the fixes: 18, 16 caught** after a first pass of 11; the five gaps became tests. Two are equivalent: naming `branch.disappeared` as a resolution's cause, which the bus records anyway while its handler runs, and the caches' size bound, which changes memory and nothing observable short of 1,024 entries.
 
 ## 2026-09-27 — scheduler v1 and the run pipeline
 
