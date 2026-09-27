@@ -2,7 +2,7 @@ import {
   captureDirtyState,
   commitSnapshotInShadow,
   assertObjectId,
-  coreBuildId,
+  analysisBuildId,
   extractChangeSet,
   gitVersion,
   isObjectId,
@@ -76,8 +76,8 @@ export interface RunPipelineOptions {
   readonly shadows: ShadowRegistry;
   readonly logger?: Logger;
   /**
-   * The build verdicts are keyed under: `@interlock/core`'s own by default,
-   * since that is the code that merges and classifies.
+   * The build verdicts are keyed under: by default a digest of the code that
+   * merges, classifies and redacts — `@interlock/core` and `@interlock/shared`.
    */
   readonly build?: string;
 }
@@ -130,7 +130,7 @@ interface Skip {
 
 export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   const { store, bus, runner, shadows } = options;
-  const build = options.build ?? coreBuildId();
+  const build = options.build ?? analysisBuildId();
   const log = (options.logger ?? silentLogger).child('run-pipeline');
 
   const announced = new Map<BranchRefId, Announced>();
@@ -342,7 +342,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     toolchainFingerprint({
       analyzer: textualAnalyzer.name,
       version: textualAnalyzer.version,
-      tools: [`git ${await gitVersion(runner, shadow)}`, `interlock-core ${build}`],
+      tools: [`git ${await gitVersion(runner, shadow)}`, `interlock ${build}`],
     });
 
   const recapture = async (
@@ -469,14 +469,6 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     const base = await baseOf(handle, idA.headSha, idB.headSha);
     if (base === null) return { kind: 'skipped', reason: 'unrelated' };
 
-    const contentKey = contentKeyOf(idA, idB, base);
-    if (!request.isNew(contentKey)) {
-      // Planning marked the pair stale because a side moved; a side that moved
-      // back to content already analysed leaves the last run describing it.
-      await store.upsertMergePair({ ...pair, mergeBaseSha: base, stale: false });
-      return { kind: 'duplicate', contentKey };
-    }
-
     const fingerprint = await textualFingerprint(shadow);
     const keyOf = (a: Identified, b: Identified, mergeBaseSha: string): string =>
       verdictKey({
@@ -489,7 +481,18 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         shadowGeneration: shadow.generation,
       });
 
-    const cached = await store.getCachedVerdict(keyOf(idA, idB, base));
+    // The verdict's own key, so the two checks agree on what is the same: a
+    // pair at unchanged content in a rebuilt clone, or under another toolchain,
+    // is not a duplicate of the analysis it had before.
+    const contentKey = keyOf(idA, idB, base);
+    if (!request.isNew(contentKey)) {
+      // Planning marked the pair stale because a side moved; a side that moved
+      // back to content already analysed leaves the last run describing it.
+      await store.upsertMergePair({ ...pair, mergeBaseSha: base, stale: false });
+      return { kind: 'duplicate', contentKey };
+    }
+
+    const cached = await store.getCachedVerdict(contentKey);
     const origin = cached === null ? null : await store.getRun(cached.runId);
     if (cached !== null && origin?.mergeOutcome != null) {
       return reuse(request, signal, repo, [idA, idB], base, contentKey, {
@@ -622,7 +625,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         analyzerResults: [result],
       });
       // Keyed on what was merged, which a side captured again may have changed.
-      await store.putCachedVerdict(keyOf(sideA, sideB, mergeBaseSha), {
+      await cacheVerdict(keyOf(sideA, sideB, mergeBaseSha), {
         result,
         runId: run.id,
         findings: outcome.findings,
@@ -630,7 +633,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
       return {
         kind: 'analysed',
         runId: run.id,
-        contentKey: contentKeyOf(sideA, sideB, mergeBaseSha),
+        contentKey: keyOf(sideA, sideB, mergeBaseSha),
         clean: merged.clean,
         cached: false,
         findingCount: findingIds.length,
@@ -644,6 +647,25 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         });
       });
       throw error;
+    }
+  };
+
+  /**
+   * Remember a completed run's verdict, never failing the run for it.
+   *
+   * The run is already recorded complete and its Findings written; the cache
+   * only saves the next run of the same content its work. A write that fails
+   * here, propagated, would reach the run's own failure path and record the
+   * completed run as failed over the top of its result.
+   */
+  const cacheVerdict = async (key: string, verdict: CachedVerdict): Promise<void> => {
+    try {
+      await store.putCachedVerdict(key, verdict);
+    } catch (error) {
+      log.warn('could not cache a verdict', {
+        runId: verdict.runId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
   };
 
@@ -922,16 +944,6 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     plan,
     runPair,
   };
-}
-
-/**
- * A pair's content, for de-duplication in memory: each side's tree and the
- * merge base, the sides always in the pair's own order. Content, not ids: a
- * snapshot id is minted per capture, so two captures of the same work differ
- * while the trees they hashed to do not.
- */
-function contentKeyOf(a: Identified, b: Identified, mergeBaseSha: string): string {
-  return JSON.stringify([a.treeOid, b.treeOid, mergeBaseSha]);
 }
 
 /**

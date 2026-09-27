@@ -1,16 +1,18 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { createGitRunner, textualAnalyzer } from '@interlock/core';
 import type { GitResult, GitRunner } from '@interlock/core';
-import { makePairKey, silentLogger, ulid } from '@interlock/shared';
+import { createLogger, makePairKey, silentLogger, ulid } from '@interlock/shared';
 import type {
   BranchRef,
   BranchRefId,
   ChangeSetId,
   EventId,
   EventRecord,
+  LogRecord,
   Repo,
   RepoId,
   SpanEvidence,
@@ -50,8 +52,12 @@ describe('run pipeline', () => {
   const body = (value: string): string =>
     lines('export function total(items) {', `  return ${value};`, '}');
 
+  /** What the pipeline warned about: the only trace a swallowed failure leaves. */
+  let warnings: LogRecord[];
+
   const build = (with_: GitRunner = runner): RunPipeline => {
-    const made = createRunPipeline({ store, bus, runner: with_, shadows, logger: silentLogger });
+    const logger = createLogger('test', { level: 'warn', sink: (record) => warnings.push(record) });
+    const made = createRunPipeline({ store, bus, runner: with_, shadows, logger });
     made.attach();
     return made;
   };
@@ -147,6 +153,7 @@ describe('run pipeline', () => {
     bus = new EventBus({ logger: silentLogger, onRecord: (record) => records.push(record) });
     shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
     sweep = createSweep({ store, bus, runner, dataDir: join(base, 'data'), shadows });
+    warnings = [];
     pipeline = build();
     lastKey = null;
   });
@@ -841,6 +848,44 @@ describe('run pipeline', () => {
       expect(endOf(started.runId)).toMatchObject({ status: 'superseded' });
       // Nothing written: the Finding still says what the last completed run found.
       expect(await openFinding()).toEqual(elsewhere);
+    });
+
+    it('is not a duplicate at unchanged content once the shadow is rebuilt', async () => {
+      const first = await run();
+      const handle = { kind: 'user' as const, rootPath: root, gitDir: join(root, '.git') };
+      rmSync((await shadows.get(handle, (await repo()).id)).rootPath, {
+        recursive: true,
+        force: true,
+      });
+      shadows.forget((await repo()).id);
+      await observe();
+
+      // The scheduler still remembers the last analysis: nothing resets it.
+      const again = await run();
+
+      expect(first).toMatchObject({ kind: 'analysed' });
+      expect(again).toMatchObject({ kind: 'analysed', cached: false });
+    });
+
+    it('leaves a completed run complete when its verdict cannot be cached', async () => {
+      // A real failure of the write, and only of the write: the lookup before
+      // it still reads the table.
+      const db = new DatabaseSync(join(base, 'interlock.db'));
+      db.exec(`CREATE TRIGGER refuse_verdicts BEFORE INSERT ON analyzer_cache
+        BEGIN SELECT RAISE(ABORT, 'disk full'); END`);
+      db.close();
+
+      const result = await run();
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: false, findingCount: 1 });
+      if (result.kind !== 'analysed') throw new Error('not analysed');
+      expect(await store.getRun(result.runId)).toMatchObject({ status: 'complete' });
+      const ends = published('run.finished').filter(
+        (record) => (record.payload as { runId: string }).runId === result.runId,
+      );
+      expect(ends).toHaveLength(1);
+      expect(ends[0]!.payload).toMatchObject({ status: 'complete' });
+      expect(warnings.map((record) => record.msg)).toContain('could not cache a verdict');
     });
 
     it('keeps nothing from an analyzer that could not run', async () => {

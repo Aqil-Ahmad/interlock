@@ -54,7 +54,8 @@ export interface PairRunRequest {
   readonly cause: EventId;
   /**
    * False when this pair has already been analysed to completion at this
-   * content: the two sides' trees and the merge base.
+   * identity: the two sides' trees and the merge base, and what judged them —
+   * the key its verdict is cached under.
    */
   isNew(contentKey: string): boolean;
 }

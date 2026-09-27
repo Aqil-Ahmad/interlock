@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildIdOf, coreBuildId } from '../src/build-id.js';
+import { existsSync } from 'node:fs';
+import { analysisBuildId, analysisModuleDirs, buildIdOf, buildIdOfAll } from '../src/build-id.js';
 
 /** What a cached verdict names as the code that reached it. */
 describe('buildIdOf', () => {
@@ -56,9 +57,46 @@ describe('buildIdOf', () => {
   });
 });
 
-describe('coreBuildId', () => {
+describe('buildIdOfAll', () => {
+  let roots: string[];
+
+  beforeEach(() => {
+    roots = ['one', 'two'].map((name) => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), `interlock-build-${name}-`)));
+      writeFileSync(join(root, 'index.js'), `export const name = "${name}";\n`);
+      return root;
+    });
+  });
+
+  afterEach(() => {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  });
+
+  it.each([0, 1])('changes when the code in directory %i changes', (index) => {
+    const before = buildIdOfAll(roots);
+    writeFileSync(join(roots[index]!, 'index.js'), 'export const name = "changed";\n');
+    expect(buildIdOfAll(roots)).not.toBe(before);
+  });
+
+  it('changes when the same code sits in the other directory', () => {
+    expect(buildIdOfAll([...roots].reverse())).not.toBe(buildIdOfAll(roots));
+  });
+});
+
+describe('analysisBuildId', () => {
+  it('covers the redaction in @interlock/shared as well as this package', () => {
+    // Excerpts are redacted by shared's logger module: a secret pattern added
+    // there has to change the key a verdict and its excerpts are cached under.
+    const [core, shared] = analysisModuleDirs();
+    const present = (dir: string, name: string): boolean =>
+      existsSync(join(dir, `${name}.ts`)) || existsSync(join(dir, `${name}.js`));
+    expect(present(shared!, 'logger')).toBe(true);
+    expect(present(core!, 'build-id')).toBe(true);
+    expect(analysisBuildId()).toBe(buildIdOfAll([core!, shared!]));
+  });
+
   it('is read once and answers the same thereafter', () => {
-    expect(coreBuildId()).toMatch(/^[0-9a-f]{16}$/u);
-    expect(coreBuildId()).toBe(coreBuildId());
+    expect(analysisBuildId()).toMatch(/^[0-9a-f]{16}$/u);
+    expect(analysisBuildId()).toBe(analysisBuildId());
   });
 });

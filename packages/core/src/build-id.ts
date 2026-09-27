@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SHARED_MODULE_DIR } from '@interlock/shared';
 
 /**
  * The modules a build is made of: compiled JavaScript, or TypeScript run as
@@ -38,18 +39,36 @@ function modulesUnder(directory: string): string[] {
   return found.sort();
 }
 
-let core: string | undefined;
+/**
+ * {@link buildIdOf} across several directories, each named by its place in
+ * the list, so moving code from one to another is a change too.
+ */
+export function buildIdOfAll(roots: readonly string[]): string {
+  const digest = createHash('sha256');
+  for (const root of roots) digest.update(buildIdOf(root)).update('\0');
+  return digest.digest('hex').slice(0, 16);
+}
+
+/** Where the code a verdict depends on is loaded from: this package, and `@interlock/shared`. */
+export function analysisModuleDirs(): readonly string[] {
+  return [fileURLToPath(new URL('.', import.meta.url)), SHARED_MODULE_DIR];
+}
+
+let analysis: string | undefined;
 
 /**
- * This package's own {@link buildIdOf}, read once per process.
+ * The build of the code a cached verdict depends on, read once per process.
  *
- * A cached verdict depends on the merge, the classifier and the configuration
- * the shadow merges with — all of it here — as well as on git. Keyed on this
- * as well as on an analyzer's hand-bumped version, a change that forgets the
- * bump still stops old verdicts being served; the cost is one re-verification
- * of every pair per build.
+ * A textual verdict is the merge, the classifier and the configuration the
+ * shadow merges with — all in this package — and the redaction its excerpts
+ * went through and the models its Findings are made of, in
+ * `@interlock/shared`. A secret pattern added there changes nothing here, and
+ * a verdict keyed on this package alone would keep serving excerpts redacted
+ * under the old patterns. Keyed on both, as well as on an analyzer's
+ * hand-bumped version, a change that forgets the bump still stops old verdicts
+ * being served; the cost is one re-verification of every pair per build.
  */
-export function coreBuildId(): string {
-  core ??= buildIdOf(fileURLToPath(new URL('.', import.meta.url)));
-  return core;
+export function analysisBuildId(): string {
+  analysis ??= buildIdOfAll(analysisModuleDirs());
+  return analysis;
 }
