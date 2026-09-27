@@ -4,6 +4,16 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-27 — CodeRabbit on scheduler v1: four taken, two stale
+
+- **Taken — overlap rebuilt each side's ancestors once per path of the other**, quadratic in the size of a large refactor. Built once per side.
+- **Taken — a superseded or failed run published no terminal event**, so on replay it read as still in flight. `run.finished` gains `status` (`complete`, `superseded`, `failed`), published from the one path that records how a run ended, caused by its `run.started`. Events stored before the field lack it; all of those were `complete`.
+- **Taken — a run's `snapshotA`/`snapshotB` were fresh ids naming nothing**, where the model promised the exact content. A run now names the watcher's own snapshot of each side's tree, from the change set that snapshot produced, so it traces to what it merged; a side the watcher never snapshotted — a branch no worktree holds, a tree captured inside the run — still gets a minted id, and the model's doc says so. Recording the trees themselves is the verdict cache's task.
+- **Taken — "at most 12 s" in the notes ignored queue wait**, which admission by priority does not bound. Now a no-queue estimate, with the budget held by measurement.
+- **Stale — a duplicate `### Added` in the CHANGELOG**: already merged into one section in the merge with `origin/dev`.
+- **Stale — the snapshot-commit cache trusting commits from an old shadow**: the reviewed code predates `ed147c1`, which checks a cached commit against the current shadow before reuse, gives the shadow up on a merge-time `SNAPSHOT_STALE`, and bounds the cache. Keying it by shadow adds nothing: a rebuilt shadow has the same path, and the check is what catches it.
+- **Mutation of the fixes: 9, 9 caught.** One baseline run of the harness failed before it began and could not be reproduced in eight runs after; the harness now keeps the output of a failing baseline, so a repeat names the test.
+
 ## 2026-09-27 — review of scheduler v1: six taken, one half right
 
 - **Taken — a shadow rebuilt under the daemon broke every pair with a side that never changed.** The commit cache was trusted for ever; a rebuilt shadow keeps its path and loses its commits. A cached commit is now checked (`cat-file -e`) before reuse, a merge that finds one missing gives the shadow up, and both caches are bounded at 1,024 entries. Pinned with the reviewer's probe: rebuild, then three runs with nothing on disk changed.
