@@ -599,6 +599,9 @@ describe('run pipeline', () => {
     });
 
     it('keys a side captured again on what it captured, not what it was told', async () => {
+      // b's head moves off a's, so a head announced wrongly is another base.
+      git(join(base, 'b'), 'commit', '-qam', 'b work');
+      await observe();
       const a = await branchNamed('a');
       const b = await branchNamed('b');
       const real = published('branch.snapshot')
@@ -634,6 +637,10 @@ describe('run pipeline', () => {
       const hit = await run();
 
       if (firstRun.kind !== 'analysed' || hit.kind !== 'analysed') throw new Error('not analysed');
+      // Planning marked the pair stale; the hit describes it again.
+      const [pair] = await store.listMergePairs((await repo()).id);
+      expect(pair).toMatchObject({ stale: false });
+      expect(pair!.lastRunAt).not.toBeNull();
       const stored = await store.getRun(hit.runId);
       expect(stored).toMatchObject({
         status: 'complete',
@@ -707,6 +714,10 @@ describe('run pipeline', () => {
     });
 
     it('answers a restart from the store without capturing, committing or merging', async () => {
+      // Heads that differ, so the order planning asks for their merge base in
+      // is not the order the run does.
+      git(join(base, 'b'), 'commit', '-qam', 'b work');
+      await observe();
       await run();
       pipeline.detach();
       // A new daemon: a fresh watcher announces every worktree, and a fresh
@@ -721,12 +732,12 @@ describe('run pipeline', () => {
       // merge base with the heads the other way round from the run.
       const [a, b] = [await branchNamed('a'), await branchNamed('b')];
       const order = a.id > b.id ? (['a', 'b'] as const) : (['b', 'a'] as const);
-      const { result, git } = await runAlone(pipeline, calls, order);
+      const { result, git: asked } = await runAlone(pipeline, calls, order);
 
       expect(result).toMatchObject({ kind: 'analysed', cached: true });
       // Planning already asked for the heads' merge base, so the one fact a
       // fresh pipeline lacks is the git version its verdicts are keyed under.
-      expect(git).toEqual([['version']]);
+      expect(asked).toEqual([['version']]);
     });
 
     it('misses when the same trees sit on the other branches', async () => {
