@@ -4,6 +4,12 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-27 — CodeRabbit on the data dir refusal: three taken
+
+- **Taken — the main checkout of a git dir kept apart was unprotected from a linked worktree.** Nothing in the git dir names it, so it cannot be kept from when the repository is opened; git is asked instead which repository the data dir is in, from its deepest existing part, and the checkout's `.git` file answers with the shared git dir. `repositoryDirHolding` does both checks for the daemon, the shadow and the pool.
+- **Taken — a failed common-dir lookup discarded the worktrees already listed.** For a path git finds a repository at, a lookup that fails now refuses the start; only a path that is not a repository yet is protected as itself.
+- **Taken — `stop()` during a start still resolving the refusal returned before the start took the lock.** `stop()` waits out a start in flight, then shuts down whatever it started.
+
 ## 2026-09-27 — review of the data dir refusal: the daemon refuses first
 
 - **Taken — the daemon wrote into a data dir inside the repository before any shadow existed.** `holdDataDir`, the store and the token all write at start, and nothing calls `ensureShadow` yet. The daemon now refuses at start, before the lock, against every repository in `repos`: each worktree and the common git dir, asked of git, and a path that is not a repository yet as itself.
