@@ -346,7 +346,7 @@ merge-tree` over the two commits reports the conflict — with neither side
   **Done when:** a scheduler driven by an injected clock and fake runs is shown to debounce with a ceiling, rank by overlap, never queue a pair twice, never complete two analyses of one pair for the same content, discard and record superseded runs, back off an infrastructure failure with one `infra.failure` per streak, retry `SNAPSHOT_STALE` at once, and keep a hot pair over a new one; the daemon, with two worktrees editing the same function, raises a textual Finding within 60 s, end to end; and a bench with 5 branches under continuous edit reports idle CPU against the 2% budget, edit-to-Finding latency against 60 s, CPU under edit, queue depth, escalation rate and eviction rate, with the numbers in `log.md`.
   **Constraints:** the daemon's snapshots have to be captured with `objectStore` set to the repository's shadow before any of them reaches a merge; captured without it, as the watcher does today, the tree sits unreferenced in the user's store for their `gc` to reap. This is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason. **Prefer re-checking a hot pooled pair over rotating a new one in.** Stickiness is a cost control of the same rank as overlap filtering, because every eviction discards incremental compiler state and the next check of that pair pays the cold cost again — round-robin fairness across pairs is the worst available strategy.
 
-- [ ] **Analyzer result caching**
+- [x] **Analyzer result caching**
       **Files:** `packages/daemon/src/store/`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/core/src/analyzers/`
       **What:** cache each analyzer's verdict on the content it judged, so re-running a pair at content already analysed — which is what an agent reverting and re-applying a change produces — costs no capture, no commit, no merge and no analyzer.
 
@@ -398,7 +398,7 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Files:** `packages/daemon/src/store/`, `packages/core/src/advisor/`
       **What:** count findings raised, findings delivered, and findings later dismissed or resolved as wrong. Expose the ratio.
       **Done when:** the daemon can report its own false-positive rate for a time window, and `interlock status` shows it.
-      **Constraints:** the design rule is **when unsure, say nothing**. A tool that catches 60% of conflicts and never lies is a product; one that catches 95% and cries wolf twice a day is uninstalled within a week. Every false positive is a bug with an issue, not a tuning parameter.
+      **Constraints:** the design rule is **when unsure, say nothing**. A tool that catches 60% of conflicts and never lies is a product; one that catches 95% and cries wolf twice a day is uninstalled within a week. Every false positive is a bug with an issue, not a tuning parameter. Decide what a dismissal means before counting one: reconciliation matches open Findings only, so today a dismissed conflict is raised again as a new Finding on the pair's next run — or cache hit, which reconciles the same way — and a dismissal lasts one run.
 
 - [ ] **`interlock check A B`**
       **Files:** `packages/cli/src/commands/`
