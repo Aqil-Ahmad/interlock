@@ -112,6 +112,10 @@ Finding traces back to the edit.
 A Finding matching an open one of the same pair by `textualFindingKey` keeps
 that one's id, `firstSeenAt` and run; an open one not reproduced is resolved.
 
+The watcher announces a tree again when the head under it moves, even if the
+files did not: a commit of exactly the work on disk, or a rebase, changes the
+ancestry a merge base comes from without changing the tree.
+
 A tree the shadow does not hold is captured again inside the run, once — the
 remedy for `SNAPSHOT_STALE`. If that still fails, the scheduler retries the pair
 at once, up to three times, and then treats it as infrastructure.

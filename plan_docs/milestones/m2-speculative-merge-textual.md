@@ -316,7 +316,7 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Done when:** a data dir inside the checkout, one inside the main checkout of a linked worktree, and one reached through a symlink are each refused with nothing created, matching the pool's refusal.
       **Constraints:** hard rule 1. Today a data dir configured inside a checkout puts the whole bare clone into the user's worktree as untracked files; the pool refuses the same case, `ensureShadow` does not.
 
-- [ ] **Scheduler v1**
+- [x] **Scheduler v1**
       **Files:** `packages/daemon/src/scheduler/`
       **What:** decide which pairs get merged, and which clean merges would be worth a semantic check; and wire the run pipeline that executes a pair — shadow, the sides' commits, `speculativeMerge` against the pair's merge base, textual classification, and the run, its Findings and its events persisted with `causedBy` — into the daemon. Debounce per branch with a ceiling, mark pairs stale when a branch moves, discard superseded results, cap concurrency, back off infrastructure failures, and rank by file overlap.
 
