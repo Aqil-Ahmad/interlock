@@ -14,8 +14,8 @@ import type { GitRunner, UserRepo } from './repo-handle.js';
  *
  * For a git directory kept apart from its checkout, git lists the git directory
  * itself as the main worktree, and nothing it holds names the checkout: seen
- * from a linked worktree, that checkout cannot be found. From the checkout
- * itself, it is the path asked about.
+ * from a linked worktree, that checkout cannot be found from this side at all.
+ * {@link repositoryDirHolding} finds it from the other.
  */
 export async function repositoryDirsOf(repo: UserRepo, runner: GitRunner): Promise<string[]> {
   const worktrees = await runRequired(runner, repo, ['worktree', 'list', '--porcelain', '-z']);
@@ -24,9 +24,42 @@ export async function repositoryDirsOf(repo: UserRepo, runner: GitRunner): Promi
     '--path-format=absolute',
     '--git-common-dir',
   ]);
-  // One trailing newline, and only that: the path itself may end in another.
-  const commonDir = common.stdout.replace(/\n$/u, '');
-  return [...parseWorktreeList(worktrees.stdout).map((entry) => entry.path), commonDir];
+  return [...parseWorktreeList(worktrees.stdout).map((entry) => entry.path), pathOf(common.stdout)];
+}
+
+/**
+ * The directory of `dirs` that `path` belongs to, or null if none.
+ *
+ * By path first, and then by asking git which repository `path` is in, from
+ * the deepest part of it that exists. The second answers what the first cannot:
+ * a checkout whose git directory is kept apart is named by nothing on the
+ * repository's side, but its `.git` file points at the shared git directory, so
+ * from inside it git answers with a directory `dirs` holds. Read-only.
+ */
+export async function repositoryDirHolding(
+  path: string,
+  dirs: readonly string[],
+  runner: GitRunner,
+): Promise<string | null> {
+  const direct = dirHolding(path, dirs);
+  if (direct !== null) return direct;
+  // The runner reads nothing from a handle but `rootPath`, and which git
+  // directory this is, is what is being asked.
+  const probe: UserRepo = { kind: 'user', rootPath: deepestExisting(path)[0], gitDir: '' };
+  const answer = await runner.run(probe, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  // Outside every repository, which is where a data dir belongs.
+  if (answer.exitCode !== 0) return null;
+  const holder = pathOf(answer.stdout);
+  return dirHolding(holder, dirs) !== null ? holder : null;
+}
+
+/** A path git printed, less the one newline it ends with: the path may end in another. */
+function pathOf(stdout: string): string {
+  return stdout.replace(/\n$/u, '');
 }
 
 /**
@@ -49,14 +82,20 @@ export function dirHolding(path: string, dirs: readonly string[]): string | null
  * either, so the refusal it might have missed is made by `mkdir` instead.
  */
 function resolveDeepest(path: string): string {
+  const [existing, rest] = deepestExisting(path);
+  return join(existing, ...rest);
+}
+
+/** The deepest ancestor of `path` that resolves, resolved, and the parts below it. */
+function deepestExisting(path: string): [existing: string, rest: string[]] {
   const rest: string[] = [];
   let current = path;
   for (;;) {
     try {
-      return join(realpathSync(current), ...rest);
+      return [realpathSync(current), rest];
     } catch {
       const parent = dirname(current);
-      if (parent === current) return path;
+      if (parent === current) return [path, []];
       rest.unshift(basename(current));
       current = parent;
     }

@@ -553,6 +553,35 @@ describe('ensureShadow', () => {
       await expectRefused(separateRepo, join(apart, 'interlock-data'), separate);
     });
 
+    it('is refused inside the main checkout of a git dir kept apart, from a linked worktree', async () => {
+      const separate = join(base, 'separate');
+      const apart = join(base, 'apart.git');
+      execFileSync('git', ['init', '-q', '-b', 'main', `--separate-git-dir=${apart}`, separate], {
+        stdio: 'pipe',
+      });
+      gitIn(
+        separate,
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'one',
+      );
+      const linked = join(base, 'linked');
+      gitIn(separate, 'worktree', 'add', '-q', '-b', 'feature', linked);
+      const worktreeRepo: UserRepo = {
+        kind: 'user',
+        rootPath: linked,
+        gitDir: join(apart, 'worktrees', 'linked'),
+      };
+
+      await expectRefused(worktreeRepo, join(separate, 'interlock-data'), separate);
+    });
+
     it('is refused when a symlink leads into the checkout', async () => {
       mkdirSync(join(dir, 'inside'));
       const link = join(base, 'link');

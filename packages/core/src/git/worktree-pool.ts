@@ -15,7 +15,7 @@ import type { Logger, MergePairKey, RepoId } from '@interlock/shared';
 import type { SpeculativeMergeResult } from '../merge/speculative-merge.js';
 import { assertObjectId, runRequired } from './repo-handle.js';
 import type { GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
-import { dirHolding, repositoryDirsOf } from './repo-dirs.js';
+import { repositoryDirHolding, repositoryDirsOf } from './repo-dirs.js';
 import { alternatesOf, shadowPathFor } from './shadow.js';
 
 /**
@@ -307,7 +307,7 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
       ...(objects === null ? [] : [objects]),
       ...(await repositoryDirsOf(origin, runner)),
     ];
-    if (dirHolding(poolPath, dirs) !== null) {
+    if ((await repositoryDirHolding(poolPath, dirs, runner)) !== null) {
       throw new InterlockError(
         'CONFIG_INVALID',
         'Refused to put worktrees inside the repository being watched',

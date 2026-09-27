@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { InterlockError } from '@interlock/shared';
 import type { RepoId } from '@interlock/shared';
-import { dirHolding, repositoryDirsOf } from './repo-dirs.js';
+import { repositoryDirHolding, repositoryDirsOf } from './repo-dirs.js';
 import { runRequired } from './repo-handle.js';
 import type { GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
 
@@ -148,7 +148,7 @@ async function refresh(
   // refuses such a data dir before it starts; a caller handing a path here
   // directly is refused the same way.
   const dirs = [originPath, source.objectsDir, ...(await repositoryDirsOf(repo, options.runner))];
-  if (dirHolding(shadowPath, dirs) !== null) {
+  if ((await repositoryDirHolding(shadowPath, dirs, options.runner)) !== null) {
     throw new InterlockError(
       'CONFIG_INVALID',
       'Refused to put a shadow clone inside the repository being watched',

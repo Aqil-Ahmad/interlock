@@ -1,7 +1,7 @@
-import { chmodSync, mkdirSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { dirHolding, repositoryDirsOf } from '@interlock/core';
+import { repositoryDirHolding, repositoryDirsOf } from '@interlock/core';
 import type { GitRunner, UserRepo } from '@interlock/core';
 import { InterlockError } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
@@ -62,10 +62,13 @@ export async function refuseDataDirInRepos(
     let dirs: string[] = [path];
     try {
       dirs = [path, ...(await repositoryDirsOf(probe, runner))];
-    } catch {
-      // Watched once it exists; until then the configured path is all there is.
+    } catch (error) {
+      // Watched once it exists; until then the configured path is all there
+      // is. A repository git could not fully answer for is not checked by
+      // half its answer: that is the start refused, not the data dir allowed.
+      if (await isRepository(probe, runner)) throw error;
     }
-    if (dirHolding(dataDir, dirs) !== null) {
+    if ((await repositoryDirHolding(dataDir, dirs, runner)) !== null) {
       throw new InterlockError(
         'CONFIG_INVALID',
         'The data directory is inside a watched repository',
@@ -76,6 +79,12 @@ export async function refuseDataDirInRepos(
       );
     }
   }
+}
+
+/** Whether git finds a repository at `repo`, which has to be there to ask. */
+async function isRepository(repo: UserRepo, runner: GitRunner): Promise<boolean> {
+  if (!existsSync(repo.rootPath)) return false;
+  return (await runner.run(repo, ['rev-parse', '--git-dir'])).exitCode === 0;
 }
 
 /** Beside the database, and never the database: the store keeps its own locks. */
