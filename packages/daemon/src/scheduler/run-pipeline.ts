@@ -1,7 +1,9 @@
 import {
+  assertObjectId,
   captureDirtyState,
   commitSnapshotInShadow,
   extractChangeSet,
+  isObjectId,
   mergeBase,
   openUserRepo,
   runRequired,
@@ -16,7 +18,13 @@ import type {
   ShadowRepo,
   UserRepo,
 } from '@interlock/core';
-import { isInterlockError, makePairKey, silentLogger, ulid } from '@interlock/shared';
+import {
+  InterlockError,
+  isInterlockError,
+  makePairKey,
+  silentLogger,
+  ulid,
+} from '@interlock/shared';
 import type {
   BranchRef,
   BranchRefId,
@@ -183,17 +191,28 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   ): Promise<SideOrSkip> => {
     const changeSet = await changeSetOf(repo, handle, branch);
     if (branch.worktreePath === null) {
+      // From the store, where its shape is an assumption; shaped like a flag,
+      // git would read it as one.
+      assertObjectId(branch.headSha, 'headSha');
       const tree = await runRequired(runner, shadow, [
         'rev-parse',
         '--verify',
         '--quiet',
         `${branch.headSha}^{tree}`,
       ]);
+      const treeOid = tree.stdout.trim();
+      if (!isObjectId(treeOid)) {
+        throw new InterlockError('GIT_COMMAND_FAILED', 'git named no tree for a branch head', {
+          remedy:
+            'Report the git version in use; its rev-parse output differs from the documented form.',
+          infra: true,
+        });
+      }
       return {
         branch,
         commit: branch.headSha,
         headSha: branch.headSha,
-        treeOid: tree.stdout.trim(),
+        treeOid,
         changeSet,
         snapshotId: null,
       };

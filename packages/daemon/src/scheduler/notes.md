@@ -86,6 +86,13 @@ nothing it found is persisted. A superseded result was never shown, so the same
 content may be merged once more. Real cancellation waits for a compiler worth
 killing.
 
+The discard is checked once, just before the run's Findings are written. An
+abort that arrives while they are being written — a window the size of a few
+SQLite writes — lets that run complete on content already gone. Accepted rather
+than closed: checking again part-way through would leave a run's Findings half
+written, and the abort that came in has already queued the run that corrects
+them.
+
 Findings are not marked stale on every edit. Doing so would empty the list
 while agents type; a Finding stays open until a completed run says otherwise,
 and the pair's row carries the staleness. A branch that disappears — merged and
@@ -156,6 +163,20 @@ the pool will make once something runs in it.
 A pair whose run failed as infrastructure backs off exponentially, from 5 s to a
 5-minute cap, and publishes `infra.failure` once per streak. Anything else that
 throws is a bug: logged, not retried, and run again when a branch next moves.
+
+## Restart is re-verification, and that is deliberate
+
+Nothing the scheduler or the watcher knows survives a restart: the watcher's
+record of what it last announced, and the scheduler's record of what each pair
+was last analysed at, are both in memory. So on start the watcher hashes and
+announces every worktree — clean ones too — every branch settles, and every
+pair with a reason to be merged is merged again. That is how Findings left
+open by the previous run are re-checked against what is on disk now.
+
+It is load-bearing. Persisting either record — the verdict cache will persist
+the second — without adding an explicit re-plan at start would silently stop
+Findings from being re-verified after a restart; whoever persists one owes the
+other.
 
 ## Not yet
 

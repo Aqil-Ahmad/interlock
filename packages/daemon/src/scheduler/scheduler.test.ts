@@ -1092,6 +1092,29 @@ describe('scheduler', () => {
       expect(planned).toEqual([x]);
     });
 
+    it('publishes nothing for a plan that lands after stop', async () => {
+      make();
+      const [x, y] = [branch(), branch()];
+      let release: (plan: PairPlan) => void = () => undefined;
+      plans.set(
+        x,
+        new Promise<PairPlan>((resolve) => {
+          release = resolve;
+        }) as unknown as PairPlan,
+      );
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+      expect(planned).toEqual([x]);
+
+      const stopping = scheduler.stop();
+      release({ candidates: [candidate(x, y, 'file')], declined: 0 });
+      await stopping;
+
+      expect(published('pair.scheduled')).toEqual([]);
+      expect(scheduler.queueDepth).toBe(0);
+    });
+
     it('starts once however often it is started, and stops completely', async () => {
       make();
       scheduler.start();

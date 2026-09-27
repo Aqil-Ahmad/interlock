@@ -632,6 +632,84 @@ describe('run pipeline', () => {
       fresh.detach();
     });
 
+    it('follows a new branch that carried uncommitted work off another with checkout -b', async () => {
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      writeFileSync(join(base, 'b', 'total.ts'), body('2'));
+      await observe();
+
+      // The work moves with the worktree; the branch it left keeps only commits.
+      git(join(base, 'a'), 'checkout', '-q', '-b', 'a2');
+      await observe();
+      const [left, moved, b] = [
+        await branchNamed('a'),
+        await branchNamed('a2'),
+        await branchNamed('b'),
+      ];
+      expect(left.worktreePath).toBeNull();
+      expect(moved.worktreePath).toBe(join(base, 'a'));
+
+      const { candidates } = await pipeline.plan(moved.repoId, moved.id);
+      const candidate = candidates.find((c) => c.pair.a === b.id || c.pair.b === b.id)!;
+      expect(candidate.overlap.tier).toBe('file');
+      expect(
+        await pipeline.runPair(request(candidate), new AbortController().signal),
+      ).toMatchObject({ kind: 'analysed', clean: false });
+      const [finding] = await store.listOpenFindings(moved.repoId);
+      const spans = finding!.evidence.filter((e): e is SpanEvidence => e.type === 'span');
+      expect(new Set(spans.map((span) => span.branchRefId))).toEqual(new Set([moved.id, b.id]));
+
+      // The branch left behind changed nothing, so it pairs with nobody but main.
+      const fromLeft = await pipeline.plan(left.repoId, left.id);
+      expect(fromLeft.candidates.map((c) => c.target)).toEqual([true]);
+    });
+
+    it('works on a repository whose history is borrowed from another', async () => {
+      // `clone --shared` holds no objects of its own: every commit is read from
+      // upstream through the clone's alternates, and the shadow borrows the
+      // clone — so the change set, the merge base and the merge all read
+      // through two stores.
+      const upstream = join(base, 'upstream');
+      execFileSync('git', ['init', '-q', '-b', 'main', upstream], { stdio: 'pipe' });
+      for (const [key, value] of [
+        ['user.name', 'Interlock Test'],
+        ['user.email', 'test@example.invalid'],
+      ]) {
+        git(upstream, 'config', key!, value!);
+      }
+      writeFileSync(join(upstream, 'total.ts'), body('items.length'));
+      git(upstream, 'add', '-A');
+      git(upstream, 'commit', '-qm', 'base');
+      const borrower = join(base, 'borrower');
+      execFileSync('git', ['clone', '-q', '--shared', upstream, borrower], { stdio: 'pipe' });
+      for (const [key, value] of [
+        ['user.name', 'Interlock Test'],
+        ['user.email', 'test@example.invalid'],
+        ['maintenance.auto', 'false'],
+        ['gc.auto', '0'],
+      ]) {
+        git(borrower, 'config', key!, value!);
+      }
+      expect(git(borrower, 'count-objects').trim()).toMatch(/^0 objects/u);
+      git(borrower, 'worktree', 'add', '-q', '-b', 'x', join(base, 'x'));
+      git(borrower, 'worktree', 'add', '-q', '-b', 'y', join(base, 'y'));
+      writeFileSync(join(base, 'x', 'total.ts'), body('1'));
+      writeFileSync(join(base, 'y', 'total.ts'), body('2'));
+      for (const path of [borrower, join(base, 'x'), join(base, 'y')]) sweep.markChanged(path);
+      await sweep.reconcile(borrower);
+
+      const theirs = (await store.listRepos()).find((r) => r.rootPath === borrower)!;
+      const branches = await store.listBranchRefs(theirs.id);
+      const [x, y] = ['x', 'y'].map((name) => branches.find((branch) => branch.name === name)!);
+      const { candidates } = await pipeline.plan(theirs.id, x!.id);
+      const candidate = candidates.find((c) => c.pair.a === y!.id || c.pair.b === y!.id)!;
+      expect(candidate.overlap.tier).toBe('file');
+
+      const result = await pipeline.runPair(request(candidate), new AbortController().signal);
+
+      expect(result).toMatchObject({ kind: 'analysed', clean: false, findingCount: 1 });
+      expect(git(borrower, 'count-objects').trim()).toMatch(/^0 objects/u);
+    });
+
     it('skips a side whose worktree could not be read', async () => {
       await observe();
       const a = await branchNamed('a');

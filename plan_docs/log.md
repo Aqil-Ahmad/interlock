@@ -4,6 +4,15 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-27 — third review of scheduler v1: three taken, five already fixed, one declined
+
+- **Already fixed, with evidence:** retries carry their cause (`ed147c1`; the scheduler suite asserts the retry's `pair.scheduled` and `infra.failure` follow the original), nothing is queued or published once stopped (`ed147c1`, now also pinned for a plan still in flight at `stop`), runs name the watcher's own snapshots (`788e40e`), and `announced` is cleared on `branch.disappeared` while the commit cache is bounded at 1,024 (`ed147c1`).
+- **Not the case — the alternates chain stops at the user's store.** git follows an alternate's own alternates, and the chain was pinned for snapshot commits on 2026-09-24. What was missing was a test through the newer call sites, so one now runs a pair end to end on a `clone --shared` repository holding no objects of its own — change set, merge base, merge and Finding — and the clone still holds none afterwards.
+- **Taken — the supersede check does not cover an abort that lands while Findings are being written.** Accepted rather than closed, and the notes now say so: a check part-way through would leave a run's Findings half written, and the abort has already queued the run that corrects them.
+- **Taken — restart re-verification is load-bearing and was undocumented.** Nothing the watcher or scheduler remembers survives a restart, so every worktree is announced, every branch settles and every pair re-merges; the notes now say that is how open Findings are re-checked, and that persisting either record without an explicit re-plan at start would stop it.
+- **Taken — `checkout -b` carrying uncommitted work** now has one end-to-end test: the work moves with the worktree to the new branch, which conflicts; the branch left behind pairs only with main. **And the stored head is checked before `rev-parse`, and its answer checked for an object id.**
+- **Declined — skipping `commit-tree` for a clean side.** The commit is cached per tree and head, so it is paid once per state, and knowing a side is clean without asking git would need another field on a stored event. **Decided, unchanged:** a duplicate does not refresh a hot pair (no work was done); an unreadable worktree settling into a skip is churn, not a fault; a cached repository handle that stops working is what the infrastructure backoff is for.
+
 ## 2026-09-27 — CodeRabbit on scheduler v1: four taken, two stale
 
 - **Taken — overlap rebuilt each side's ancestors once per path of the other**, quadratic in the size of a large refactor. Built once per side.
