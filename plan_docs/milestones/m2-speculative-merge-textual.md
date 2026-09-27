@@ -308,7 +308,7 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Files:** `packages/core/src/git/shadow.ts`
       **What:** reclaim unreferenced objects in the shadow and bound its disk use, pool slots included.
       **Done when:** throwaway pool commits and spent snapshot commits are collected, and the shadow's size stays bounded across a day of continuous checks.
-      **Constraints:** a live slot's `HEAD` and index are already roots for git's own `prune` — verified, a worktree's `HEAD` is walked — but a snapshot commit a queued check still needs is referenced by nothing and must be made a root before anything collects. So is every commit a Finding's evidence names: a `merge-conflict` evidence carries `commitA` and `commitB`, the snapshot commits its run made, and a cache hit re-serves the evidence of the run that reached the verdict, so an open Finding can name commits days old. Collecting them leaves the evidence naming objects that are gone. Either the commits named by open Findings and by cached verdicts are roots, or a verdict whose commits are collected is dropped with them. Never collect the user's store: the shadow borrows it through alternates.
+      **Constraints:** a live slot's `HEAD` and index are already roots for git's own `prune` — verified, a worktree's `HEAD` is walked — but a snapshot commit a queued check still needs is referenced by nothing and must be made a root before anything collects. So is every commit a Finding's evidence names: a `merge-conflict` evidence carries `commitA` and `commitB`, the snapshot commits its run made, and a cache hit re-serves the evidence of the run that reached the verdict, so an open Finding can name commits days old. Collecting them leaves the evidence naming objects that are gone. Either the commits named by open Findings and by cached verdicts are roots, or a verdict whose commits are collected is dropped with them. A rebuilt clone is already covered: its generation is part of every verdict's key, so a rebuild misses rather than serving evidence from the clone before it. Never collect the user's store: the shadow borrows it through alternates.
 
 - [ ] **Retention**
       **Files:** `packages/daemon/src/daemon.ts`, `packages/shared/src/config.ts`
@@ -406,11 +406,17 @@ merge-tree` over the two commits reports the conflict — with neither side
   in the daemon calls `prune` yet, so no retention window reaches this or any
   other table; wiring one is the Retention task.
 
-- [ ] **Verdict fingerprint names the build**
+- [x] **Verdict fingerprint names the build**
       **Files:** `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/store/verdict-key.ts`
       **What:** key cached verdicts on the Interlock build as well as the analyzer's own version, so an upgrade never serves a verdict an older build reached.
       **Done when:** a verdict cached by one build misses under another, and one unchanged build still hits across a restart.
       **Constraints:** the cache outlives upgrades, and its only guard today is `Analyzer.version`, bumped by hand. The textual verdict also depends on the classifier, `speculative-merge.ts` and the shadow's merge config — `merge.conflictStyle` among them — none of which touch that number, so a fix that forgets the bump keeps serving the old answer for every pair already judged, across restarts, until its content changes. The build version is the backstop; the analyzer version stays for changes between releases. The cost is one re-verification pass per upgrade.
+
+  Done as a digest of `@interlock/core`'s own modules rather than a version
+  number: the version is `0.0.0` for every build between releases, and those are
+  the builds a classifier gets fixed in. Core holds everything a textual verdict
+  depends on besides git — the merge, the classifier, the shadow's merge config —
+  so any change there, a comment included, is a miss.
 
 - [ ] **False-positive budget**
       **Files:** `packages/daemon/src/store/`, `packages/core/src/advisor/`

@@ -4,6 +4,15 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-28 — the verdict cache review, worked through on the same branch
+
+- **Taken — verdicts keyed on the build.** The fingerprint gains a digest of `@interlock/core`'s modules, read once per process; not the package version, which is `0.0.0` for every build between releases — exactly the builds a classifier is fixed in. A verdict cached by another build misses, one build hits across a restart. The pipeline takes the build as an option, which is how the miss is tested.
+- **Taken, and half of it is today's — evidence naming commits the shadow no longer has.** Collection is not built, but a rebuild is: a rebuilt clone has none of the commits a hit re-serves in its evidence. Each clone now carries a generation in its own config, read by the refresh's config pass at no extra process, given once and never brought into line; a clone from before generations is given one, which is sound because its commits are all still in it. The generation is in every verdict's key, so a rebuild misses and the evidence is re-made. `ShadowRepo` gains the field; slot handles copy it. The collection half stays on its task.
+- **Taken — a hit checks for supersession where a run does**, just before it writes Findings, not only at its start. Tested by aborting from inside the hit's own analyzer event: the Finding keeps what the last completed run wrote.
+- **Not taken here, as separate tasks — retention, and the watcher's fallback.** Both are other subsystems with decisions of their own: a retention window and T7's wording; a fallback period against the idle CPU budget, and reproducing the flake. They go on branches of their own.
+- **Left to Retention, as the review placed it — hot verdicts age out.** Not yet reachable, since nothing prunes; the decision is whether a hit refreshes a verdict and re-points it at the hit's run, since the verdict also goes with its run.
+- **Mutation: 12, 11 caught.** The survivor recomputes the build digest instead of memoising it: the same value, and cost only.
+
 ## 2026-09-28 — review of the verdict cache: gaps brought into M2
 
 - **Moved — Retention from M8 to M2**, beside shadow collection: the two are the database and shadow halves of one disk bound, and M8 would leave the store growing through every milestone in between. It also owes threat-model T7, which lists a disk quota and GC that do not exist yet.

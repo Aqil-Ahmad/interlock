@@ -123,8 +123,12 @@ base never change, so both are remembered once asked.
 Two checks follow, cheapest first. If the pair was last analysed to completion
 at the same content, the run stops there: nothing is recorded. Otherwise the
 store's verdict cache is asked, keyed on the pair in its own order, both trees,
-the base, the analyzer and its fingerprint — the analyzer's version and the git
-version. The in-memory check only remembers each pair's last content; the cache
+the base, the shadow clone's generation, and the analyzer's fingerprint — its
+version, the git version, and a digest of `@interlock/core`'s own modules, so a
+build that changed the merge or the classifier without bumping the version is
+still a miss. The generation is there because a verdict keeps its run's
+evidence, which names commits made in that clone; a rebuilt clone has none of
+them. The in-memory check only remembers each pair's last content; the cache
 remembers every content judged, which is what catches an agent reverting and
 re-applying a change, and it survives a restart.
 
@@ -137,7 +141,8 @@ what a run would. The merge outcome, which escalation needs, comes from the run
 that reached the verdict; `cachedFrom` on the analyzer's event names that run.
 
 A verdict about the environment — `infra-failure`, `timeout` — is never cached,
-and neither is a superseded run or one that threw.
+and neither is a superseded run or one that threw. A hit checks for supersession
+at the same point a run does, just before it writes Findings.
 
 ## 6. Run
 
