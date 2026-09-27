@@ -1,5 +1,5 @@
 import { captureDirtyState, extractChangeSet, mergeBase } from '@interlock/core';
-import type { GitRunner, UserRepo } from '@interlock/core';
+import type { GitRunner, UserRepo, WorktreeSnapshot } from '@interlock/core';
 import { isInterlockError, silentLogger, ulid } from '@interlock/shared';
 import type {
   BranchRef,
@@ -10,6 +10,7 @@ import type {
   SnapshotId,
 } from '@interlock/shared';
 import type { EventBus } from '../bus/index.js';
+import type { ShadowRegistry } from '../shadows.js';
 import type { Store } from '../store/index.js';
 
 /**
@@ -29,6 +30,11 @@ export interface SnapshotPipelineOptions {
   readonly store: Store;
   readonly bus: EventBus;
   readonly runner: GitRunner;
+  /**
+   * Where captured objects are written: each repository's shadow, never the
+   * user's store, since a run commits these trees and merges them.
+   */
+  readonly shadows: ShadowRegistry;
   readonly logger?: Logger;
   /**
    * How long a worktree may go unhashed while nothing reports it changing.
@@ -95,6 +101,15 @@ type LastPublished =
        */
       readonly branchRefId: BranchRefId;
       readonly treeOid: string;
+      /**
+       * The head that tree was captured against.
+       *
+       * A commit of exactly the work in the worktree, or a rebase that leaves
+       * the files alone, moves the head and not the tree. Downstream commits the
+       * tree on this head and merges from its ancestry, so the old one would
+       * merge against a merge base the branch has left.
+       */
+      readonly headSha: string | null;
       readonly snapshotId: SnapshotId;
       readonly at: number;
       readonly changed: boolean;
@@ -102,7 +117,7 @@ type LastPublished =
 
 export function createSnapshotPipeline(options: SnapshotPipelineOptions): SnapshotPipeline {
   const log = (options.logger ?? silentLogger).child('snapshot');
-  const { store, bus, runner } = options;
+  const { store, bus, runner, shadows } = options;
 
   /**
    * Last published identity per worktree.
@@ -129,7 +144,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
         // for the same reason, and the two must not disagree about it.
         if (previous?.kind === 'unknown') return;
         lastSeen.set(branch.worktreePath, { kind: 'unknown' });
-        await publish(branch, null, null, 0);
+        await publish(branch, null, null, null, 0);
         return;
       }
 
@@ -143,6 +158,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       if (
         previous?.kind === 'tree' &&
         sameBranch &&
+        previous.headSha === branch.headSha &&
         !previous.changed &&
         now() - previous.at < recaptureAfterMs
       ) {
@@ -156,11 +172,16 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       if (previous?.kind === 'tree') {
         lastSeen.set(branch.worktreePath, { ...previous, changed: false });
       }
-      const snapshot = await captureDirtyState(branch.worktreePath, handle, { runner });
+      const snapshot = await captureInto(handle, repo, branch.worktreePath);
       const marked = lastSeen.get(branch.worktreePath);
       const changedDuringCapture = marked?.kind === 'tree' && marked.changed;
 
-      if (previous?.kind === 'tree' && sameBranch && previous.treeOid === snapshot.treeOid) {
+      if (
+        previous?.kind === 'tree' &&
+        sameBranch &&
+        previous.treeOid === snapshot.treeOid &&
+        previous.headSha === snapshot.headSha
+      ) {
         // Same content, so the clock restarts: without this the ceiling stays
         // expired and every later pass hashes the worktree again.
         lastSeen.set(branch.worktreePath, {
@@ -187,30 +208,39 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
           kind: 'tree',
           branchRefId: branch.id,
           treeOid: snapshot.treeOid,
+          headSha: snapshot.headSha,
           snapshotId,
           at: now(),
           changed: changedDuringCapture,
         });
         await rememberOn(branch, snapshotId);
-        await publish(branch, snapshot.treeOid, null, 0);
+        await publish(branch, snapshot.treeOid, snapshot.headSha, null, 0);
         return;
       }
 
       const changeSet = await extractChangeSet(handle, branch, base, {
         runner,
         snapshot: { id: snapshotId, treeOid: snapshot.treeOid },
+        objectStore: await shadows.get(handle, repo.id),
       });
       await store.upsertChangeSet(changeSet);
       lastSeen.set(branch.worktreePath, {
         kind: 'tree',
         branchRefId: branch.id,
         treeOid: snapshot.treeOid,
+        headSha: snapshot.headSha,
         snapshotId,
         at: now(),
         changed: changedDuringCapture,
       });
       await rememberOn(branch, snapshotId);
-      await publish(branch, snapshot.treeOid, changeSet.id, changeSet.files.length);
+      await publish(
+        branch,
+        snapshot.treeOid,
+        snapshot.headSha,
+        changeSet.id,
+        changeSet.files.length,
+      );
     },
 
     markChanged(worktreePath: string): void {
@@ -263,9 +293,27 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
     });
   }
 
+  /** Capture into the repository's shadow, dropping a shadow that refused it. */
+  async function captureInto(
+    handle: UserRepo,
+    repo: Repo,
+    worktreePath: string,
+  ): Promise<WorktreeSnapshot> {
+    const shadow = await shadows.get(handle, repo.id);
+    try {
+      return await captureDirtyState(worktreePath, handle, { runner, objectStore: shadow });
+    } catch (error) {
+      // A shadow removed or rebuilt underneath the handle refuses every capture
+      // until something asks `ensureShadow` again.
+      shadows.forget(repo.id);
+      throw error;
+    }
+  }
+
   async function publish(
     branch: BranchRef,
     treeOid: string | null,
+    headSha: string | null,
     changeSetId: ChangeSetId | null,
     fileCount: number,
   ): Promise<void> {
@@ -275,6 +323,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       at: new Date().toISOString(),
       branchRefId: branch.id,
       treeOid,
+      headSha,
       changeSetId,
       fileCount,
     });

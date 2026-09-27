@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import type { GitRunner } from '@interlock/core';
 import type { InterlockConfig, Logger } from '@interlock/shared';
 import type { EventBus } from '../bus/index.js';
+import type { ShadowRegistry } from '../shadows.js';
 import type { Store } from '../store/index.js';
 import { createSweep } from './sweep.js';
 import { createWorktreeWatcher } from './worktree-watcher.js';
@@ -31,6 +32,8 @@ export interface WatcherOptions {
   readonly bus: EventBus;
   readonly runner: GitRunner;
   readonly logger: Logger;
+  /** Shared with the run pipeline, so both write into one shadow per repository. */
+  readonly shadows?: ShadowRegistry;
   /** Overridable so a test does not wait out the cadence. */
   readonly sweepIntervalMs?: number;
   /** The kernel boundary, passed through to the filesystem watcher. */
@@ -76,6 +79,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
     runner,
     dataDir: config.dataDir,
     logger: options.logger,
+    ...(options.shadows === undefined ? {} : { shadows: options.shadows }),
   });
 
   /**

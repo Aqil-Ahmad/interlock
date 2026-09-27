@@ -65,15 +65,15 @@ The path to trace when debugging anything:
 
 1. **Edit.** An agent writes to a file in a worktree.
 2. **Observe.** The watcher sees the filesystem event, debounces, publishes `worktree.changed`.
-3. **Snapshot.** The dirty tree is captured without touching the user's index — a temporary index file plus `write-tree`, writing objects only. Publishes `changeset.computed`.
-4. **Schedule.** Every pair containing this branch is marked stale, superseded runs are aborted, priority is computed (file overlap → symbol overlap → live sessions), work is admitted up to the concurrency limit. Publishes `pair.scheduled`.
+3. **Snapshot.** The dirty tree is captured without touching the user's index — a temporary index file plus `write-tree` — and its objects are written into the shadow clone's store, never the user's. Publishes `branch.snapshot`, naming the tree and the head it was captured against.
+4. **Schedule.** Once the branch has been quiet for the debounce, or at a ceiling if it never is, every pair containing it is marked stale and runs in flight for those pairs are told to discard their results. Pairs whose changes have nothing in common are never merged; the rest are ranked by file overlap and admitted up to the concurrency limit, and a pair already analysed at the same content is not merged again. Publishes `pair.scheduled`.
 5. **Merge.** Both sides' commits — real or snapshot — are merged with `git merge-tree` inside the shadow clone's object database. No checkout, no working directory. Publishes `run.merge-completed`.
 6. **Analyze.** A conflicted merge is already a textual finding. A clean merge is a semantic candidate: the pre-filter asks whether the two branches touched overlapping exported symbols, and only then is the merged tree materialised — into the pair's slot in a small pool of persistent worktrees, updated by delta so incremental compiler state survives between checks — and handed to the compiler, the build and targeted tests inside the sandbox. Each step publishes `run.analyzer-completed`.
 7. **Attribute.** Each problem is traced to which side introduced which half — the difference between "TS2304" and "your rename broke a call site the other branch added".
 8. **Record.** Findings are persisted with evidence: spans on both branches, each in that branch's own file; for a textual conflict, the merge it came from — both commits, the merge base and git's conflict type; redacted tool output; symbol trails. Publishes `finding.raised`.
 9. **Advise.** The advisor ranks by severity × confidence and produces Advice within the noise budget.
 10. **Deliver.** MCP pushes to the owning agent, rate-limited; the dashboard updates over WebSocket; `interlock status` shows it. Publishes `advice.delivered`.
-11. **Invalidate.** Branches move; the finding becomes `stale`, is re-verified, and ends `resolved` or `dismissed`.
+11. **Invalidate.** Branches move; the pair is re-verified, and a finding the next run does not reproduce ends `resolved`.
 
 Every step publishes an event with a `causedBy` pointer, so a Finding can be walked back to the edit that caused it.
 

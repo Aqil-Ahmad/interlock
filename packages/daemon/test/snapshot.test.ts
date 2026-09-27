@@ -205,6 +205,33 @@ describe('snapshot pipeline', () => {
     expect(snapshots()[0]?.fileCount).toBeGreaterThan(0);
   });
 
+  it('announces the same tree again when the head it sits on moves', async () => {
+    writeFileSync(join(root, 'a.txt'), 'edited\n');
+    await sweep.reconcile(root);
+    const before = snapshots().at(-1)!;
+    events.length = 0;
+
+    // Committing exactly what was on disk moves the head and not the tree.
+    git(root, 'commit', '-qam', 'the same work, committed');
+    const head = git(root, 'rev-parse', 'HEAD').trim();
+    await sweep.reconcile(root);
+
+    expect(snapshots()).toHaveLength(1);
+    expect(snapshots()[0]).toMatchObject({ treeOid: before.treeOid, headSha: head });
+    expect(before.headSha).not.toBe(head);
+  });
+
+  it('hashes a worktree whose head moved, even inside the recapture ceiling', async () => {
+    const { sweep: counted, hashes } = countingSweep({ recaptureAfterMs: 60_000 });
+    await counted.reconcile(root);
+    const after = hashes();
+
+    git(root, 'commit', '-qm', 'empty', '--allow-empty');
+    await counted.reconcile(root);
+
+    expect(hashes()).toBe(after + 1);
+  });
+
   it('sees uncommitted work, not just commits', async () => {
     await sweep.reconcile(root);
     events.length = 0;
