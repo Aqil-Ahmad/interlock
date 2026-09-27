@@ -4,6 +4,10 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-27 — a failed probe no longer reads as outside every repository
+
+- **Taken — `repositoryDirHolding` took any nonzero `rev-parse` as "not in a repository".** git also fails inside one, on an ownership refusal or at a filesystem boundary, and every guard read the null as permission. Outside is now decided by no `.git` above the path, without asking git; with one above, git has to answer and a failure throws. Not decided by matching git's error text.
+
 ## 2026-09-27 — CodeRabbit on the data dir refusal: three taken
 
 - **Taken — the main checkout of a git dir kept apart was unprotected from a linked worktree.** Nothing in the git dir names it, so it cannot be kept from when the repository is opened; git is asked instead which repository the data dir is in, from its deepest existing part, and the checkout's `.git` file answers with the shared git dir. `repositoryDirHolding` does both checks for the daemon, the shadow and the pool.
