@@ -53,12 +53,6 @@
   that describes the runner.
   **Done when:** measured against the stated budgets — under 2% steady-state CPU, under 60s to a textual finding, under 3 minutes to a typecheck finding — with any miss reported honestly rather than quietly rebaselined.
 
-- [ ] **Retention**
-      **Files:** `packages/daemon/src/daemon.ts`, `packages/shared/src/config.ts`
-      **What:** have the daemon call `store.prune` on a configured window. The store implements retention and nothing calls it, so every run, event, change set and cached verdict lives as long as the data dir.
-      **Done when:** a day of continuous edits leaves the store bounded, and the window is in the config with a default.
-      **Constraints:** `prune` keeps any run holding an open or stale Finding, and a verdict goes with the run it came from. The event log is append-only; pruning by age is the one sanctioned deletion. Restart re-verification must survive it.
-
 - [ ] **Hardening pass**
       **What:** bug-fix freeze, docs completeness, demo recording.
 

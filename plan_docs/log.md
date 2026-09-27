@@ -4,6 +4,14 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-28 — review of the verdict cache: gaps brought into M2
+
+- **Moved — Retention from M8 to M2**, beside shadow collection: the two are the database and shadow halves of one disk bound, and M8 would leave the store growing through every milestone in between. It also owes threat-model T7, which lists a disk quota and GC that do not exist yet.
+- **Found — evidence names commits the shadow can collect.** A `merge-conflict` evidence carries its run's snapshot commits, and a hit re-serves the evidence of the run that reached the verdict. Added to shadow collection's constraints: those commits are roots, or their verdicts go with them.
+- **Found — the watcher's fallback equals the budget it backs up.** An edit whose filesystem event is missed is hashed again only after 60 s, so the demo's one timeout, 60.7 s under load, is that ceiling plus a run. New task: the budget holds with the event missing and for an edit made right after start.
+- **Found — nothing ties a cached verdict to the build.** `Analyzer.version` is bumped by hand and misses changes to the classifier, the merge and the shadow's merge config. New task: the fingerprint names the build.
+- **Kept where it is — a dismissal lasting one run** stays on the false-positive budget task: nothing dismisses a Finding yet, and that task decides what a dismissal means.
+
 ## 2026-09-27 — the analyzer verdict cache
 
 - **Task rewritten before coding.** Keyed on `(snapshotA, snapshotB, …)` it could never hit: a `SnapshotId` is minted per capture. The key is content — each side's tree, the merge base, the analyzer and a toolchain fingerprint — and the pair in its own order, by branch id.

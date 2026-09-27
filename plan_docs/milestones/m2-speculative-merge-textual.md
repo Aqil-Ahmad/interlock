@@ -308,7 +308,13 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Files:** `packages/core/src/git/shadow.ts`
       **What:** reclaim unreferenced objects in the shadow and bound its disk use, pool slots included.
       **Done when:** throwaway pool commits and spent snapshot commits are collected, and the shadow's size stays bounded across a day of continuous checks.
-      **Constraints:** a live slot's `HEAD` and index are already roots for git's own `prune` — verified, a worktree's `HEAD` is walked — but a snapshot commit a queued check still needs is referenced by nothing and must be made a root before anything collects. Never collect the user's store: the shadow borrows it through alternates.
+      **Constraints:** a live slot's `HEAD` and index are already roots for git's own `prune` — verified, a worktree's `HEAD` is walked — but a snapshot commit a queued check still needs is referenced by nothing and must be made a root before anything collects. So is every commit a Finding's evidence names: a `merge-conflict` evidence carries `commitA` and `commitB`, the snapshot commits its run made, and a cache hit re-serves the evidence of the run that reached the verdict, so an open Finding can name commits days old. Collecting them leaves the evidence naming objects that are gone. Either the commits named by open Findings and by cached verdicts are roots, or a verdict whose commits are collected is dropped with them. Never collect the user's store: the shadow borrows it through alternates.
+
+- [ ] **Retention**
+      **Files:** `packages/daemon/src/daemon.ts`, `packages/shared/src/config.ts`
+      **What:** have the daemon call `store.prune` on a configured window. The store implements retention and nothing calls it, so every run, event, change set and cached verdict lives as long as the data dir — the database half of the disk bound the shadow's collection is the other half of.
+      **Done when:** a day of continuous edits leaves the store bounded, the window is in the config with a default, and threat-model T7 names only mitigations that exist.
+      **Constraints:** `prune` keeps any run holding an open or stale Finding, and a verdict goes with the run it came from. A verdict is pruned by when it was written, not when it was last used, so a hot one ages out and costs one full run; decide whether a hit refreshes it. The event log is append-only; pruning by age is the one sanctioned deletion. Restart re-verification must survive it.
 
 - [x] **`ensureShadow` refuses a data dir inside the repository**
       **Files:** `packages/core/src/git/shadow.ts`
@@ -345,6 +351,12 @@ merge-tree` over the two commits reports the conflict — with neither side
 
   **Done when:** a scheduler driven by an injected clock and fake runs is shown to debounce with a ceiling, rank by overlap, never queue a pair twice, never complete two analyses of one pair for the same content, discard and record superseded runs, back off an infrastructure failure with one `infra.failure` per streak, retry `SNAPSHOT_STALE` at once, and keep a hot pair over a new one; the daemon, with two worktrees editing the same function, raises a textual Finding within 60 s, end to end; and a bench with 5 branches under continuous edit reports idle CPU against the 2% budget, edit-to-Finding latency against 60 s, CPU under edit, queue depth, escalation rate and eviction rate, with the numbers in `log.md`.
   **Constraints:** the daemon's snapshots have to be captured with `objectStore` set to the repository's shadow before any of them reaches a merge; captured without it, as the watcher does today, the tree sits unreferenced in the user's store for their `gc` to reap. This is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason. **Prefer re-checking a hot pooled pair over rotating a new one in.** Stickiness is a cost control of the same rank as overlap filtering, because every eviction discards incremental compiler state and the next check of that pair pays the cold cost again — round-robin fairness across pairs is the worst available strategy.
+
+- [ ] **Edit-to-Finding holds when a filesystem event is missed**
+      **Files:** `packages/daemon/src/watcher/`, `packages/daemon/test/scheduler-demo.test.ts`
+      **What:** make the 60-second budget from edit to textual Finding hold when the edit's filesystem event never arrives.
+      **Done when:** with the filesystem signal suppressed, an edit still raises its Finding inside the budget; an edit made immediately after the daemon starts is seen; and the demo test, under full-suite load, fails with the daemon's log rather than in silence.
+      **Constraints:** the demo test timed out once at 60.7 s under full-suite load, and passes in 3 s alone. A worktree nothing reports changing is hashed again only after 60 s, and the 30 s sweep skips one hashed more recently than that — so a dropped or late event is caught by exactly the budget it has to beat, and 60.7 s is that ceiling plus a run. Two causes fit and neither is ruled out: a recursive `fs.watch` not yet armed when the first edit lands, since nothing re-captures after a watch is set up, and an event dropped under load. The fallback has to sit inside the budget with room for the debounce ceiling and a run, and its cost is one hash per idle worktree per period, against the 2% idle CPU budget. The test logs nothing today (`silentLogger`), which is why the one failure left no trail.
 
 - [x] **Analyzer result caching**
       **Files:** `packages/daemon/src/store/`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/core/src/analyzers/`
@@ -392,7 +404,13 @@ merge-tree` over the two commits reports the conflict — with neither side
   **Constraints:** Findings stay traceable through `causedBy`. The in-memory
   de-duplication stays in front of the cache, which it is cheaper than. Nothing
   in the daemon calls `prune` yet, so no retention window reaches this or any
-  other table; wiring one is its own decision.
+  other table; wiring one is the Retention task.
+
+- [ ] **Verdict fingerprint names the build**
+      **Files:** `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/store/verdict-key.ts`
+      **What:** key cached verdicts on the Interlock build as well as the analyzer's own version, so an upgrade never serves a verdict an older build reached.
+      **Done when:** a verdict cached by one build misses under another, and one unchanged build still hits across a restart.
+      **Constraints:** the cache outlives upgrades, and its only guard today is `Analyzer.version`, bumped by hand. The textual verdict also depends on the classifier, `speculative-merge.ts` and the shadow's merge config — `merge.conflictStyle` among them — none of which touch that number, so a fix that forgets the bump keeps serving the old answer for every pair already judged, across restarts, until its content changes. The build version is the backstop; the analyzer version stays for changes between releases. The cost is one re-verification pass per upgrade.
 
 - [ ] **False-positive budget**
       **Files:** `packages/daemon/src/store/`, `packages/core/src/advisor/`
