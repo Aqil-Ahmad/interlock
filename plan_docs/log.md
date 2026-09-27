@@ -4,6 +4,29 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-27 — a failed probe no longer reads as outside every repository
+
+- **Taken — `repositoryDirHolding` took any nonzero `rev-parse` as "not in a repository".** git also fails inside one, on an ownership refusal or at a filesystem boundary, and every guard read the null as permission. Outside is now decided by no `.git` above the path, without asking git; with one above, git has to answer and a failure throws. Not decided by matching git's error text.
+
+## 2026-09-27 — CodeRabbit on the data dir refusal: three taken
+
+- **Taken — the main checkout of a git dir kept apart was unprotected from a linked worktree.** Nothing in the git dir names it, so it cannot be kept from when the repository is opened; git is asked instead which repository the data dir is in, from its deepest existing part, and the checkout's `.git` file answers with the shared git dir. `repositoryDirHolding` does both checks for the daemon, the shadow and the pool.
+- **Taken — a failed common-dir lookup discarded the worktrees already listed.** For a path git finds a repository at, a lookup that fails now refuses the start; only a path that is not a repository yet is protected as itself.
+- **Taken — `stop()` during a start still resolving the refusal returned before the start took the lock.** `stop()` waits out a start in flight, then shuts down whatever it started.
+
+## 2026-09-27 — review of the data dir refusal: the daemon refuses first
+
+- **Taken — the daemon wrote into a data dir inside the repository before any shadow existed.** `holdDataDir`, the store and the token all write at start, and nothing calls `ensureShadow` yet. The daemon now refuses at start, before the lock, against every repository in `repos`: each worktree and the common git dir, asked of git, and a path that is not a repository yet as itself.
+- **Not as suggested — the check is not in `validateConfig`.** `shared` imports no sibling and validates values only; resolving paths and asking git belong to the daemon, which runs it first.
+- **Taken — `infra: true` was wrong.** A data dir in a repository is a configuration mistake the user corrects: `CONFIG_INVALID`, not infrastructure, at all three refusals.
+- **Taken — a repository's directories were derived from the object store's path.** A store symlinked elsewhere broke the derivation and missed a linked worktree's main checkout. `repositoryDirsOf` asks git for the worktree list and the common dir; the shadow, the pool and the daemon share it.
+- **Noted — dropping the common dir is an equivalent mutation.** For a git dir kept apart, git lists that dir itself as the main worktree, and every other layout keeps it inside one. Kept as an explicit answer rather than resting on that listing.
+
+## 2026-09-26 — `ensureShadow` refuses a data dir inside the repository
+
+- **Done.** Checked after the source is resolved and before the shadow is asked anything, on refresh as well as creation, so a clone a symlink has since moved inside is refused too. The checkout, its git dir, a linked worktree's main checkout and a git dir kept apart are all protected; five mutations of the check all die.
+- **Decided — one check, not two.** The pool's refusal moved to `shadow.ts` as `watchedDirHolding` and both call it. Four pool tests built their shadow inside the checkout, which is now refused first; they reach the pool's check through a `worktrees/` symlink instead, the case only the pool can see.
+
 ## 2026-09-26 — third review of the classifier: four taken, three stale
 
 - **Taken — a side's unplaced region shifted every later span onto the wrong region.** Nulls were dropped before pairing, so A's span for region 2 sat beside B's for region 1, and the omitted count missed regions placed on one side only. Spans are region-aligned now, with a null where a side has none; the count is regions without a span on both sides, the bound included.

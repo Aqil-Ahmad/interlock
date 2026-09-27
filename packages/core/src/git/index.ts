@@ -8,6 +8,7 @@
  */
 export * from './repo-handle.js';
 export * from './discovery.js';
+export * from './repo-dirs.js';
 export * from './worktree.js';
 export * from './shadow.js';
 export * from './worktree-pool.js';

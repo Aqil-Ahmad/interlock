@@ -4,7 +4,7 @@ import type { GitRunner } from '@interlock/core';
 import { INTERLOCK_PROTOCOL_VERSION, notImplemented } from '@interlock/shared';
 import type { DaemonRuntime, EventRecord, InterlockConfig, Logger } from '@interlock/shared';
 import { createApiServer } from './api/index.js';
-import { holdDataDir } from './data-dir.js';
+import { holdDataDir, refuseDataDirInRepos } from './data-dir.js';
 import type { DataDirHold } from './data-dir.js';
 import type { ApiServer } from './api/index.js';
 import { EventBus } from './bus/index.js';
@@ -65,6 +65,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const { config } = options;
 
   let hold: DataDirHold | null = null;
+  /** A start in flight: a second start is refused, and a stop waits it out. */
+  let starting: Promise<void> | null = null;
   let store: Store | null = null;
   let api: ApiServer | null = null;
   let watcher: Watcher | null = null;
@@ -107,68 +109,25 @@ export function createDaemon(options: DaemonOptions): Daemon {
     },
 
     async start(): Promise<void> {
-      if (hold !== null) throw new Error('the daemon is already started');
-
-      // First, so a second daemon is turned away before it touches anything
-      // the first one owns — the store's migrations included.
-      hold = holdDataDir(config.dataDir, log);
-      const bus = new EventBus({ logger: options.logger, onRecord: append });
-      const runner = options.runner ?? createGitRunner();
-
+      if (hold !== null || starting !== null) throw new Error('the daemon is already started');
+      starting = begin();
       try {
-        store = await openStore({ path: join(config.dataDir, DATABASE_FILENAME), logger: log });
-        const sessions = createSessionRegistry({
-          store,
-          bus,
-          logger: options.logger,
-          staleAfterMs: config.sessions.staleAfterMs,
-        });
-        api = createApiServer({ config, store, sessions, logger: options.logger });
-        const bound = await api.start();
-
-        const cadence = options.sweepIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
-        reaper = setInterval(() => {
-          void sessions.reap().catch((error: unknown) => {
-            log.warn('reaping sessions failed', {
-              reason: error instanceof Error ? error.message : String(error),
-            });
-          });
-        }, cadence);
-
-        watcher = createWatcher({
-          config,
-          store,
-          bus,
-          runner,
-          logger: options.logger,
-          ...(options.sweepIntervalMs === undefined
-            ? {}
-            : { sweepIntervalMs: options.sweepIntervalMs }),
-        });
-        await watcher.start();
-
-        // Published last, so the file appearing means the daemon can answer
-        // about the repositories it watches rather than merely accept a socket.
-        runtime = {
-          protocolVersion: INTERLOCK_PROTOCOL_VERSION,
-          port: bound.port,
-          pid: process.pid,
-          startedAt: new Date().toISOString(),
-        };
-        publishRuntime(config.dataDir, runtime, log);
-        log.info('daemon started', { port: runtime.port, repos: config.repos.length });
-      } catch (error) {
-        // A half-started daemon holds a port and a database handle, and the
-        // next start would fail on both without saying why.
-        await shutdown();
-        throw error;
+        await starting;
+      } finally {
+        starting = null;
       }
     },
 
     stop(): Promise<void> {
       // Idempotent because it is reached from a signal handler, and a second
       // SIGTERM arrives more often than not.
-      stopping ??= shutdown().finally(() => {
+      // After any start in flight, which would otherwise take the lock and bind
+      // the port once this had already returned, leaving a daemon running that
+      // its caller was told had stopped.
+      stopping ??= (async (): Promise<void> => {
+        await starting?.catch(() => undefined);
+        await shutdown();
+      })().finally(() => {
         stopping = null;
       });
       return stopping;
@@ -181,6 +140,65 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return Promise.resolve().then(() => notImplemented('purge'));
     },
   };
+
+  async function begin(): Promise<void> {
+    const runner = options.runner ?? createGitRunner();
+    // Before the lock, which is the first thing written to the data dir.
+    await refuseDataDirInRepos(config.dataDir, config.repos, runner);
+    // First of what is written, so a second daemon is turned away before it
+    // touches anything the first one owns — the store's migrations included.
+    hold = holdDataDir(config.dataDir, log);
+    const bus = new EventBus({ logger: options.logger, onRecord: append });
+
+    try {
+      store = await openStore({ path: join(config.dataDir, DATABASE_FILENAME), logger: log });
+      const sessions = createSessionRegistry({
+        store,
+        bus,
+        logger: options.logger,
+        staleAfterMs: config.sessions.staleAfterMs,
+      });
+      api = createApiServer({ config, store, sessions, logger: options.logger });
+      const bound = await api.start();
+
+      const cadence = options.sweepIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
+      reaper = setInterval(() => {
+        void sessions.reap().catch((error: unknown) => {
+          log.warn('reaping sessions failed', {
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }, cadence);
+
+      watcher = createWatcher({
+        config,
+        store,
+        bus,
+        runner,
+        logger: options.logger,
+        ...(options.sweepIntervalMs === undefined
+          ? {}
+          : { sweepIntervalMs: options.sweepIntervalMs }),
+      });
+      await watcher.start();
+
+      // Published last, so the file appearing means the daemon can answer
+      // about the repositories it watches rather than merely accept a socket.
+      runtime = {
+        protocolVersion: INTERLOCK_PROTOCOL_VERSION,
+        port: bound.port,
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+      };
+      publishRuntime(config.dataDir, runtime, log);
+      log.info('daemon started', { port: runtime.port, repos: config.repos.length });
+    } catch (error) {
+      // A half-started daemon holds a port and a database handle, and the
+      // next start would fail on both without saying why.
+      await shutdown();
+      throw error;
+    }
+  }
 
   async function shutdown(): Promise<void> {
     // Reverse of startup, and the order is the point: the watcher stops

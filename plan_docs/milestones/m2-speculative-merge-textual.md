@@ -310,11 +310,11 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Done when:** throwaway pool commits and spent snapshot commits are collected, and the shadow's size stays bounded across a day of continuous checks.
       **Constraints:** a live slot's `HEAD` and index are already roots for git's own `prune` — verified, a worktree's `HEAD` is walked — but a snapshot commit a queued check still needs is referenced by nothing and must be made a root before anything collects. Never collect the user's store: the shadow borrows it through alternates.
 
-- [ ] **`ensureShadow` refuses a data dir inside the repository**
+- [x] **`ensureShadow` refuses a data dir inside the repository**
       **Files:** `packages/core/src/git/shadow.ts`
       **What:** refuse to create or refresh a shadow whose path resolves inside the checkout it mirrors, or inside that checkout's git directory, before anything is written.
       **Done when:** a data dir inside the checkout, one inside the main checkout of a linked worktree, and one reached through a symlink are each refused with nothing created, matching the pool's refusal.
-      **Constraints:** hard rule 1. Today a data dir configured inside a checkout puts the whole bare clone into the user's worktree as untracked files; the pool refuses the same case, `ensureShadow` does not.
+      **Constraints:** hard rule 1. A data dir configured inside a checkout would put the whole bare clone into the user's worktree as untracked files. The daemon refuses such a data dir at start, before it writes anything; the shadow and the pool refuse again for a path handed to them directly. All three ask git for the repository's directories through `repositoryDirsOf`.
 
 - [ ] **Scheduler v1**
       **Files:** `packages/daemon/src/scheduler/`

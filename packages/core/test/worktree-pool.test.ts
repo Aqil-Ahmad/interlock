@@ -370,22 +370,14 @@ describe('worktree pool', () => {
       expect(statSync(poolDir()).mode & 0o777).toBe(0o700);
     });
 
-    it('refuses a data dir inside the checkout before creating anything', async () => {
+    it('never gets a data dir inside the checkout: its shadow is refused first', async () => {
       dataDir = join(dir, 'interlock-data');
       const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', '1\n'));
-      const slotRequest = await request(newKey(), a, baseSha);
-      let used = false;
 
-      const error = await rejection(
-        open().withSlot(slotRequest, () => {
-          used = true;
-          return Promise.resolve();
-        }),
-      );
+      const error = await rejection(request(newKey(), a, baseSha));
 
-      expect(error.code).toBe('SHADOW_UNAVAILABLE');
-      expect(used).toBe(false);
-      expect(existsSync(join(dataDir, 'worktrees'))).toBe(false);
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(existsSync(dataDir)).toBe(false);
     });
 
     it('refuses a pool directory that a symlink leads into the checkout', async () => {
@@ -396,7 +388,7 @@ describe('worktree pool', () => {
 
       const error = await rejection(look(open(), slotRequest));
 
-      expect(error.code).toBe('SHADOW_UNAVAILABLE');
+      expect(error.code).toBe('CONFIG_INVALID');
       expect(readdirSync(join(dir, 'inside'))).toStrictEqual([]);
     });
 
@@ -406,7 +398,6 @@ describe('worktree pool', () => {
       const linked = join(base, 'linked');
       git('worktree', 'add', '-q', '-b', 'linked', linked, baseSha);
       const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', '1\n'));
-      dataDir = join(dir, 'data');
       shadow = await ensureShadow(
         { kind: 'user', rootPath: linked, gitDir: join(dir, '.git', 'worktrees', 'linked') },
         { runner, dataDir, repoId },
@@ -415,6 +406,8 @@ describe('worktree pool', () => {
         { shadow, commitA: a, commitB: baseSha, mergeBaseSha: baseSha },
         { runner },
       );
+      mkdirSync(join(dir, 'inside'));
+      symlinkSync(join(dir, 'inside'), join(dataDir, 'worktrees'));
 
       const error = await rejection(
         look(open(), {
@@ -426,8 +419,8 @@ describe('worktree pool', () => {
         }),
       );
 
-      expect(error.code).toBe('SHADOW_UNAVAILABLE');
-      expect(existsSync(join(dir, 'data', 'worktrees'))).toBe(false);
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(readdirSync(join(dir, 'inside'))).toStrictEqual([]);
     });
 
     it('refuses a pool directory inside a git dir kept apart from the checkout', async () => {
@@ -442,7 +435,6 @@ describe('worktree pool', () => {
       gitIn(separate, 'add', '-A');
       gitIn(separate, 'commit', '-qm', 'one');
       const sha = gitIn(separate, 'rev-parse', 'HEAD').trim();
-      dataDir = join(apart, 'interlock-data');
       shadow = await ensureShadow(
         { kind: 'user', rootPath: separate, gitDir: apart },
         { runner, dataDir, repoId },
@@ -452,6 +444,8 @@ describe('worktree pool', () => {
         { runner },
       );
       const tree = gitIn(separate, 'rev-parse', 'HEAD^{tree}').trim();
+      mkdirSync(join(apart, 'inside'));
+      symlinkSync(join(apart, 'inside'), join(dataDir, 'worktrees'));
 
       const error = await rejection(
         look(open(), {
@@ -463,8 +457,8 @@ describe('worktree pool', () => {
         }),
       );
 
-      expect(error.code).toBe('SHADOW_UNAVAILABLE');
-      expect(existsSync(join(dataDir, 'worktrees'))).toBe(false);
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(readdirSync(join(apart, 'inside'))).toStrictEqual([]);
     });
 
     it('tries again after a failed start rather than keeping the failure', async () => {
@@ -1122,15 +1116,16 @@ describe('worktree pool', () => {
     });
 
     it('still protects the checkout when the shadow names no store it borrows', async () => {
-      dataDir = join(dir, 'interlock-data');
       const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', '1\n'));
       const slotRequest = await request(newKey(), a, baseSha);
       rmSync(join(shadow.gitDir, 'objects', 'info', 'alternates'));
+      mkdirSync(join(dir, 'inside'));
+      symlinkSync(join(dir, 'inside'), join(dataDir, 'worktrees'));
 
       const error = await rejection(look(open(), slotRequest));
 
-      expect(error.code).toBe('SHADOW_UNAVAILABLE');
-      expect(existsSync(join(dataDir, 'worktrees'))).toBe(false);
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(readdirSync(join(dir, 'inside'))).toStrictEqual([]);
     });
 
     it('refuses a pool with no room in it', async () => {

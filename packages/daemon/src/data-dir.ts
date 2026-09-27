@@ -1,6 +1,8 @@
-import { chmodSync, mkdirSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { repositoryDirHolding, repositoryDirsOf } from '@interlock/core';
+import type { GitRunner, UserRepo } from '@interlock/core';
 import { InterlockError } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
 
@@ -36,6 +38,53 @@ export function ensureDataDir(path: string, logger: Logger): void {
   if ((statSync(path).mode & 0o077) !== 0) {
     logger.warn('the directory holding Interlock state is readable beyond its owner', { path });
   }
+}
+
+/**
+ * Refuse a data dir that resolves inside any watched repository.
+ *
+ * Before anything is written to it: the lock, the database and the token all
+ * land there at start, and inside a checkout they are untracked files in the
+ * user's worktree before any shadow exists to refuse. Every repository, not
+ * only the one a shadow is for — a data dir inside one holds every other's
+ * shadow too. A path git cannot answer for, absent or not yet a repository, is
+ * still protected as itself.
+ */
+export async function refuseDataDirInRepos(
+  dataDir: string,
+  repos: readonly string[],
+  runner: GitRunner,
+): Promise<void> {
+  for (const path of repos) {
+    // Read-only questions, and the runner reads nothing from a handle but
+    // `rootPath`: the git directory is one of the answers.
+    const probe: UserRepo = { kind: 'user', rootPath: path, gitDir: '' };
+    let dirs: string[] = [path];
+    try {
+      dirs = [path, ...(await repositoryDirsOf(probe, runner))];
+    } catch (error) {
+      // Watched once it exists; until then the configured path is all there
+      // is. A repository git could not fully answer for is not checked by
+      // half its answer: that is the start refused, not the data dir allowed.
+      if (await isRepository(probe, runner)) throw error;
+    }
+    if ((await repositoryDirHolding(dataDir, dirs, runner)) !== null) {
+      throw new InterlockError(
+        'CONFIG_INVALID',
+        'The data directory is inside a watched repository',
+        {
+          details: { dataDir, repo: path },
+          remedy: `Set INTERLOCK_DATA_DIR to a directory outside ${path}.`,
+        },
+      );
+    }
+  }
+}
+
+/** Whether git finds a repository at `repo`, which has to be there to ask. */
+async function isRepository(repo: UserRepo, runner: GitRunner): Promise<boolean> {
+  if (!existsSync(repo.rootPath)) return false;
+  return (await runner.run(repo, ['rev-parse', '--git-dir'])).exitCode === 0;
 }
 
 /** Beside the database, and never the database: the store keeps its own locks. */

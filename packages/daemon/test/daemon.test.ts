@@ -17,6 +17,8 @@ import { join } from 'node:path';
 import { createLogger, resolveConfig, runtimePath, tokenPath } from '@interlock/shared';
 import type { BranchRef, EventRecord, InterlockConfig, LogRecord, Repo } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createGitRunner } from '@interlock/core';
+import type { GitRunner } from '@interlock/core';
 import { createDaemon } from '../src/daemon.js';
 import type { Daemon } from '../src/daemon.js';
 import { openStore } from '../src/store/index.js';
@@ -332,6 +334,127 @@ describe('daemon', () => {
     // open, so the file is not the start's to delete.
     expect(existsSync(lock)).toBe(true);
     expect(daemon.runtime).toBeNull();
+  });
+
+  describe('a data directory inside a watched repository', () => {
+    /** Refused before the lock: no data dir, no listener, the checkout as git sees it. */
+    const expectRefused = async (at: string, repos: string[], checkout: string): Promise<void> => {
+      const status = git(checkout, 'status', '--porcelain', '--ignored');
+      const refused = createDaemon({
+        config: resolveConfig({ dataDir: at, repos, daemon: { port: 0 } }),
+        logger: createLogger('test', { level: 'error', sink: () => undefined }),
+      });
+
+      const error = await rejection(refused.start());
+
+      expect(error.code).toBe('CONFIG_INVALID');
+      expect(error.infra).toBe(false);
+      expect(error.remedy).toContain('INTERLOCK_DATA_DIR');
+      expect(existsSync(at)).toBe(false);
+      expect(refused.runtime).toBeNull();
+      expect(git(checkout, 'status', '--porcelain', '--ignored')).toBe(status);
+    };
+
+    it('is refused before anything is written', async () => {
+      await expectRefused(join(root, '.interlock'), [root], root);
+    });
+
+    it('is refused inside any watched repository, not only the first', async () => {
+      const other = join(base, 'other');
+      execFileSync('git', ['init', '-q', '-b', 'main', other], { stdio: 'pipe' });
+
+      await expectRefused(join(other, '.interlock'), [root, other], other);
+    });
+
+    it('is refused inside the main checkout when a linked worktree is what is watched', async () => {
+      git(root, 'branch', 'feature');
+      const linked = join(base, 'linked');
+      git(root, 'worktree', 'add', '-q', linked, 'feature');
+
+      await expectRefused(join(root, '.interlock'), [linked], root);
+    });
+
+    it('is refused inside the main checkout of a git dir kept apart, watched through a linked worktree', async () => {
+      // Nothing in the shared git dir names this checkout; its `.git` file
+      // names the git dir, which is what git answers with from inside it.
+      const separate = join(base, 'separate');
+      const apart = join(base, 'apart.git');
+      execFileSync('git', ['init', '-q', '-b', 'main', `--separate-git-dir=${apart}`, separate], {
+        stdio: 'pipe',
+      });
+      git(
+        separate,
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'one',
+      );
+      const linked = join(base, 'linked');
+      git(separate, 'worktree', 'add', '-q', '-b', 'feature', linked);
+
+      await expectRefused(join(separate, '.interlock'), [linked], separate);
+    });
+
+    it('refuses to start when git cannot fully answer for a watched repository', async () => {
+      // The worktree list is read and the common dir is not: half an answer is
+      // not a check, and the data dir it would have allowed stays unwritten.
+      const real = createGitRunner();
+      const failing: GitRunner = {
+        run: (target, args, runOptions) =>
+          args.includes('--git-common-dir') && target.rootPath === root
+            ? Promise.resolve({ exitCode: 128, stdout: '', stderr: 'fatal: injected' })
+            : real.run(target, args, runOptions),
+      };
+      const refused = createDaemon({
+        config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
+        logger: createLogger('test', { level: 'error', sink: () => undefined }),
+        runner: failing,
+      });
+
+      await rejection(refused.start());
+
+      expect(existsSync(dataDir)).toBe(false);
+      expect(refused.runtime).toBeNull();
+    });
+
+    it('is refused inside a watched path that is not a repository yet', async () => {
+      const later = join(base, 'later');
+      mkdirSync(later);
+      const refused = createDaemon({
+        config: resolveConfig({
+          dataDir: join(later, 'data'),
+          repos: [later],
+          daemon: { port: 0 },
+        }),
+        logger: createLogger('test', { level: 'error', sink: () => undefined }),
+      });
+
+      expect((await rejection(refused.start())).code).toBe('CONFIG_INVALID');
+      expect(readdirSync(later)).toStrictEqual([]);
+    });
+  });
+
+  it('stops a daemon whose start was still in flight, rather than letting it finish afterwards', async () => {
+    const started = daemon.start();
+    const stopped = daemon.stop();
+
+    await Promise.allSettled([started]);
+    await stopped;
+
+    expect(daemon.runtime).toBeNull();
+    expect(existsSync(runtimePath(dataDir))).toBe(false);
+    // The lock was released, so the directory is free for the next daemon.
+    const next = createDaemon({
+      config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
+      logger: createLogger('test', { level: 'error', sink: () => undefined }),
+    });
+    await next.start();
+    await next.stop();
   });
 
   it('hands the directory to the next daemon once the first has stopped', async () => {
