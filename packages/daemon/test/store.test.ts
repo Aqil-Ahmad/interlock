@@ -853,6 +853,10 @@ describe('store', () => {
         expect(runMigrations(db, silentLogger)).toBe(SCHEMA_VERSION);
 
         expect(columns(db)).toEqual(expect.arrayContaining(['run_id', 'findings']));
+        // Deleting a run looks its verdicts up by this to cascade.
+        expect(
+          db.prepare("SELECT name FROM pragma_index_list('analyzer_cache')").all(),
+        ).toContainEqual(expect.objectContaining({ name: 'idx_analyzer_cache_run' }));
         expect(db.prepare('SELECT count(*) AS n FROM analyzer_cache').get()).toEqual({ n: 0 });
       } finally {
         db.close();

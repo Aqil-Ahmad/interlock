@@ -5,7 +5,16 @@ import { join } from 'node:path';
 import { createGitRunner, textualAnalyzer } from '@interlock/core';
 import type { GitResult, GitRunner } from '@interlock/core';
 import { makePairKey, silentLogger, ulid } from '@interlock/shared';
-import type { BranchRef, EventId, EventRecord, Repo, SpanEvidence } from '@interlock/shared';
+import type {
+  BranchRef,
+  BranchRefId,
+  ChangeSetId,
+  EventId,
+  EventRecord,
+  Repo,
+  RepoId,
+  SpanEvidence,
+} from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventBus } from '../src/bus/index.js';
 import type { PairCandidate, PairRunRequest, PairRunResult } from '../src/scheduler/index.js';
@@ -80,6 +89,17 @@ describe('run pipeline', () => {
   };
   const run = (signal?: AbortSignal, using?: RunPipeline): Promise<PairRunResult> =>
     runWith('b', signal, using);
+
+  interface BranchSnapshotPayload {
+    readonly type: 'branch.snapshot';
+    readonly repoId: RepoId;
+    readonly at: string;
+    readonly branchRefId: BranchRefId;
+    readonly treeOid: string;
+    readonly headSha: string;
+    readonly changeSetId: ChangeSetId;
+    readonly fileCount: number;
+  }
 
   const published = (type: EventRecord['type']): EventRecord[] =>
     records.filter((record) => record.type === type);
@@ -495,13 +515,13 @@ describe('run pipeline', () => {
     const runAlone = async (
       using: RunPipeline,
       calls: string[][],
-      signal: AbortSignal = new AbortController().signal,
+      [from, to]: readonly [string, string] = ['a', 'b'],
     ): Promise<{ result: PairRunResult; git: string[][] }> => {
-      const [a, b] = [await branchNamed('a'), await branchNamed('b')];
+      const [a, b] = [await branchNamed(from), await branchNamed(to)];
       const { candidates } = await using.plan(a.repoId, a.id);
       const candidate = candidates.find((c) => c.pair.a === b.id || c.pair.b === b.id)!;
       calls.length = 0;
-      const result = await using.runPair(request(candidate), signal);
+      const result = await using.runPair(request(candidate), new AbortController().signal);
       if (result.kind === 'analysed') lastKey = result.contentKey;
       return { result, git: [...calls] };
     };
@@ -552,8 +572,57 @@ describe('run pipeline', () => {
       const reaffirmed = await openFinding();
       expect(reaffirmed.id).toBe(found.id);
       expect(reaffirmed.firstSeenAt).toBe(found.firstSeenAt);
+      expect(reaffirmed.updatedAt > found.updatedAt).toBe(true);
       expect(reaffirmed.evidence).toEqual(found.evidence);
       expect(await store.listOpenFindings((await repo()).id)).toHaveLength(1);
+    });
+
+    it('answers a branch with no worktree from its head without asking git again', async () => {
+      const scratch = join(base, 'scratch-bare');
+      git(root, 'worktree', 'add', '-q', '-b', 'bare', scratch);
+      writeFileSync(join(scratch, 'total.ts'), body('committed'));
+      git(scratch, 'commit', '-qam', 'bare work');
+      git(root, 'worktree', 'remove', '--force', scratch);
+      await observe();
+      const { runner: watched, calls } = recording();
+      const using = build(watched);
+
+      await runAlone(using, calls, ['a', 'bare']);
+      await edit('a', '5');
+      await runAlone(using, calls, ['a', 'bare']);
+      await edit('a', '1');
+      const again = await runAlone(using, calls, ['a', 'bare']);
+      using.detach();
+
+      expect(again.result).toMatchObject({ kind: 'analysed', cached: true });
+      expect(again.git).toEqual([]);
+    });
+
+    it('keys a side captured again on what it captured, not what it was told', async () => {
+      const a = await branchNamed('a');
+      const b = await branchNamed('b');
+      const real = published('branch.snapshot')
+        .map((record) => record.payload as BranchSnapshotPayload)
+        .filter((payload) => payload.branchRefId === a.id)
+        .at(-1)!;
+      // A tree the shadow never had, on a head that is not a's: both are what
+      // the run has to discover again.
+      await bus.publish({
+        ...real,
+        at: new Date().toISOString(),
+        treeOid: 'f'.repeat(40),
+        headSha: b.headSha,
+      });
+
+      const recaptured = await run();
+
+      // Merged against a's real base, where the conflict is.
+      expect(recaptured).toMatchObject({ kind: 'analysed', cached: false, clean: false });
+      if (recaptured.kind !== 'analysed') throw new Error('not analysed');
+      expect(recaptured.contentKey).toContain(real.treeOid);
+      await bus.publish({ ...real, at: new Date().toISOString() });
+      lastKey = null;
+      expect(await run()).toMatchObject({ kind: 'analysed', cached: true });
     });
 
     it('records a hit as a run of its own that names the run it reused', async () => {
@@ -598,6 +667,7 @@ describe('run pipeline', () => {
       expect(hit).toMatchObject({ kind: 'analysed', cached: true });
       const raised = await openFinding();
       expect(raised.id).not.toBe(gone.id);
+      expect(raised.firstSeenAt > gone.firstSeenAt).toBe(true);
       expect((await store.getFinding(gone.id))?.status).toBe('resolved');
       expect(raised.runId).toBe(hit.kind === 'analysed' && hit.runId);
       const event = published('finding.raised').at(-1)!;
@@ -647,12 +717,16 @@ describe('run pipeline', () => {
       await observe();
       lastKey = null;
 
-      const { result, git } = await runAlone(pipeline, calls);
+      // Planned from the side whose id sorts last, so planning asks for the
+      // merge base with the heads the other way round from the run.
+      const [a, b] = [await branchNamed('a'), await branchNamed('b')];
+      const order = a.id > b.id ? (['a', 'b'] as const) : (['b', 'a'] as const);
+      const { result, git } = await runAlone(pipeline, calls, order);
 
       expect(result).toMatchObject({ kind: 'analysed', cached: true });
-      // The two facts a fresh pipeline has not memoised — the heads' merge base
-      // and the git version — and nothing else.
-      expect(git.map((argv) => argv[0]).sort()).toEqual(['merge-base', 'version']);
+      // Planning already asked for the heads' merge base, so the one fact a
+      // fresh pipeline lacks is the git version its verdicts are keyed under.
+      expect(git).toEqual([['version']]);
     });
 
     it('misses when the same trees sit on the other branches', async () => {

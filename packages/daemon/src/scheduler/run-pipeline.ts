@@ -1,6 +1,7 @@
 import {
   captureDirtyState,
   commitSnapshotInShadow,
+  assertObjectId,
   extractChangeSet,
   gitVersion,
   isObjectId,
@@ -101,6 +102,10 @@ interface Identified {
   readonly branch: BranchRef;
   readonly headSha: string;
   readonly treeOid: string;
+  /**
+   * For a branch no worktree holds, null until the side is merged: it is a
+   * diff, and only the analyzer reads it.
+   */
   readonly changeSet: ChangeSet | null;
   /** The watcher's snapshot of exactly this tree; null for a side it never snapshotted. */
   readonly snapshotId: SnapshotId | null;
@@ -144,7 +149,10 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
    * cached verdict exists to keep free of it.
    */
   const trees = new Map<string, string>();
-  /** The merge base of two heads, by head pair: immutable for the same reason. */
+  /**
+   * The merge base of two heads, by head pair: immutable for the same reason,
+   * and shared with planning, which asks first.
+   */
   const bases = new Map<string, string | null>();
   const subscriptions: Subscription[] = [];
   const handles = new Map<RepoId, Promise<UserRepo>>();
@@ -214,17 +222,22 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     shadow: ShadowRepo,
     branch: BranchRef,
   ): Promise<Identified | Skip> => {
-    const changeSet = await changeSetOf(repo, handle, branch);
     if (branch.worktreePath === null) {
+      // Read back from storage, and about to be resolved and remembered: a ref
+      // name here would be merged as whatever it names now.
+      assertObjectId(branch.headSha, 'headSha');
       return {
         branch,
         headSha: branch.headSha,
         treeOid: await treeOfHead(shadow, branch.headSha),
-        changeSet,
+        // Only the analyzer reads it, and for this side it is a diff: left to a
+        // miss rather than paid by a hit.
+        changeSet: null,
         snapshotId: null,
         capturedAt: null,
       };
     }
+    const changeSet = await changeSetOf(repo, handle, branch);
     const seen =
       announced.get(branch.id) ??
       (await recapture(repo, handle, shadow, branch, branch.worktreePath));
@@ -270,7 +283,8 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   };
 
   const baseOf = async (handle: UserRepo, headA: string, headB: string): Promise<string | null> => {
-    const key = `${headA}:${headB}`;
+    // Symmetric, so one entry answers the pair whichever side planned it.
+    const key = headA < headB ? `${headA}:${headB}` : `${headB}:${headA}`;
     if (bases.has(key)) return bases.get(key)!;
     const base = await mergeBase(handle, headA, headB, { runner });
     remember(bases, key, base);
@@ -291,7 +305,13 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     shadow: ShadowRepo,
     side: Identified,
   ): Promise<Side | Skip> => {
-    if (side.capturedAt === null) return { ...side, commit: side.headSha };
+    if (side.capturedAt === null) {
+      return {
+        ...side,
+        changeSet: await changeSetOf(repo, handle, side.branch),
+        commit: side.headSha,
+      };
+    }
     try {
       return {
         ...side,
@@ -396,7 +416,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         declined += 1;
         continue;
       }
-      const base = await mergeBase(handle, moved.headSha, other.headSha, { runner });
+      const base = await baseOf(handle, moved.headSha, other.headSha);
       if (base === null) continue;
       const [a, b] = moved.id < other.id ? [moved.id, other.id] : [other.id, moved.id];
       const pair = await store.upsertMergePair({
@@ -736,10 +756,8 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         ...finding,
         id: ulid<FindingId>(),
         runId: run.id,
-        status: 'open',
         firstSeenAt: now,
         updatedAt: now,
-        resolvedAt: null,
       }));
       const findingIds = await reconcileFindings(repo.id, stored, raised, analyzed);
       await store.upsertMergePair({ ...stored, lastRunAt: now, stale: false });
