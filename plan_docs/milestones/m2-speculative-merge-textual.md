@@ -412,11 +412,12 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Done when:** a verdict cached by one build misses under another, and one unchanged build still hits across a restart.
       **Constraints:** the cache outlives upgrades, and its only guard today is `Analyzer.version`, bumped by hand. The textual verdict also depends on the classifier, `speculative-merge.ts` and the shadow's merge config — `merge.conflictStyle` among them — none of which touch that number, so a fix that forgets the bump keeps serving the old answer for every pair already judged, across restarts, until its content changes. The build version is the backstop; the analyzer version stays for changes between releases. The cost is one re-verification pass per upgrade.
 
-  Done as a digest of `@interlock/core`'s own modules rather than a version
-  number: the version is `0.0.0` for every build between releases, and those are
-  the builds a classifier gets fixed in. Core holds everything a textual verdict
-  depends on besides git — the merge, the classifier, the shadow's merge config —
-  so any change there, a comment included, is a miss.
+  Done as a digest of the modules of `@interlock/core` and `@interlock/shared`
+  rather than a version number: the version is `0.0.0` for every build between
+  releases, and those are the builds a classifier gets fixed in. Core holds the
+  merge, the classifier and the shadow's merge config; shared holds the
+  redaction every excerpt goes through and the models a Finding is made of. Any
+  change in either, a comment included, is a miss.
 
 - [ ] **False-positive budget**
       **Files:** `packages/daemon/src/store/`, `packages/core/src/advisor/`

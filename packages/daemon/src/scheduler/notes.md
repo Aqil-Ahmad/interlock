@@ -120,13 +120,17 @@ never match. Identification needs no git in steady state: the watcher's
 announcement names the tree and head, and a commit's tree and two heads' merge
 base never change, so both are remembered once asked.
 
-Two checks follow, cheapest first. If the pair was last analysed to completion
-at the same content, the run stops there: nothing is recorded. Otherwise the
+Two checks follow, cheapest first, and both on the same identity — the verdict
+key below. If the pair was last analysed to completion at that identity, the
+run stops there: nothing is recorded. The same content in a rebuilt clone is
+not the same identity, so it is merged again rather than left with evidence
+naming commits that went with the old clone. Otherwise the
 store's verdict cache is asked, keyed on the pair in its own order, both trees,
 the base, the shadow clone's generation, and the analyzer's fingerprint — its
-version, the git version, and a digest of `@interlock/core`'s own modules, so a
-build that changed the merge or the classifier without bumping the version is
-still a miss. The generation is there because a verdict keeps its run's
+version, the git version, and a digest of the modules of `@interlock/core` and
+`@interlock/shared` — the merge and the classifier, and the redaction excerpts
+go through — so a build that changed any of them without bumping the version
+is still a miss. The generation is there because a verdict keeps its run's
 evidence, which names commits made in that clone; a rebuilt clone has none of
 them. The in-memory check only remembers each pair's last content; the cache
 remembers every content judged, which is what catches an agent reverting and

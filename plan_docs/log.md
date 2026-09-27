@@ -4,6 +4,13 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-28 — second review of the verdict cache: three taken
+
+- **Taken — the build digest left out `@interlock/shared`, where redaction lives.** The classifier's excerpts go through shared's `redact()`, and a hit re-serves the cached excerpts, so a secret pattern added there would have kept serving excerpts redacted under the old patterns, as fresh Findings, to agents. The digest now covers both packages' modules, each in its place; shared says where its own modules load from, since nothing else can without a sibling import. Tested that shared's logger is inside the digest, and that a change in either directory changes it.
+- **Taken — the duplicate check compared trees and base only.** At unchanged content after a shadow rebuild it answered "duplicate" before the generation-keyed lookup, and left Findings naming commits gone with the old clone. The in-memory identity is now the verdict key itself, so the two checks cannot disagree about what is the same. The earlier rebuild test reset the scheduler's memory and so never met this; the new one does not.
+- **Taken — a failed cache write failed the completed run.** It sat inside the run's `try` after `finish('complete')`, so a throw recorded the run failed over its result and published a second `run.finished`. It is logged and dropped now: the cache only saves a later run its work. Tested with a real SQLite trigger refusing the insert, so the lookup before it still reads.
+- **Mutation: 5, 5 caught.**
+
 ## 2026-09-28 — the verdict cache review, worked through on the same branch
 
 - **Taken — verdicts keyed on the build.** The fingerprint gains a digest of `@interlock/core`'s modules, read once per process; not the package version, which is `0.0.0` for every build between releases — exactly the builds a classifier is fixed in. A verdict cached by another build misses, one build hits across a restart. The pipeline takes the build as an option, which is how the miss is tested.
