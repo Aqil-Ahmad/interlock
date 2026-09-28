@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import { lstat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { captureDirtyState, extractChangeSet, mergeBase } from '@interlock/core';
 import type { GitRunner, UserRepo, WorktreeSnapshot } from '@interlock/core';
 import { isInterlockError, silentLogger, ulid } from '@interlock/shared';
@@ -5,6 +8,7 @@ import type {
   BranchRef,
   BranchRefId,
   ChangeSetId,
+  DirtyState,
   Logger,
   Repo,
   SnapshotId,
@@ -37,13 +41,12 @@ export interface SnapshotPipelineOptions {
   readonly shadows: ShadowRegistry;
   readonly logger?: Logger;
   /**
-   * How long a worktree may go unhashed while nothing reports it changing.
+   * How long a worktree may go unhashed while its probe says nothing moved.
    *
-   * Filesystem events are lossy, so a signal arriving is proof that something
-   * happened and no signal arriving is not proof that nothing did. This is the
-   * safety net for the second case, and its cost is one hash per worktree per
-   * interval — measured at roughly half a second for ten thousand files, which
-   * is what makes it a ceiling rather than a cadence.
+   * The probe reads timestamps, so an edit that leaves them as they were —
+   * possible only where git is told not to trust ctime — is invisible to it.
+   * This is what still finds that edit eventually. It carries no budget: the
+   * probe does that on every pass.
    */
   readonly recaptureAfterMs?: number;
   /** Injectable so the ceiling can be crossed without waiting for it. */
@@ -64,7 +67,8 @@ export interface SnapshotPipeline {
    *
    * Hashing a worktree costs a walk over every file in it, so a pass that runs
    * on a timer must not do it for worktrees nothing reported. A marked one is
-   * hashed on the next pass; an unmarked one waits for the ceiling.
+   * hashed on the next pass; an unmarked one only if its probe moved, or once
+   * the backstop is due.
    */
   markChanged(worktreePath: string): void;
   /** Drop a worktree's remembered identity, so the next capture is published. */
@@ -72,13 +76,13 @@ export interface SnapshotPipeline {
 }
 
 /**
- * How long a worktree may go unhashed with nothing reporting a change.
+ * How long a worktree may go unhashed while its probe says nothing moved.
  *
- * Long enough that the periodic cost is a rounding error, short enough that a
- * filesystem event the platform dropped is noticed while the work is still in
- * progress rather than after it lands.
+ * Every hash walks every file, and the probe has already looked at everything
+ * status can see, so this only has to be short enough that an edit hidden from
+ * both is not missed for good.
  */
-const DEFAULT_RECAPTURE_AFTER_MS = 60_000;
+const DEFAULT_RECAPTURE_AFTER_MS = 10 * 60_000;
 
 /**
  * What was last said about a worktree.
@@ -113,6 +117,8 @@ type LastPublished =
       readonly snapshotId: SnapshotId;
       readonly at: number;
       readonly changed: boolean;
+      /** The probe as it read when that tree was captured; see {@link probe}. */
+      readonly probe: string;
     };
 
 export function createSnapshotPipeline(options: SnapshotPipelineOptions): SnapshotPipeline {
@@ -127,6 +133,25 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
    * different files even where its head has not moved.
    */
   const lastSeen = new Map<string, LastPublished>();
+  /**
+   * The capture that last failed in each worktree, and what the probe read when
+   * it did.
+   *
+   * One file nobody can read fails every capture of its worktree, and the
+   * failure records no tree — so without this the probe, still reading as it
+   * did before, sends every pass on a walk that fails at the same file. While
+   * the probe holds still the same failure is reported again without the walk;
+   * `chmod` moves a file's ctime, so fixing it is also what retries it.
+   */
+  const failed = new Map<
+    string,
+    {
+      readonly probe: string;
+      readonly headSha: string;
+      readonly at: number;
+      readonly error: unknown;
+    }
+  >();
   const recaptureAfterMs = options.recaptureAfterMs ?? DEFAULT_RECAPTURE_AFTER_MS;
   const now = options.now ?? Date.now;
 
@@ -148,22 +173,33 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
         return;
       }
 
-      // Nothing said this worktree moved. Hashing it anyway is the whole idle
-      // cost of the daemon, and it buys only the changes the filesystem failed
-      // to report — which the ceiling still catches. A worktree with no entry
-      // has never been hashed, so it is hashed whatever anyone reported.
-      // An entry saying `unknown` falls through to the hash, so a worktree that
-      // came back is announced now rather than at the ceiling.
+      // Nothing said this worktree moved, and its probe agrees. Hashing it
+      // anyway is the whole idle cost of the daemon; the probe is what finds an
+      // edit the filesystem failed to report, on this pass rather than at the
+      // backstop. A worktree with no entry has never been hashed, so it is
+      // hashed whatever anyone reported. An entry saying `unknown` falls
+      // through to the hash, so a worktree that came back is announced now.
       const sameBranch = previous?.kind === 'tree' && previous.branchRefId === branch.id;
+      const signature = await probe(branch.worktreePath, branch.dirty);
       if (
         previous?.kind === 'tree' &&
         sameBranch &&
         previous.headSha === branch.headSha &&
         !previous.changed &&
+        previous.probe === signature &&
         now() - previous.at < recaptureAfterMs
       ) {
         await rememberOn(branch, previous.snapshotId);
         return;
+      }
+      const failure = failed.get(branch.worktreePath);
+      if (
+        failure?.probe === signature &&
+        failure.headSha === branch.headSha &&
+        !(previous?.kind === 'tree' && previous.changed) &&
+        now() - failure.at < recaptureAfterMs
+      ) {
+        throw failure.error;
       }
 
       // Cleared before the walk, not after: a signal arriving while it runs
@@ -172,7 +208,19 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       if (previous?.kind === 'tree') {
         lastSeen.set(branch.worktreePath, { ...previous, changed: false });
       }
-      const snapshot = await captureInto(handle, repo, branch.worktreePath);
+      let snapshot: WorktreeSnapshot;
+      try {
+        snapshot = await captureInto(handle, repo, branch.worktreePath);
+      } catch (error) {
+        failed.set(branch.worktreePath, {
+          probe: signature,
+          headSha: branch.headSha,
+          at: now(),
+          error,
+        });
+        throw error;
+      }
+      failed.delete(branch.worktreePath);
       const marked = lastSeen.get(branch.worktreePath);
       const changedDuringCapture = marked?.kind === 'tree' && marked.changed;
 
@@ -188,6 +236,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
           ...previous,
           at: now(),
           changed: changedDuringCapture,
+          probe: signature,
         });
         // The row still has to name the snapshot this content belongs to; the
         // sweep re-lists every branch with a null id and would otherwise leave
@@ -212,6 +261,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
           snapshotId,
           at: now(),
           changed: changedDuringCapture,
+          probe: signature,
         });
         await rememberOn(branch, snapshotId);
         await publish(branch, snapshot.treeOid, snapshot.headSha, null, 0);
@@ -232,6 +282,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
         snapshotId,
         at: now(),
         changed: changedDuringCapture,
+        probe: signature,
       });
       await rememberOn(branch, snapshotId);
       await publish(
@@ -253,6 +304,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
 
     forget(worktreePath: string): void {
       lastSeen.delete(worktreePath);
+      failed.delete(worktreePath);
     },
   };
 
@@ -328,4 +380,53 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       fileCount,
     });
   }
+}
+
+/**
+ * A cheap fingerprint of what `status` said about a worktree: every path it
+ * listed — staged, unstaged, untracked — with that file's timestamps, size and
+ * inode as they are now.
+ *
+ * Nothing git is asked for here: the pass that brought the branch already ran
+ * the status, against the user's own index and with optional locks off, so
+ * nothing is refreshed or locked on their side. The listing alone is not
+ * enough — a second edit to a file that is already modified changes nothing
+ * `status` prints — which is what the timestamps are for. ctime is the one a
+ * write cannot set back, so a tool that restores mtime after writing still
+ * moves this. A clean tracked file is `status`'s own to judge: it compares the
+ * same stat fields against the index.
+ *
+ * A path that cannot be stat'ed is signed by the reason, so an unreadable file
+ * reads the same on every pass rather than moving the probe each time.
+ */
+async function probe(worktreePath: string, dirty: DirtyState): Promise<string> {
+  const listed = [
+    ...dirty.stagedFiles.map((path) => ['staged', path] as const),
+    ...dirty.unstagedFiles.map((path) => ['unstaged', path] as const),
+    ...dirty.untrackedFiles.map((path) => ['untracked', path] as const),
+  ].sort(([groupA, pathA], [groupB, pathB]) => {
+    // Code-unit order, not locale order: the signature has to read the same
+    // under any locale the daemon starts in.
+    const a = `${groupA}\0${pathA}`;
+    const b = `${groupB}\0${pathB}`;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  const signed = await Promise.all(
+    listed.map(async ([group, path]) => {
+      try {
+        const stat = await lstat(join(worktreePath, path), { bigint: true });
+        return [
+          group,
+          path,
+          String(stat.mtimeNs),
+          String(stat.ctimeNs),
+          String(stat.size),
+          String(stat.ino),
+        ];
+      } catch (error) {
+        return [group, path, (error as NodeJS.ErrnoException).code ?? 'unreadable'];
+      }
+    }),
+  );
+  return createHash('sha256').update(JSON.stringify(signed)).digest('hex');
 }

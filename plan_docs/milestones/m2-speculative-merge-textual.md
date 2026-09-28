@@ -353,10 +353,54 @@ merge-tree` over the two commits reports the conflict — with neither side
   **Constraints:** the daemon's snapshots have to be captured with `objectStore` set to the repository's shadow before any of them reaches a merge; captured without it, as the watcher does today, the tree sits unreferenced in the user's store for their `gc` to reap. This is where the project succeeds or fails. `notes.md` beside this code explains the algorithm — update it in the same change. Never analyse all N² pairs eagerly, and never escalate a clean merge to the compiler without an overlap reason. **Prefer re-checking a hot pooled pair over rotating a new one in.** Stickiness is a cost control of the same rank as overlap filtering, because every eviction discards incremental compiler state and the next check of that pair pays the cold cost again — round-robin fairness across pairs is the worst available strategy.
 
 - [ ] **Edit-to-Finding holds when a filesystem event is missed**
-      **Files:** `packages/daemon/src/watcher/`, `packages/daemon/test/scheduler-demo.test.ts`
-      **What:** make the 60-second budget from edit to textual Finding hold when the edit's filesystem event never arrives.
-      **Done when:** with the filesystem signal suppressed, an edit still raises its Finding inside the budget; an edit made immediately after the daemon starts is seen; and the demo test, under full-suite load, fails with the daemon's log rather than in silence.
-      **Constraints:** the demo test timed out once at 60.7 s under full-suite load, and passes in 3 s alone. A worktree nothing reports changing is hashed again only after 60 s, and the 30 s sweep skips one hashed more recently than that — so a dropped or late event is caught by exactly the budget it has to beat, and 60.7 s is that ceiling plus a run. Two causes fit and neither is ruled out: a recursive `fs.watch` not yet armed when the first edit lands, since nothing re-captures after a watch is set up, and an event dropped under load. The fallback has to sit inside the budget with room for the debounce ceiling and a run, and its cost is one hash per idle worktree per period, against the 2% idle CPU budget. The test logs nothing today (`silentLogger`), which is why the one failure left no trail.
+      **Files:** `packages/daemon/src/watcher/`, `packages/daemon/src/timing.ts`, `packages/core/src/git/discovery.ts`, `packages/daemon/test/scheduler-demo.test.ts`
+      **What:** make the 60-second budget from edit to textual Finding hold when the edit's filesystem event never arrives, and when the edit lands while the daemon is starting.
+
+  Rewritten before starting. **The probe already runs.** Every pass lists
+  branches through `git status --porcelain -z` in each worktree — through the
+  runner, whose `GIT_OPTIONAL_LOCKS=0` is `--no-optional-locks`, so the user's
+  index is never refreshed or locked. A second status for a probe would double
+  the pass for nothing; the probe signs what the pass already read — each
+  listed path with its `lstat` — and the pass hashes only a worktree whose
+  signature moved. Two things the task as written would have missed:
+  **untracked directories** — plain `status` collapses a new untracked
+  directory to `dir/`, so an edit inside it changes nothing it prints; the
+  listing becomes `--untracked-files=all`. And **ctime**, which no tool can set
+  back: signed beside mtime and size, a timestamp-restoring write to a dirty
+  file still moves the signature, and `status` itself compares ctime for clean
+  tracked files unless `core.trustctime` is off. The backstop re-hash covers
+  what is left, so its period is set against idle cost rather than the budget.
+
+  **The period is the pass's own**, so the chain is the sweep interval, the
+  pass, the scheduler's settle ceiling and a run — not the interval plus a
+  separate probe period. It is derived rather than tuned: the default
+  interval is what the budget leaves after the ceiling the configured debounce
+  implies and an allowance for the pass and the run, capped at today's 30 s,
+  and a debounce long enough that nothing fits is refused at start.
+
+  **Startup**: the first pass discovers the worktrees the watches are armed
+  on, so the watch cannot come first there. A newly armed worktree gets one
+  more probe pass after arming instead — an edit before it is in that pass, an
+  edit after it produces an event — which is the same guarantee, and holds for
+  a worktree that appears later too.
+
+  **Done when:**
+  - with the filesystem signal suppressed entirely, an edit raises its
+    Finding inside the budget, and the chain is checked in code against the
+    debounce settings;
+  - an edit landing between a worktree's first capture and its watch is seen;
+  - the probe moves for a second edit to an already-dirty file, a new
+    untracked file, a file inside a new untracked directory and an edit that
+    restores its mtime; stays still for a worktree nothing changed in; and the
+    backstop still catches an edit `status` cannot see;
+  - an unreadable worktree stays unknown across passes without flapping, and
+    a branch switch with no content change is still announced;
+  - idle cost with the probe is measured against the 2% budget and recorded;
+  - the demo test fails with the daemon's log attached, and the flake is
+    reproduced, or reported as not reproduced, before the fix is chosen.
+    **Constraints:** no retries, longer timeouts or sleeps to pass a test.
+    Nothing here writes to the user's repository or refreshes their index.
+    `notes.md` beside the scheduler carries the timing chain.
 
 - [x] **Analyzer result caching**
       **Files:** `packages/daemon/src/store/`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/core/src/analyzers/`

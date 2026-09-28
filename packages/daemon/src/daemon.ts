@@ -18,7 +18,7 @@ import { createShadowRegistry } from './shadows.js';
 import { openStore } from './store/index.js';
 import type { Store } from './store/index.js';
 import { createWatcher } from './watcher/index.js';
-import type { Watcher } from './watcher/index.js';
+import type { WatchFactory, Watcher } from './watcher/index.js';
 
 /**
  * Composition root: the only place the watcher, bus, scheduler, store and API
@@ -39,6 +39,11 @@ export interface DaemonOptions {
   readonly runner?: GitRunner;
   /** Overridable so a test does not wait out the reconciliation cadence. */
   readonly sweepIntervalMs?: number;
+  /**
+   * The filesystem's kernel boundary, injectable so a test can take the
+   * signal away and show the budget holding without it.
+   */
+  readonly watchFactory?: WatchFactory;
 }
 
 export interface Daemon {
@@ -204,6 +209,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         ...(options.sweepIntervalMs === undefined
           ? {}
           : { sweepIntervalMs: options.sweepIntervalMs }),
+        ...(options.watchFactory === undefined ? {} : { watchFactory: options.watchFactory }),
       });
       await watcher.start();
 

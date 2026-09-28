@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- An edit the filesystem never reports — events are lossy under load, and a watch is not live the instant the daemon starts — now reaches its Finding inside the 60-second budget rather than after it. Each pass of the watcher checks every worktree's status and file timestamps, cheaply, and hashes only a worktree that moved; a full re-hash runs every ten minutes as a backstop. `scheduler.debounceMs` above 7 seconds is refused at start, since the budget could not hold for an unreported edit.
+- `interlock status` lists each untracked file, rather than the directory holding them.
 - The watcher writes the objects of its snapshots into Interlock's own shadow clone rather than into the repository's object database, so nothing is written under a watched repository's `.git` at all.
 - A data directory inside a watched repository is refused. The daemon refuses to start with one, before it writes its lock, database or token, and names the repository and `INTERLOCK_DATA_DIR` in the error. Every watched repository counts, along with each of its worktrees, its git directory, and any of them reached through a symlink; a watched path that is not a repository yet is protected as itself.
 - git 2.41 or later is required. Speculative merges run `git merge-tree` against a supplied merge base, reading the repository's attributes from a commit, which older git cannot do; with an older one the daemon reports the toolchain as unsupported rather than a failed merge. macOS's bundled git is 2.39.

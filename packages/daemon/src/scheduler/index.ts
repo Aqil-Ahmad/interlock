@@ -11,6 +11,7 @@ import type {
   SpeculativeRunId,
 } from '@interlock/shared';
 import type { EventBus, Subscription } from '../bus/index.js';
+import { settleCeilingMs } from '../timing.js';
 import type { OverlapTier, PairOverlap } from './overlap.js';
 
 /**
@@ -143,17 +144,6 @@ export interface Scheduler {
   readonly queueDepth: number;
   readonly stats: SchedulerStats;
 }
-
-/**
- * A branch that never goes quiet still settles this long after its first
- * unplanned change, as a multiple of the debounce.
- *
- * Agents edit continuously; a debounce alone would never fire for the branch
- * that matters most. Five debounces is ten seconds by default — inside the
- * 60-second budget from edit to Finding with room for the watcher's own two
- * seconds and the run.
- */
-const CEILING_DEBOUNCES = 5;
 
 /**
  * How long a queued pair waits to gain one overlap tier of priority.
@@ -305,7 +295,7 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
     const entry: PendingSettle = known ?? { repoId, firstAt: now, cause: id, timer: null };
     entry.cause = id;
     if (entry.timer !== null) clock.clearTimeout(entry.timer);
-    const at = Math.min(now + debounceMs, entry.firstAt + debounceMs * CEILING_DEBOUNCES);
+    const at = Math.min(now + debounceMs, entry.firstAt + settleCeilingMs(debounceMs));
     entry.timer = clock.setTimeout(
       () => {
         settle(branch);

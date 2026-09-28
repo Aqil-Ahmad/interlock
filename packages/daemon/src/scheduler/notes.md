@@ -35,6 +35,33 @@ waiting pair eventually outranks new ones — so the 60 s budget is held by
 measurement, not by construction: under five branches of continuous edit, the
 bench measured 7–8 s. Claims about latency count each layer once.
 
+### When the filesystem says nothing
+
+That chain assumes the edit's filesystem event arrived. It may not: events are
+lossy under load, and a recursive watch is not delivering yet when `fs.watch`
+returns — the one demo failure was two edits made about 10 ms after the daemon
+started, of which the watcher never heard. For those the chain is:
+
+| Step                                       | Worst case                          |
+| ------------------------------------------ | ----------------------------------- |
+| Wait for the watcher's next timed pass     | the sweep interval, 30 s by default |
+| That pass probes each worktree             | a `git status` per worktree         |
+| The branch settles                         | the ceiling, 5 × `debounceMs`       |
+| The pass finishing, the queue, and the run | the allowance, 15 s                 |
+
+The probe signs what the pass's own `git status` listed — each path with its
+timestamps, size and inode — and the worktree is hashed only when that moved,
+so every pass can afford to look. The interval is not chosen: `timing.ts`
+derives it from the budget minus the ceiling the configured debounce implies
+and the allowance, capped at 30 s, and a debounce too long for any interval
+from 10 s up is refused at start. Changing the debounce moves the interval with
+it; neither can be changed without the other noticing.
+
+A full re-hash still runs every ten minutes per worktree. It carries no budget —
+the probe does — and exists only for an edit the probe cannot see, which takes
+a write that restores the file's mtime in a repository with
+`core.trustctime=false`.
+
 ## 2. Plan, from the branch that settled
 
 Only pairs containing the settled branch are considered — never all N² at once.

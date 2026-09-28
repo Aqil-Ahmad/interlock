@@ -324,6 +324,10 @@ async function readDirtyState(worktreePath: string, runner: GitRunner): Promise<
     'status',
     '--porcelain',
     '-z',
+    // Every untracked file rather than the directory holding them: collapsed,
+    // an edit inside a new directory changes nothing this prints, and the
+    // watcher's probe reads this listing to decide whether a worktree moved.
+    '--untracked-files=all',
   ]);
   const { staged, unstaged, untracked } = groupStatus(status.stdout);
 

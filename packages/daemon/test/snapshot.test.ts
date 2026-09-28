@@ -1,5 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGitRunner } from '@interlock/core';
@@ -69,11 +78,15 @@ describe('snapshot pipeline', () => {
    */
   const countingSweep = (
     options: { recaptureAfterMs?: number; now?: () => number } = {},
-  ): { sweep: Sweep; hashes: () => number } => {
+  ): { sweep: Sweep; hashes: () => number; walks: () => number } => {
     let hashes = 0;
+    let walks = 0;
     const real = createGitRunner();
     return {
       hashes: () => hashes,
+      // `add -A` is where a capture reads every file, and where one it cannot
+      // read makes it fail, before any `write-tree`.
+      walks: () => walks,
       sweep: createSweep({
         store,
         bus,
@@ -82,6 +95,7 @@ describe('snapshot pipeline', () => {
         runner: {
           run: (repo, args, runOptions) => {
             if (args[0] === 'write-tree') hashes += 1;
+            if (args[0] === 'add') walks += 1;
             return real.run(repo, args, runOptions);
           },
         },
@@ -118,33 +132,203 @@ describe('snapshot pipeline', () => {
     expect(snapshots()).toEqual([]);
   });
 
-  it('does not hash a worktree nothing reported changing', async () => {
+  it('does not hash a worktree whose probe says nothing moved', async () => {
+    const { sweep: counting, hashes } = countingSweep();
+    await counting.reconcile(root);
+    const afterFirst = hashes();
+
+    // Nothing written and nothing reported. Hashing every worktree on every
+    // timed pass is the whole of the daemon's idle cost — about half a second
+    // per ten thousand files — and the probe is what spares it.
+    await counting.reconcile(root);
+    await counting.reconcile(root);
+
+    expect(hashes()).toBe(afterFirst);
+  });
+
+  it('finds an edit nothing reported, on the next pass', async () => {
     await sweep.reconcile(root);
     events.length = 0;
 
-    // The edit is real, but no signal named this worktree. Hashing every one on
-    // every timed pass is the whole of the daemon's idle cost — measured at
-    // about half a second per ten thousand files — and it buys only the changes
-    // the filesystem failed to report, which the ceiling catches instead.
+    // The filesystem event never came. The probe reads what the pass's status
+    // already listed, so the edit is found here rather than at the backstop.
     writeFileSync(join(root, 'a.txt'), 'edited\n');
     await sweep.reconcile(root);
 
-    expect(snapshots()).toEqual([]);
+    expect(snapshots()).toHaveLength(1);
   });
 
   it('consumes the mark, so one signal does not hash for ever', async () => {
     const { sweep: counting, hashes } = countingSweep();
+    await counting.reconcile(root);
     counting.markChanged(root);
     await counting.reconcile(root);
-    const afterFirst = hashes();
+    const afterMarked = hashes();
 
     // A mark that is never consumed makes every later pass hash again, which is
-    // the whole idle cost coming back for one edit.
-    writeFileSync(join(root, 'a.txt'), 'edited\n');
+    // the whole idle cost coming back for one signal.
     await counting.reconcile(root);
 
-    expect(hashes()).toBe(afterFirst);
-    expect(snapshots().filter((snapshot) => snapshot.treeOid !== null)).toHaveLength(1);
+    expect(hashes()).toBe(afterMarked);
+  });
+
+  describe('the probe', () => {
+    /** One pass with nothing reported, as the timer runs it, and what it published. */
+    const timedPass = async (using: Sweep = sweep): Promise<number> => {
+      events.length = 0;
+      await using.reconcile(root);
+      return snapshots().length;
+    };
+
+    beforeEach(async () => {
+      await sweep.reconcile(root);
+    });
+
+    it('moves for a second edit to a file that is already modified', async () => {
+      writeFileSync(join(root, 'a.txt'), 'edited\n');
+      expect(await timedPass()).toBe(1);
+
+      // `status` prints exactly what it printed before: a.txt, modified. Only
+      // the file's own timestamps and size say it was written again.
+      writeFileSync(join(root, 'a.txt'), 'edited once more\n');
+      expect(await timedPass()).toBe(1);
+    });
+
+    it('moves for a new untracked file', async () => {
+      writeFileSync(join(root, 'new.txt'), 'new\n');
+      expect(await timedPass()).toBe(1);
+    });
+
+    it('moves for an edit inside a directory nothing tracks', async () => {
+      mkdirSync(join(root, 'fresh'));
+      writeFileSync(join(root, 'fresh', 'one.txt'), 'one\n');
+      expect(await timedPass()).toBe(1);
+
+      // A collapsed listing prints `fresh/` both times, and the directory's
+      // own timestamps do not move when a file inside it is rewritten.
+      writeFileSync(join(root, 'fresh', 'one.txt'), 'one, then more\n');
+      expect(await timedPass()).toBe(1);
+    });
+
+    it('moves for a rewrite that puts the modification time back', async () => {
+      // Pinned to a whole second on both sides: `utimes` keeps milliseconds and
+      // the filesystem more, so a time read back and restored would differ in
+      // the part it dropped, and the test would pass for the wrong reason.
+      const pinned = new Date(1_700_000_000_000);
+      writeFileSync(join(root, 'a.txt'), 'edited\n');
+      utimesSync(join(root, 'a.txt'), pinned, pinned);
+      expect(await timedPass()).toBe(1);
+      const before = statSync(join(root, 'a.txt'));
+
+      // Same size, same mtime, same inode: a tool restoring timestamps after
+      // writing. ctime is the one field a write cannot set back.
+      writeFileSync(join(root, 'a.txt'), 'EDITED\n');
+      utimesSync(join(root, 'a.txt'), pinned, pinned);
+      const after = statSync(join(root, 'a.txt'));
+      expect([after.mtimeMs, after.size, after.ino]).toEqual([
+        before.mtimeMs,
+        before.size,
+        before.ino,
+      ]);
+      expect(await timedPass()).toBe(1);
+    });
+
+    it('still finds, at the backstop, an edit status cannot see', async () => {
+      // The one hole left: a clean tracked file rewritten at the same size
+      // with its mtime put back, in a repository that told git not to trust
+      // ctime. The index is refreshed first with an old mtime, so git's own
+      // racy-timestamp check does not rescue it.
+      git(root, 'config', 'core.trustctime', 'false');
+      const old = new Date(1_600_000_000_000);
+      utimesSync(join(root, 'a.txt'), old, old);
+      git(root, 'update-index', '--refresh');
+      let clock = 1_000_000;
+      const late = createSweep({
+        store,
+        bus,
+        runner: createGitRunner(),
+        dataDir: join(base, 'data'),
+        recaptureAfterMs: 10_000,
+        now: () => clock,
+      });
+      await late.reconcile(root);
+
+      writeFileSync(join(root, 'a.txt'), 'b\n');
+      utimesSync(join(root, 'a.txt'), old, old);
+      expect(git(root, 'status', '--porcelain')).toBe('');
+      clock += 5_000;
+      expect(await timedPass(late)).toBe(0);
+
+      clock += 5_000;
+      expect(await timedPass(late)).toBe(1);
+    });
+
+    it('does not walk a worktree again at a failure it has already met', async () => {
+      const { sweep: counting, walks } = countingSweep();
+      await counting.reconcile(root);
+      writeFileSync(join(root, 'locked.txt'), 'secret\n');
+      chmodSync(join(root, 'locked.txt'), 0o000);
+      try {
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        const afterFailure = walks();
+
+        // Still failing — the pass says so — but without reading every file
+        // to find out again what one unreadable file already said.
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        expect(walks()).toBe(afterFailure);
+      } finally {
+        chmodSync(join(root, 'locked.txt'), 0o644);
+      }
+
+      // Fixing the permission moves the file's ctime, which is the retry.
+      events.length = 0;
+      await counting.reconcile(root);
+      expect(snapshots()).toHaveLength(1);
+    });
+
+    it('walks again at a failure once something is reported there', async () => {
+      const { sweep: counting, walks } = countingSweep();
+      await counting.reconcile(root);
+      writeFileSync(join(root, 'locked.txt'), 'secret\n');
+      chmodSync(join(root, 'locked.txt'), 0o000);
+      try {
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        const afterFailure = walks();
+
+        counting.markChanged(root);
+        await expect(counting.reconcile(root)).rejects.toThrow();
+
+        expect(walks()).toBe(afterFailure + 1);
+      } finally {
+        chmodSync(join(root, 'locked.txt'), 0o644);
+      }
+    });
+
+    it('keeps a worktree nobody can read unknown, without flapping or walking', async () => {
+      const linked = join(base, 'wt-closed');
+      git(root, 'worktree', 'add', '-q', '-b', 'closed', linked);
+      const { sweep: counting, walks } = countingSweep();
+      await counting.reconcile(root);
+      const afterFirst = walks();
+      chmodSync(linked, 0o000);
+      try {
+        events.length = 0;
+        for (let pass = 0; pass < 4; pass++) await counting.reconcile(root);
+
+        const unknown = snapshots().filter((snapshot) => snapshot.treeOid === null);
+        expect(unknown).toHaveLength(1);
+        expect(snapshots()).toHaveLength(1);
+        expect(walks()).toBe(afterFirst);
+      } finally {
+        chmodSync(linked, 0o755);
+      }
+
+      // Readable again, it is announced as it is now, on the next pass.
+      events.length = 0;
+      await counting.reconcile(root);
+      expect(snapshots().map((snapshot) => snapshot.treeOid === null)).toEqual([false]);
+    });
   });
 
   it('restarts the ceiling when a hash finds nothing new', async () => {
