@@ -488,7 +488,7 @@ function isStringOrNull(value: unknown): boolean {
 }
 
 function isOneOf(value: unknown, allowed: readonly string[]): boolean {
-  return typeof value === 'string' && allowed.includes(value);
+  return (allowed as readonly unknown[]).includes(value);
 }
 
 export function analyzerCacheParams(

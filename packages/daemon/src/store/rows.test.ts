@@ -235,6 +235,7 @@ describe('analyzer cache', () => {
     it.each([
       ['not a list', valid],
       ['an item that is not an object', ['finding']],
+      ['an item that is null', [null]],
       ['a missing id', [{ ...valid, id: undefined }]],
       ['an unknown kind', [{ ...valid, kind: 'guess' }]],
       ['an unknown severity', [{ ...valid, severity: 'bogus' }]],
@@ -242,6 +243,10 @@ describe('analyzer cache', () => {
       ['a confidence that is not a number', [{ ...valid, confidence: '1' }]],
       ['a resolvedAt that is neither text nor null', [{ ...valid, resolvedAt: 0 }]],
       ['no attribution', [{ ...valid, attribution: null }]],
+      [
+        'an attribution with no first branch',
+        [{ ...valid, attribution: { ...valid.attribution, branchA: null } }],
+      ],
       [
         'an attribution missing a branch',
         [{ ...valid, attribution: { ...valid.attribution, branchB: 1 } }],
