@@ -1130,19 +1130,34 @@ describe('store', () => {
       expect(countRows('evidence')).toBe(dropped.evidence.length);
     });
 
-    it('keeps an unfinished run whatever its age', async () => {
+    it('drops a run left unfinished a whole window after it started, and nothing younger', async () => {
       const repoId = (await store.upsertRepo(repo())).id;
       const a = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/a', name: 'a' })))
         .id;
       const b = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/b', name: 'b' })))
         .id;
       const pairId = (await store.upsertMergePair(pair(repoId, a, b))).id;
-      const running = run(pairId, { status: 'running', finishedAt: null, durationMs: null });
-      await store.upsertRun(running);
+      // A run takes seconds and shutdown records the ones it interrupts, so one
+      // still `running` a window later is what a daemon that died mid-run left.
+      const abandoned = run(pairId, {
+        status: 'running',
+        startedAt: T.early,
+        finishedAt: null,
+        durationMs: null,
+      });
+      const inFlight = run(pairId, {
+        status: 'running',
+        startedAt: T.late,
+        finishedAt: null,
+        durationMs: null,
+      });
+      await store.upsertRun(abandoned);
+      await store.upsertRun(inFlight);
 
-      await store.prune(T.late);
+      await store.prune(T.mid);
 
-      expect(await store.getRun(running.id)).not.toBeNull();
+      expect(await store.getRun(abandoned.id)).toBeNull();
+      expect(await store.getRun(inFlight.id)).not.toBeNull();
     });
 
     it('drops superseded change sets but keeps the newest for each branch', async () => {
