@@ -64,6 +64,16 @@ describe('two live sessions editing the same function', () => {
     }
   };
 
+  const until = async <T>(probe: () => Promise<T | null>, what: string): Promise<T> => {
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const value = await probe();
+      if (value !== null) return value;
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  };
+
   const events = (): Promise<EventRecord[]> =>
     read(async (store) => {
       const records: EventRecord[] = [];
@@ -158,5 +168,77 @@ describe('two live sessions editing the same function', () => {
       'pair.scheduled',
     ]);
     expect(chain[5]).toMatch(/^branch\./u);
+  }, 90_000);
+
+  it('keeps an open Finding traceable through a prune, and re-verifies it after a restart', async () => {
+    // Written before the daemon starts, so its first pass — which hashes every
+    // worktree — is what sees them. This test is about what survives a prune;
+    // noticing an edit through the filesystem watch is the test above's.
+    writeFileSync(join(base, 'a', 'total.ts'), source('items.reduce((n, i) => n + i.price, 0)'));
+    writeFileSync(join(base, 'b', 'total.ts'), source('items.filter(Boolean).length'));
+    await daemon.start();
+    const raised = await until(
+      async () => (await events()).find((record) => record.type === 'finding.raised') ?? null,
+      'a Finding',
+    );
+    const { findingId } = raised.payload as Extract<
+      EventRecord['payload'],
+      { type: 'finding.raised' }
+    >;
+    const before = await read((store) => store.getFinding(findingId));
+    await daemon.stop();
+
+    // A cutoff in the future makes every row old: what survives is only what an
+    // open Finding still rests on.
+    const report = await read((store) => store.prune('2999-01-01T00:00:00.000Z'));
+    expect(report.events).toBeGreaterThan(0);
+    const log = await events();
+    const byId = new Map(log.map((record) => [record.id, record]));
+    const chain: string[] = [];
+    for (let at: EventRecord | undefined = byId.get(raised.id); at !== undefined;) {
+      chain.push(at.type);
+      at = at.causedBy === null ? undefined : byId.get(at.causedBy);
+    }
+    expect(chain.slice(0, 5)).toEqual([
+      'finding.raised',
+      'run.analyzer-completed',
+      'run.merge-completed',
+      'run.started',
+      'pair.scheduled',
+    ]);
+    expect(chain[5]).toMatch(/^branch\./u);
+    // Nothing kept that the chain does not account for, beyond the run's own.
+    const runId = (raised.payload as { runId: string }).runId;
+    const unexplained = log.filter(
+      (record) =>
+        !chain.includes(record.type) && (record.payload as { runId?: string }).runId !== runId,
+    );
+    expect(unexplained).toEqual([]);
+
+    // Restart: nothing the daemon remembered survives, so it re-announces every
+    // worktree and re-merges the pair — against a store with no verdict to
+    // reuse — and the conflict it finds is the Finding it already had.
+    daemon = createDaemon({
+      config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
+      logger: silentLogger,
+    });
+    const restartedAt = new Date().toISOString();
+    await daemon.start();
+    await until(
+      async () =>
+        (await events()).find(
+          (record) =>
+            record.type === 'run.finished' &&
+            record.at >= restartedAt &&
+            (record.payload as { status?: string }).status === 'complete',
+        ) ?? null,
+      'a run after the restart',
+    );
+    const open = await read(async (store) => {
+      const repos = await store.listRepos();
+      return store.listOpenFindings(repos[0]!.id);
+    });
+    expect(open.map((finding) => finding.id)).toEqual([findingId]);
+    expect(open[0]!.firstSeenAt).toBe(before!.firstSeenAt);
   }, 90_000);
 });

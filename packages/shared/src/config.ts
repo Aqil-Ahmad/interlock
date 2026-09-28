@@ -26,6 +26,7 @@ export interface InterlockConfig {
   readonly sandbox: SandboxConfig;
   readonly mcp: McpConfig;
   readonly sessions: SessionsConfig;
+  readonly retention: RetentionConfig;
   readonly logLevel: LogLevel;
 }
 
@@ -91,6 +92,16 @@ export interface SessionsConfig {
   readonly staleAfterMs: number;
 }
 
+export interface RetentionConfig {
+  /**
+   * How long the daemon's database keeps what it no longer needs: finished
+   * runs, their events, superseded change sets, cached verdicts and ended
+   * sessions. Anything an open Finding still rests on is kept however old it
+   * is. It bounds the database, not the shadow clones.
+   */
+  readonly windowMs: number;
+}
+
 export interface McpConfig {
   readonly enabled: boolean;
   readonly port: number;
@@ -99,6 +110,26 @@ export interface McpConfig {
 }
 
 export const DEFAULT_DATA_DIR = join(homedir(), '.interlock');
+
+/**
+ * A day, chosen from measured growth rather than as a round number.
+ *
+ * Five agents each saving every second grew the store about 58 MB an hour, so
+ * a day bounds even that to about 1.4 GB, and a week would be ten times it.
+ * Past a day the window buys little: anything an open Finding rests on is kept
+ * however old, a restart re-verifies every pair, and a verdict that ages out
+ * costs one ordinary run. A day still explains yesterday's work the next morning.
+ */
+const RETENTION_DEFAULT_MS = 24 * 60 * 60_000;
+
+/**
+ * The shortest retention window accepted.
+ *
+ * A run is pruned by its finish and an unfinished one by its start, so a window
+ * shorter than the longest run could take a run that is still in flight; runs
+ * are bounded by the sandbox's timeout, far below this.
+ */
+export const RETENTION_MIN_MS = 60 * 60_000;
 
 export const DEFAULT_CONFIG: InterlockConfig = {
   repos: [],
@@ -127,6 +158,7 @@ export const DEFAULT_CONFIG: InterlockConfig = {
   },
   mcp: { enabled: true, port: 47318, maxWarningsPerHour: 10 },
   sessions: { staleAfterMs: 5 * 60_000 },
+  retention: { windowMs: RETENTION_DEFAULT_MS },
   logLevel: 'info',
 };
 
@@ -373,7 +405,15 @@ export function dataDirFrom(env: Readonly<Record<string, string | undefined>>): 
  * Read off the defaults rather than written down again, so this is the same
  * schema `validateConfig` checks values against and not a second one.
  */
-const CONFIG_SECTIONS = ['daemon', 'scheduler', 'analyzers', 'sandbox', 'mcp', 'sessions'] as const;
+const CONFIG_SECTIONS = [
+  'daemon',
+  'scheduler',
+  'analyzers',
+  'sandbox',
+  'mcp',
+  'sessions',
+  'retention',
+] as const;
 type ConfigSection = (typeof CONFIG_SECTIONS)[number];
 
 /**
@@ -579,6 +619,7 @@ export function resolveConfig(input: DeepPartial<InterlockConfig> = {}): Interlo
     sandbox: { ...DEFAULT_CONFIG.sandbox, ...input.sandbox, network: false },
     mcp: { ...DEFAULT_CONFIG.mcp, ...input.mcp },
     sessions: { ...DEFAULT_CONFIG.sessions, ...input.sessions },
+    retention: { ...DEFAULT_CONFIG.retention, ...input.retention },
   };
 
   const problems = validateConfig(config);
@@ -692,6 +733,13 @@ export function validateConfig(config: InterlockConfig): string[] {
     'sessions.staleAfterMs',
     'must be >= 1000',
     (n) => n >= 1_000,
+    problems,
+  );
+  requireNumber(
+    config.retention.windowMs,
+    'retention.windowMs',
+    `must be >= ${String(RETENTION_MIN_MS)} (one hour)`,
+    (n) => n >= RETENTION_MIN_MS,
     problems,
   );
 

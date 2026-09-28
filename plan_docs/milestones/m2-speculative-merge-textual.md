@@ -311,10 +311,36 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Constraints:** a live slot's `HEAD` and index are already roots for git's own `prune` — verified, a worktree's `HEAD` is walked — but a snapshot commit a queued check still needs is referenced by nothing and must be made a root before anything collects. So is every commit a Finding's evidence names: a `merge-conflict` evidence carries `commitA` and `commitB`, the snapshot commits its run made, and a cache hit re-serves the evidence of the run that reached the verdict, so an open Finding can name commits days old. Collecting them leaves the evidence naming objects that are gone. Either the commits named by open Findings and by cached verdicts are roots, or a verdict whose commits are collected is dropped with them. A rebuilt clone is already covered: its generation is part of every verdict's key, so a rebuild misses rather than serving evidence from the clone before it. Never collect the user's store: the shadow borrows it through alternates.
 
 - [ ] **Retention**
-      **Files:** `packages/daemon/src/daemon.ts`, `packages/shared/src/config.ts`
-      **What:** have the daemon call `store.prune` on a configured window. The store implements retention and nothing calls it, so every run, event, change set and cached verdict lives as long as the data dir — the database half of the disk bound the shadow's collection is the other half of.
-      **Done when:** a day of continuous edits leaves the store bounded, the window is in the config with a default, and threat-model T7 names only mitigations that exist.
-      **Constraints:** `prune` keeps any run holding an open or stale Finding, and a verdict goes with the run it came from. A verdict is pruned by when it was written, not when it was last used, so a hot one ages out and costs one full run; decide whether a hit refreshes it. The event log is append-only; pruning by age is the one sanctioned deletion. Restart re-verification must survive it.
+      **Files:** `packages/daemon/src/daemon.ts`, `packages/daemon/src/store/`, `packages/shared/src/config.ts`, `docs/threat-model.md`
+      **What:** have the daemon enforce a retention window on its database, on start and on a timer, so continuous agent edits leave the store bounded — the database half of the disk bound the shadow's collection is the other half of.
+
+  Rewritten before starting. **Traceability and pruning conflicted**: `prune`
+  kept a run holding an open Finding but deleted every event older than the
+  cutoff, so an old open Finding kept its run and lost the `finding.raised`,
+  `run.started`, `pair.scheduled` and `branch.snapshot` that explain it. An old
+  event is now kept when an event of a run holding an open or stale Finding
+  leads back to it through `causedBy` — a recursive query in the same statement
+  as the delete, seeded through an index on the run an event names. **A pass
+  must not hold the one writer**: rows go in small batches, each its own
+  transaction, yielding between them, and the file is never vacuumed — freed
+  pages are reused, which is the bound that matters. **Two tables had no
+  bound at all**: ended agent sessions, and runs left `running` by a daemon that
+  died mid-run; both go once they are older than the window. **A cache hit does
+  not refresh a verdict**, deliberately: a verdict's evidence names the commits
+  of the run that reached it, and the shadow's collection can only keep "objects
+  younger than the window" safely if no verdict outlives it. The window's
+  default is chosen from measured growth, not a round number.
+
+  **Done when:** `retention.windowMs` is in the config with a default and
+  validated like every other value; the daemon prunes once after start, off the
+  startup path, then on a timer, logging what each table lost; an old open
+  Finding traces through `causedBy` to the edit behind it after a prune, beside
+  an old resolved one whose chain is gone; restart re-verification reconciles an
+  old open Finding rather than duplicating it after a prune; a bench of
+  continuous edits against a file-backed store shows row counts and file size
+  flat after the first window, with per-hour growth, one pass on a large store
+  timed, and the numbers in `log.md`; and T7 names only mitigations that exist.
+  **Constraints:** `prune` keeps any run holding an open or stale Finding, and a verdict goes with the run it came from. The event log is append-only; pruning by age is the one sanctioned deletion. Findings stay traceable. Restart re-verification must survive it. Any schema change is a migration shown idempotent.
 
 - [x] **`ensureShadow` refuses a data dir inside the repository**
       **Files:** `packages/core/src/git/shadow.ts`
