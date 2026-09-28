@@ -265,6 +265,35 @@ describe('watcher composition', () => {
       expect(feature).toHaveLength(1);
     });
 
+    it('probes once more only for worktrees whose watch is new', async () => {
+      let passes = 0;
+      const real = createGitRunner();
+      const created = createWatcher({
+        config: resolveConfig({ dataDir: join(base, 'data'), repos: [root] }),
+        store,
+        bus,
+        // One `for-each-ref` per repository per pass: it counts passes.
+        runner: {
+          run: (repo, args, options) => {
+            if (args[0] === 'for-each-ref') passes += 1;
+            return real.run(repo, args, options);
+          },
+        },
+        logger: createLogger('test', { level: 'error', sink: () => undefined }),
+        sweepIntervalMs: NEVER_SWEEPS_MS,
+        watchFactory: silentWatch,
+      });
+      watcher = created;
+      await created.start();
+      // The first pass, and the one after the watches went up.
+      expect(passes).toBe(2);
+
+      passes = 0;
+      await created.refresh();
+      // Every watch was already up: one pass, as the timer runs it.
+      expect(passes).toBe(1);
+    });
+
     it('refuses a debounce the budget cannot carry, before watching anything', () => {
       let refusal: unknown;
       try {

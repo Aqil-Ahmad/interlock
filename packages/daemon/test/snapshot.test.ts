@@ -287,6 +287,66 @@ describe('snapshot pipeline', () => {
       expect(snapshots()).toHaveLength(1);
     });
 
+    it('holds still for a file that is gone, rather than moving every pass', async () => {
+      const { sweep: counting, hashes } = countingSweep();
+      await counting.reconcile(root);
+      // A tracked file deleted: `status` lists it, and there is nothing to stat.
+      rmSync(join(root, 'a.txt'));
+      events.length = 0;
+      await counting.reconcile(root);
+      expect(snapshots()).toHaveLength(1);
+      const afterDelete = hashes();
+
+      await counting.reconcile(root);
+      await counting.reconcile(root);
+
+      expect(hashes()).toBe(afterDelete);
+    });
+
+    it('walks again at a failure once the head under it moves', async () => {
+      const { sweep: counting, walks } = countingSweep();
+      await counting.reconcile(root);
+      writeFileSync(join(root, 'locked.txt'), 'secret\n');
+      chmodSync(join(root, 'locked.txt'), 0o000);
+      try {
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        const afterFailure = walks();
+
+        // Nothing in the worktree moved, so the probe reads the same; the
+        // content it would hash sits on another commit now.
+        git(root, 'commit', '-qm', 'moves the head only', '--allow-empty');
+        await expect(counting.reconcile(root)).rejects.toThrow();
+
+        expect(walks()).toBe(afterFailure + 1);
+      } finally {
+        chmodSync(join(root, 'locked.txt'), 0o644);
+      }
+    });
+
+    it('walks again at a failure once the backstop is due', async () => {
+      let clock = 1_000_000;
+      const { sweep: counting, walks } = countingSweep({
+        recaptureAfterMs: 10_000,
+        now: () => clock,
+      });
+      await counting.reconcile(root);
+      writeFileSync(join(root, 'locked.txt'), 'secret\n');
+      chmodSync(join(root, 'locked.txt'), 0o000);
+      try {
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        const afterFailure = walks();
+        clock += 5_000;
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        expect(walks()).toBe(afterFailure);
+
+        clock += 5_000;
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        expect(walks()).toBe(afterFailure + 1);
+      } finally {
+        chmodSync(join(root, 'locked.txt'), 0o644);
+      }
+    });
+
     it('walks again at a failure once something is reported there', async () => {
       const { sweep: counting, walks } = countingSweep();
       await counting.reconcile(root);

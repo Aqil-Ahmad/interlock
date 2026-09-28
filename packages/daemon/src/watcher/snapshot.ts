@@ -384,33 +384,33 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
 
 /**
  * A cheap fingerprint of what `status` said about a worktree: every path it
- * listed — staged, unstaged, untracked — with that file's timestamps, size and
- * inode as they are now.
+ * listed as changed in the worktree — unstaged or untracked — with that file's
+ * timestamps, size and inode as they are now.
  *
  * Nothing git is asked for here: the pass that brought the branch already ran
  * the status, against the user's own index and with optional locks off, so
  * nothing is refreshed or locked on their side. The listing alone is not
  * enough — a second edit to a file that is already modified changes nothing
- * `status` prints — which is what the timestamps are for. ctime is the one a
- * write cannot set back, so a tool that restores mtime after writing still
- * moves this. A clean tracked file is `status`'s own to judge: it compares the
- * same stat fields against the index.
+ * `status` prints — which is what the stat fields are for. ctime carries it on
+ * any filesystem that keeps it, since no write can set it back, so a tool that
+ * restores mtime after writing still moves this; mtime, size and inode are
+ * there for one that does not keep it faithfully. A clean tracked file is
+ * `status`'s own to judge: it compares the same fields against the index.
  *
- * A path that cannot be stat'ed is signed by the reason, so an unreadable file
- * reads the same on every pass rather than moving the probe each time.
+ * Staged paths are left out. Staging changes the index and not the worktree,
+ * which is what a capture hashes, and any write to a staged file after staging
+ * shows in the unstaged column. Paths are taken in the order `status` printed
+ * them, which is git's own sorted order.
+ *
+ * A path that cannot be stat'ed — a tracked file deleted — is signed by the
+ * reason, so it reads the same on every pass rather than moving the probe each
+ * time.
  */
 async function probe(worktreePath: string, dirty: DirtyState): Promise<string> {
   const listed = [
-    ...dirty.stagedFiles.map((path) => ['staged', path] as const),
     ...dirty.unstagedFiles.map((path) => ['unstaged', path] as const),
     ...dirty.untrackedFiles.map((path) => ['untracked', path] as const),
-  ].sort(([groupA, pathA], [groupB, pathB]) => {
-    // Code-unit order, not locale order: the signature has to read the same
-    // under any locale the daemon starts in.
-    const a = `${groupA}\0${pathA}`;
-    const b = `${groupB}\0${pathB}`;
-    return a < b ? -1 : a > b ? 1 : 0;
-  });
+  ];
   const signed = await Promise.all(
     listed.map(async ([group, path]) => {
       try {
@@ -418,8 +418,8 @@ async function probe(worktreePath: string, dirty: DirtyState): Promise<string> {
         return [
           group,
           path,
-          String(stat.mtimeNs),
           String(stat.ctimeNs),
+          String(stat.mtimeNs),
           String(stat.size),
           String(stat.ino),
         ];
