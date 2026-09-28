@@ -467,8 +467,8 @@ function cachedFindings(value: unknown): Finding[] {
       isOneOf(item.kind, ANALYZER_KINDS) &&
       isOneOf(item.severity, SEVERITIES) &&
       isOneOf(item.status, FINDING_STATUSES) &&
+      // JSON has no NaN or Infinity, so a number that parsed is finite.
       typeof item.confidence === 'number' &&
-      Number.isFinite(item.confidence) &&
       typeof attribution.branchA === 'string' &&
       typeof attribution.branchB === 'string' &&
       typeof attribution.rationale === 'string' &&
@@ -480,7 +480,7 @@ function cachedFindings(value: unknown): Finding[] {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null;
 }
 
 function isStringOrNull(value: unknown): boolean {

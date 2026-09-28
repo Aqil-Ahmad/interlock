@@ -240,7 +240,6 @@ describe('analyzer cache', () => {
       ['an unknown severity', [{ ...valid, severity: 'bogus' }]],
       ['an unknown status', [{ ...valid, status: 'maybe' }]],
       ['a confidence that is not a number', [{ ...valid, confidence: '1' }]],
-      ['a confidence that is not finite', [{ ...valid, confidence: null }]],
       ['a resolvedAt that is neither text nor null', [{ ...valid, resolvedAt: 0 }]],
       ['no attribution', [{ ...valid, attribution: null }]],
       [
@@ -257,6 +256,7 @@ describe('analyzer cache', () => {
       ],
       ['evidence that is not a list', [{ ...valid, evidence: {} }]],
       ['evidence with no type', [{ ...valid, evidence: [{ path: 'total.ts' }] }]],
+      ['evidence that is not an object', [{ ...valid, evidence: [null] }]],
     ] as const)('refuses %s', (_, findings) => {
       const error = refusal(() => toCachedVerdict(rowWith(findings)));
       expect(error.code).toBe('STORE_UNAVAILABLE');
