@@ -11,3 +11,4 @@ export * from './git/index.js';
 export * from './merge/index.js';
 export * from './analyzers/index.js';
 export * from './advisor/index.js';
+export * from './build-id.js';

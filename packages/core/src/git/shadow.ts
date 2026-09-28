@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { InterlockError } from '@interlock/shared';
+import { InterlockError, ulid } from '@interlock/shared';
 import type { RepoId } from '@interlock/shared';
 import { repositoryDirHolding, repositoryDirsOf } from './repo-dirs.js';
 import { runRequired } from './repo-handle.js';
@@ -60,6 +60,13 @@ const SHADOW_CONFIG: readonly (readonly [string, string])[] = [
   // pinning a throwaway commit against `prune` for ninety days.
   ['core.logAllRefUpdates', 'false'],
 ];
+
+/**
+ * Where a clone records its generation — see {@link ShadowRepo.generation}.
+ * In the clone's own config, so it goes with the clone: a rebuild starts from
+ * an empty directory and so from none.
+ */
+const GENERATION_KEY = 'interlock.generation';
 
 /**
  * The hash functions a clone can be created with.
@@ -159,19 +166,22 @@ async function refresh(
     );
   }
 
-  const shadow: ShadowRepo = {
+  // The generation lives in the clone's config, which is read below; nothing
+  // before that asks for it.
+  const unread: ShadowRepo = {
     kind: 'shadow',
     rootPath: shadowPath,
     // Bare, so the repository is its own git directory.
     gitDir: shadowPath,
     originPath,
+    generation: '',
   };
 
-  if (!(await isUsableShadow(shadow, source, options.runner))) {
+  if (!(await isUsableShadow(unread, source, options.runner))) {
     discard(shadowPath, options.dataDir);
-    await create(shadow, source, options.runner);
+    await create(unread, source, options.runner);
   }
-  await syncConfig(shadow, options.runner);
+  const shadow: ShadowRepo = { ...unread, generation: await syncConfig(unread, options.runner) };
 
   await runRequired(options.runner, shadow, [
     'fetch',
@@ -351,9 +361,10 @@ async function create(shadow: ShadowRepo, source: Source, runner: GitRunner): Pr
  * On every refresh rather than once at creation. A key added after a clone was
  * made would otherwise never reach it: the clone passes every other check, and
  * only an unrelated rebuild would apply it. Read in one call, so a clone that is
- * already in order costs one process.
+ * already in order costs one process. Answers the clone's generation, which
+ * the same read carries.
  */
-async function syncConfig(shadow: ShadowRepo, runner: GitRunner): Promise<void> {
+async function syncConfig(shadow: ShadowRepo, runner: GitRunner): Promise<string> {
   const listed = await runRequired(runner, shadow, ['config', '--local', '--list', '-z']);
   const current = new Map<string, string>();
   for (const entry of listed.stdout.split('\0')) {
@@ -366,4 +377,13 @@ async function syncConfig(shadow: ShadowRepo, runner: GitRunner): Promise<void> 
       await runRequired(runner, shadow, ['config', key, value]);
     }
   }
+  // Set once and never brought into line: a clone keeps its generation for its
+  // whole life, and only a new clone — which has none — is given one. A clone
+  // from before generations existed gets one here, which is sound because its
+  // commits are all still in it.
+  const known = current.get(GENERATION_KEY);
+  if (known !== undefined && known !== '') return known;
+  const generation = ulid();
+  await runRequired(runner, shadow, ['config', GENERATION_KEY, generation]);
+  return generation;
 }

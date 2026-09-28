@@ -1,11 +1,22 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { createGitRunner } from '@interlock/core';
-import type { GitRunner } from '@interlock/core';
-import { makePairKey, silentLogger, ulid } from '@interlock/shared';
-import type { BranchRef, EventId, EventRecord, Repo, SpanEvidence } from '@interlock/shared';
+import { createGitRunner, textualAnalyzer } from '@interlock/core';
+import type { GitResult, GitRunner } from '@interlock/core';
+import { createLogger, makePairKey, silentLogger, ulid } from '@interlock/shared';
+import type {
+  BranchRef,
+  BranchRefId,
+  ChangeSetId,
+  EventId,
+  EventRecord,
+  LogRecord,
+  Repo,
+  RepoId,
+  SpanEvidence,
+} from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventBus } from '../src/bus/index.js';
 import type { PairCandidate, PairRunRequest, PairRunResult } from '../src/scheduler/index.js';
@@ -41,8 +52,12 @@ describe('run pipeline', () => {
   const body = (value: string): string =>
     lines('export function total(items) {', `  return ${value};`, '}');
 
+  /** What the pipeline warned about: the only trace a swallowed failure leaves. */
+  let warnings: LogRecord[];
+
   const build = (with_: GitRunner = runner): RunPipeline => {
-    const made = createRunPipeline({ store, bus, runner: with_, shadows, logger: silentLogger });
+    const logger = createLogger('test', { level: 'warn', sink: (record) => warnings.push(record) });
+    const made = createRunPipeline({ store, bus, runner: with_, shadows, logger });
     made.attach();
     return made;
   };
@@ -80,6 +95,17 @@ describe('run pipeline', () => {
   };
   const run = (signal?: AbortSignal, using?: RunPipeline): Promise<PairRunResult> =>
     runWith('b', signal, using);
+
+  interface BranchSnapshotPayload {
+    readonly type: 'branch.snapshot';
+    readonly repoId: RepoId;
+    readonly at: string;
+    readonly branchRefId: BranchRefId;
+    readonly treeOid: string;
+    readonly headSha: string;
+    readonly changeSetId: ChangeSetId;
+    readonly fileCount: number;
+  }
 
   const published = (type: EventRecord['type']): EventRecord[] =>
     records.filter((record) => record.type === type);
@@ -127,6 +153,7 @@ describe('run pipeline', () => {
     bus = new EventBus({ logger: silentLogger, onRecord: (record) => records.push(record) });
     shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
     sweep = createSweep({ store, bus, runner, dataDir: join(base, 'data'), shadows });
+    warnings = [];
     pipeline = build();
     lastKey = null;
   });
@@ -327,7 +354,8 @@ describe('run pipeline', () => {
       }
       await observe();
 
-      expect((await run()).kind).toBe('analysed');
+      // And no verdict answers it: the same trees merged from another base.
+      expect(await run()).toMatchObject({ kind: 'analysed', cached: false });
     });
 
     it('keeps one Finding across runs while the conflict stands, and resolves it when it goes', async () => {
@@ -469,6 +497,446 @@ describe('run pipeline', () => {
       const started = published('run.started')[0]!.payload as { runId: string };
       expect(await store.getRun(started.runId as never)).toMatchObject({ status: 'failed' });
       expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
+    });
+  });
+
+  describe('the verdict cache', () => {
+    /** The real runner, keeping the argv of every command it is asked to run. */
+    const recording = (
+      answering: (args: readonly string[]) => GitResult | null = () => null,
+    ): { runner: GitRunner; calls: string[][] } => {
+      const calls: string[][] = [];
+      return {
+        calls,
+        runner: {
+          run: (target, args, options) => {
+            calls.push([...args]);
+            const answer = answering(args);
+            return answer === null ? runner.run(target, args, options) : Promise.resolve(answer);
+          },
+        },
+      };
+    };
+
+    /** The a/b pair, planned, then run with the calls made by the run alone. */
+    const runAlone = async (
+      using: RunPipeline,
+      calls: string[][],
+      [from, to]: readonly [string, string] = ['a', 'b'],
+    ): Promise<{ result: PairRunResult; git: string[][] }> => {
+      const [a, b] = [await branchNamed(from), await branchNamed(to)];
+      const { candidates } = await using.plan(a.repoId, a.id);
+      const candidate = candidates.find((c) => c.pair.a === b.id || c.pair.b === b.id)!;
+      calls.length = 0;
+      const result = await using.runPair(request(candidate), new AbortController().signal);
+      if (result.kind === 'analysed') lastKey = result.contentKey;
+      return { result, git: [...calls] };
+    };
+
+    const edit = async (side: 'a' | 'b', value: string): Promise<void> => {
+      writeFileSync(join(base, side, 'total.ts'), body(value));
+      await observe();
+    };
+
+    const merges = (git: string[][]): number =>
+      git.filter((argv) => argv.includes('merge-tree')).length;
+
+    /** A new file on each side in one directory: an overlap that merges cleanly. */
+    const besideEachOther = (): void => {
+      for (const side of ['a', 'b']) {
+        mkdirSync(join(base, side, 'lib'), { recursive: true });
+        writeFileSync(join(base, side, 'lib', `${side}.ts`), lines(side));
+      }
+    };
+
+    const openFinding = async () => (await store.listOpenFindings((await repo()).id))[0]!;
+
+    beforeEach(async () => {
+      await edit('a', '1');
+      await edit('b', '2');
+    });
+
+    it('answers content it has judged before without running any git', async () => {
+      const { runner: watched, calls } = recording();
+      const using = build(watched);
+
+      const first = await runAlone(using, calls);
+      const found = await openFinding();
+      await edit('a', '5');
+      const elsewhere = await runAlone(using, calls);
+      await edit('a', '1');
+      const again = await runAlone(using, calls);
+      using.detach();
+
+      expect(first.result).toMatchObject({ kind: 'analysed', cached: false });
+      expect(merges(first.git)).toBe(1);
+      expect(elsewhere.result).toMatchObject({ kind: 'analysed', cached: false });
+      expect(again.result).toMatchObject({ kind: 'analysed', cached: true, clean: false });
+      // No capture, no commit, no merge, no analyzer: nothing at all.
+      expect(again.git).toEqual([]);
+      // One Finding throughout, keeping its identity, with the evidence of the
+      // content the verdict is about rather than the last run's.
+      const reaffirmed = await openFinding();
+      expect(reaffirmed.id).toBe(found.id);
+      expect(reaffirmed.firstSeenAt).toBe(found.firstSeenAt);
+      expect(reaffirmed.updatedAt > found.updatedAt).toBe(true);
+      expect(reaffirmed.evidence).toEqual(found.evidence);
+      expect(await store.listOpenFindings((await repo()).id)).toHaveLength(1);
+    });
+
+    it('answers a branch with no worktree from its head without asking git again', async () => {
+      const scratch = join(base, 'scratch-bare');
+      git(root, 'worktree', 'add', '-q', '-b', 'bare', scratch);
+      writeFileSync(join(scratch, 'total.ts'), body('committed'));
+      git(scratch, 'commit', '-qam', 'bare work');
+      git(root, 'worktree', 'remove', '--force', scratch);
+      await observe();
+      const { runner: watched, calls } = recording();
+      const using = build(watched);
+
+      await runAlone(using, calls, ['a', 'bare']);
+      await edit('a', '5');
+      await runAlone(using, calls, ['a', 'bare']);
+      await edit('a', '1');
+      const again = await runAlone(using, calls, ['a', 'bare']);
+      using.detach();
+
+      expect(again.result).toMatchObject({ kind: 'analysed', cached: true });
+      expect(again.git).toEqual([]);
+    });
+
+    it('keys a side captured again on what it captured, not what it was told', async () => {
+      // b's head moves off a's, so a head announced wrongly is another base.
+      git(join(base, 'b'), 'commit', '-qam', 'b work');
+      await observe();
+      const a = await branchNamed('a');
+      const b = await branchNamed('b');
+      const real = published('branch.snapshot')
+        .map((record) => record.payload as BranchSnapshotPayload)
+        .filter((payload) => payload.branchRefId === a.id)
+        .at(-1)!;
+      // A tree the shadow never had, on a head that is not a's: both are what
+      // the run has to discover again.
+      await bus.publish({
+        ...real,
+        at: new Date().toISOString(),
+        treeOid: 'f'.repeat(40),
+        headSha: b.headSha,
+      });
+
+      const recaptured = await run();
+
+      // Merged against a's real base, where the conflict is.
+      expect(recaptured).toMatchObject({ kind: 'analysed', cached: false, clean: false });
+      if (recaptured.kind !== 'analysed') throw new Error('not analysed');
+      expect(recaptured.contentKey).toContain(real.treeOid);
+      await bus.publish({ ...real, at: new Date().toISOString() });
+      lastKey = null;
+      expect(await run()).toMatchObject({ kind: 'analysed', cached: true });
+    });
+
+    it('records a hit as a run of its own that names the run it reused', async () => {
+      const firstRun = await run();
+      await edit('a', '5');
+      await run();
+      await edit('a', '1');
+
+      const hit = await run();
+
+      if (firstRun.kind !== 'analysed' || hit.kind !== 'analysed') throw new Error('not analysed');
+      // Planning marked the pair stale; the hit describes it again.
+      const [pair] = await store.listMergePairs((await repo()).id);
+      expect(pair).toMatchObject({ stale: false });
+      expect(pair!.lastRunAt).not.toBeNull();
+      const stored = await store.getRun(hit.runId);
+      expect(stored).toMatchObject({
+        status: 'complete',
+        mergeOutcome: { clean: false, conflictedPaths: ['total.ts'] },
+      });
+      expect(stored!.analyzerResults).toMatchObject([
+        { analyzer: 'textual', verdict: 'findings', cached: true },
+      ]);
+      const analyzed = published('run.analyzer-completed').at(-1)!;
+      const started = published('run.started').at(-1)!;
+      expect(analyzed.payload).toMatchObject({ runId: hit.runId, cachedFrom: firstRun.runId });
+      expect(analyzed.causedBy).toBe(started.id);
+      expect(
+        published('run.merge-completed').map((e) => (e.payload as { runId: string }).runId),
+      ).not.toContain(hit.runId);
+      expect(endOf(hit.runId)).toMatchObject({ status: 'complete', findingCount: 1 });
+    });
+
+    it('raises a conflict again, from the hit, after it went away and came back', async () => {
+      await run();
+      const gone = await openFinding();
+      await edit('b', 'items.length');
+      await run();
+      expect(await store.listOpenFindings((await repo()).id)).toEqual([]);
+      await edit('b', '2');
+
+      const hit = await run();
+
+      // What a run would do: the resolved Finding stays resolved, and the
+      // conflict is raised afresh by this run, traced to its verdict.
+      expect(hit).toMatchObject({ kind: 'analysed', cached: true });
+      const raised = await openFinding();
+      expect(raised.id).not.toBe(gone.id);
+      expect(raised.firstSeenAt > gone.firstSeenAt).toBe(true);
+      expect((await store.getFinding(gone.id))?.status).toBe('resolved');
+      expect(raised.runId).toBe(hit.kind === 'analysed' && hit.runId);
+      const event = published('finding.raised').at(-1)!;
+      expect(event.payload).toMatchObject({ findingId: raised.id });
+      expect(event.causedBy).toBe(published('run.analyzer-completed').at(-1)!.id);
+    });
+
+    it('resolves the pair’s open Findings the verdict does not hold', async () => {
+      // Judged clean first, then a conflict, then back to clean from the cache.
+      // A file each in one directory keeps the pair planned throughout.
+      besideEachOther();
+      await edit('b', 'items.length');
+      await run();
+      await edit('b', '2');
+      await run();
+      expect(await store.listOpenFindings((await repo()).id)).toHaveLength(1);
+      await edit('b', 'items.length');
+
+      const hit = await run();
+
+      expect(hit).toMatchObject({ kind: 'analysed', cached: true, clean: true });
+      expect(await store.listOpenFindings((await repo()).id)).toEqual([]);
+      expect(published('finding.resolved').at(-1)!.causedBy).toBe(
+        published('run.analyzer-completed').at(-1)!.id,
+      );
+    });
+
+    it('carries a clean merge’s cleanliness through a hit, for escalation', async () => {
+      besideEachOther();
+      await edit('b', 'items.length');
+      await run();
+      await edit('a', '7');
+      await run();
+      await edit('a', '1');
+
+      expect(await run()).toMatchObject({ kind: 'analysed', cached: true, clean: true });
+    });
+
+    it('answers a restart from the store without capturing, committing or merging', async () => {
+      // Heads that differ, so the order planning asks for their merge base in
+      // is not the order the run does.
+      git(join(base, 'b'), 'commit', '-qam', 'b work');
+      await observe();
+      await run();
+      pipeline.detach();
+      // A new daemon: a fresh watcher announces every worktree, and a fresh
+      // pipeline knows nothing but what is stored.
+      sweep = createSweep({ store, bus, runner, dataDir: join(base, 'data'), shadows });
+      const { runner: watched, calls } = recording();
+      pipeline = build(watched);
+      await observe();
+      lastKey = null;
+
+      // Planned from the side whose id sorts last, so planning asks for the
+      // merge base with the heads the other way round from the run.
+      const [a, b] = [await branchNamed('a'), await branchNamed('b')];
+      const order = a.id > b.id ? (['a', 'b'] as const) : (['b', 'a'] as const);
+      const { result, git: asked } = await runAlone(pipeline, calls, order);
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: true });
+      // Planning already asked for the heads' merge base, so the one fact a
+      // fresh pipeline lacks is the git version its verdicts are keyed under.
+      expect(asked).toEqual([['version']]);
+    });
+
+    it('misses when the same trees sit on the other branches', async () => {
+      await run();
+      await edit('a', '2');
+      await edit('b', '1');
+      const { runner: watched, calls } = recording();
+      const using = build(watched);
+
+      const { result, git } = await runAlone(using, calls);
+      using.detach();
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: false });
+      expect(merges(git)).toBe(1);
+    });
+
+    it('misses under another git', async () => {
+      await run();
+      const { runner: newer, calls } = recording((args) =>
+        args[0] === 'version' ? { stdout: 'git version 9.9.9\n', stderr: '', exitCode: 0 } : null,
+      );
+      const using = build(newer);
+      lastKey = null;
+
+      const { result, git } = await runAlone(using, calls);
+      using.detach();
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: false });
+      expect(merges(git)).toBe(1);
+    });
+
+    it('misses once the analyzer’s logic has changed', async () => {
+      await run();
+      const analyzer = textualAnalyzer as { version: number };
+      analyzer.version += 1;
+      try {
+        lastKey = null;
+        expect(await run()).toMatchObject({ kind: 'analysed', cached: false });
+      } finally {
+        analyzer.version -= 1;
+      }
+    });
+
+    it('misses under another build of the code that merges and classifies', async () => {
+      await run();
+      const { runner: watched, calls } = recording();
+      const other = createRunPipeline({
+        store,
+        bus,
+        runner: watched,
+        shadows,
+        logger: silentLogger,
+        build: 'another build',
+      });
+      lastKey = null;
+
+      const { result, git: asked } = await runAlone(other, calls);
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: false });
+      expect(merges(asked)).toBe(1);
+    });
+
+    it('misses once the shadow is rebuilt, whose commits its evidence named', async () => {
+      await run();
+      const handle = { kind: 'user' as const, rootPath: root, gitDir: join(root, '.git') };
+      const before = await shadows.get(handle, (await repo()).id);
+      rmSync(before.rootPath, { recursive: true, force: true });
+      shadows.forget((await repo()).id);
+      await observe();
+      lastKey = null;
+
+      const result = await run();
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: false });
+      const rebuilt = await shadows.get(handle, (await repo()).id);
+      expect(rebuilt.generation).not.toBe(before.generation);
+      // Evidence from this clone, naming commits it holds.
+      const evidence = (await openFinding()).evidence.find((e) => e.type === 'merge-conflict');
+      if (evidence?.type !== 'merge-conflict') throw new Error('no merge evidence');
+      for (const commit of [evidence.commitA, evidence.commitB]) {
+        expect(git(rebuilt.rootPath, 'cat-file', '-t', commit).trim()).toBe('commit');
+      }
+    });
+
+    it('discards a hit whose pair moved while it was being recorded', async () => {
+      await run();
+      await edit('a', '5');
+      await run();
+      const elsewhere = await openFinding();
+      await edit('a', '1');
+      const moved = new AbortController();
+      const listening = bus.on('run.analyzer-completed', (event) => {
+        if (event.cachedFrom !== undefined) moved.abort();
+      });
+
+      const result = await run(moved.signal);
+      listening.unsubscribe();
+
+      expect(result).toEqual({ kind: 'superseded' });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'superseded' });
+      // Nothing written: the Finding still says what the last completed run found.
+      expect(await openFinding()).toEqual(elsewhere);
+    });
+
+    it('is not a duplicate at unchanged content once the shadow is rebuilt', async () => {
+      const first = await run();
+      const handle = { kind: 'user' as const, rootPath: root, gitDir: join(root, '.git') };
+      rmSync((await shadows.get(handle, (await repo()).id)).rootPath, {
+        recursive: true,
+        force: true,
+      });
+      shadows.forget((await repo()).id);
+      await observe();
+
+      // The scheduler still remembers the last analysis: nothing resets it.
+      const again = await run();
+
+      expect(first).toMatchObject({ kind: 'analysed' });
+      expect(again).toMatchObject({ kind: 'analysed', cached: false });
+    });
+
+    it('leaves a completed run complete when its verdict cannot be cached', async () => {
+      // A real failure of the write, and only of the write: the lookup before
+      // it still reads the table.
+      const db = new DatabaseSync(join(base, 'interlock.db'));
+      db.exec(`CREATE TRIGGER refuse_verdicts BEFORE INSERT ON analyzer_cache
+        BEGIN SELECT RAISE(ABORT, 'disk full'); END`);
+      db.close();
+
+      const result = await run();
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: false, findingCount: 1 });
+      if (result.kind !== 'analysed') throw new Error('not analysed');
+      expect(await store.getRun(result.runId)).toMatchObject({ status: 'complete' });
+      const ends = published('run.finished').filter(
+        (record) => (record.payload as { runId: string }).runId === result.runId,
+      );
+      expect(ends).toHaveLength(1);
+      expect(ends[0]!.payload).toMatchObject({ status: 'complete' });
+      expect(warnings.map((record) => record.msg)).toContain('could not cache a verdict');
+    });
+
+    it('keeps nothing from an analyzer that could not run', async () => {
+      const failing: GitRunner = {
+        run: (target, args, options) =>
+          args[0] === 'ls-tree' && args.includes('-l')
+            ? Promise.resolve({ stdout: '', stderr: '', exitCode: 128 })
+            : runner.run(target, args, options),
+      };
+      const other = build(failing);
+      expect(await run(new AbortController().signal, other)).toMatchObject({
+        kind: 'infra-failure',
+      });
+      other.detach();
+
+      expect(await run()).toMatchObject({ kind: 'analysed', cached: false });
+    });
+
+    it('keeps nothing from a run whose snapshot went stale', async () => {
+      const stale: GitRunner = {
+        run: (target, args, options) =>
+          args.includes('merge-tree')
+            ? Promise.reject(Object.assign(new Error('gone'), { code: 'SNAPSHOT_STALE' }))
+            : runner.run(target, args, options),
+      };
+      const staleRun = build(stale);
+      await expect(run(new AbortController().signal, staleRun)).rejects.toThrow();
+      staleRun.detach();
+
+      expect(await run()).toMatchObject({ kind: 'analysed', cached: false });
+    });
+
+    it('keeps nothing from a run superseded while it ran', async () => {
+      const aborted = new AbortController();
+      aborted.abort();
+      expect(await run(aborted.signal)).toMatchObject({ kind: 'superseded' });
+
+      expect(await run()).toMatchObject({ kind: 'analysed', cached: false });
+    });
+
+    it('records a hit superseded before it wrote anything as superseded', async () => {
+      await run();
+      await edit('a', '5');
+      await run();
+      await edit('a', '1');
+      const aborted = new AbortController();
+      aborted.abort();
+
+      expect(await run(aborted.signal)).toEqual({ kind: 'superseded' });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'superseded' });
     });
   });
 
@@ -822,6 +1290,9 @@ describe('run pipeline', () => {
       await run();
       const handle = { kind: 'user' as const, rootPath: root, gitDir: join(root, '.git') };
       const before = await shadows.get(handle, (await repo()).id);
+      // Content no run has judged, or its verdict would answer without a merge.
+      writeFileSync(join(base, 'b', 'total.ts'), body('3'));
+      await observe();
       // The merge fails, and the check that follows finds a commit missing.
       let merged = false;
       const stale: GitRunner = {

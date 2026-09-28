@@ -110,14 +110,46 @@ one tier for every 30 s waited. Aging decides the fairness question: a very
 active branch keeps re-queuing its own pairs at high priority, and without aging
 a pair it is not in could wait for ever.
 
-## 5. De-duplicate by content
+## 5. De-duplicate by content, then ask the verdict cache
 
-A run identifies both sides before merging: each side's tree — the watcher's
-own capture, committed on the head it was captured against — and the pair's
-merge base. That triple is the pair's content. A `SnapshotId` is minted per
-capture, so two captures of identical work have different ids and the same
-trees; ids would never match. If the pair was last analysed to completion at
-the same content, the run stops there: nothing is merged.
+A run identifies both sides before anything else: each side's tree — the
+watcher's own capture, or a committed head's tree — and the pair's merge base.
+That triple is the pair's content. A `SnapshotId` is minted per capture, so two
+captures of identical work have different ids and the same trees; ids would
+never match. Identification needs no git in steady state: the watcher's
+announcement names the tree and head, and a commit's tree and two heads' merge
+base never change, so both are remembered once asked.
+
+Two checks follow, cheapest first, and both on the same identity — the verdict
+key below. If the pair was last analysed to completion at that identity, the
+run stops there: nothing is recorded. The same content in a rebuilt clone is
+not the same identity, so it is merged again rather than left with evidence
+naming commits that went with the old clone. Otherwise the
+store's verdict cache is asked, keyed on the pair in its own order, both trees,
+the base, the shadow clone's generation, and the analyzer's fingerprint — its
+version, the git version, and a digest of the modules of `@interlock/core` and
+`@interlock/shared` — the merge and the classifier, and the redaction excerpts
+go through — so a build that changed any of them without bumping the version
+is still a miss. The digest is of whatever modules are loaded — `src` under
+a test runner, `dist` once built — so the two never share a verdict, and a
+number measured in one says nothing about hits in the other. The generation is
+there because a verdict keeps its run's
+evidence, which names commits made in that clone; a rebuilt clone has none of
+them. The in-memory check only remembers each pair's last content; the cache
+remembers every content judged, which is what catches an agent reverting and
+re-applying a change, and it survives a restart.
+
+A hit is a run of its own — recorded, with its events — that captures,
+commits, merges and analyzes nothing. The verdict keeps the analyzer's output,
+not Finding ids: reconciliation keeps one Finding per conflict and rewrites its
+evidence on every run, so an id would describe whatever content was checked
+last. The hit reconciles that output exactly as a run would, so it persists
+what a run would. The merge outcome, which escalation needs, comes from the run
+that reached the verdict; `cachedFrom` on the analyzer's event names that run.
+
+A verdict about the environment — `infra-failure`, `timeout` — is never cached,
+and neither is a superseded run or one that threw. A hit checks for supersession
+at the same point a run does, just before it writes Findings.
 
 ## 6. Run
 
@@ -166,24 +198,25 @@ throws is a bug: logged, not retried, and run again when a branch next moves.
 
 ## Restart is re-verification, and that is deliberate
 
-Nothing the scheduler or the watcher knows survives a restart: the watcher's
-record of what it last announced, and the scheduler's record of what each pair
-was last analysed at, are both in memory. So on start the watcher hashes and
-announces every worktree — clean ones too — every branch settles, and every
-pair with a reason to be merged is merged again. That is how Findings left
-open by the previous run are re-checked against what is on disk now.
+The watcher's record of what it last announced, and the scheduler's record of
+what each pair was last analysed at, are both in memory. So on start the
+watcher hashes and announces every worktree — clean ones too — every branch
+settles, and every pair with a reason to be merged is run again. That is how
+Findings left open by the previous run are re-checked against what is on disk
+now.
 
-It is load-bearing. Persisting either record — the verdict cache will persist
-the second — without adding an explicit re-plan at start would silently stop
-Findings from being re-verified after a restart; whoever persists one owes the
-other.
+The verdict cache is persisted and does not change that. Every pair is still
+run after a restart, because the scheduler's record is still empty; what the
+cache changes is the cost. A pair whose content is what it was is answered from
+its verdict — re-verified by content identity under the same analyzer and git —
+and its open Findings reconciled against it; a pair whose content moved is
+merged. Persisting the scheduler's record as well would stop that re-check, and
+would need an explicit re-plan at start to replace it.
 
 ## Not yet
 
 - Symbol overlap and import edges, which need the AST layer.
 - A boost for pairs driven by live agent sessions.
-- The verdict cache: content identity is used here for de-duplication in memory;
-  persisting it is the next task.
 - Cancellation below the scheduler.
 
 ## Budgets

@@ -30,6 +30,14 @@ export interface Analyzer {
   readonly kind: AnalyzerKind;
   /** Stable rule prefix used in Finding ids and evaluation reports. */
   readonly name: string;
+  /**
+   * Bumped whenever a change to this analyzer's logic could change a verdict.
+   *
+   * Verdicts are cached on the content they judged, and content never goes
+   * stale — so a fixed bug would keep being served from the cache for every
+   * pair already judged, until the version it is keyed under changes.
+   */
+  readonly version: number;
 
   /**
    * Cheap pre-check: can this analyzer produce anything useful for this run?

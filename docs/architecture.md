@@ -94,5 +94,5 @@ Every step publishes an event with a `causedBy` pointer, so a Finding can be wal
 
 - Models are JSON-serializable and identical across SQLite rows, HTTP responses and MCP payloads.
 - The event log is append-only; there is no update or delete path for events.
-- Analyzer results are cached on `(snapshotA, snapshotB, analyzer, toolchain fingerprint)`; a lockfile change invalidates the cache.
+- Analyzer verdicts are cached on the content they judged: the pair in its own order, each side's tree, the merge base, the shadow clone it was merged in, and the analyzer's fingerprint — its own version, the version of every tool it ran through, and the build of the code that merged, classified and redacted. Any change to content, a lockfile included, is another key, and a changed analyzer or toolchain is a miss. Verdicts that describe the environment rather than the content — an infrastructure failure, a timeout — are never cached.
 - Infra failures (`SANDBOX_UNAVAILABLE`, `TOOLCHAIN_UNSUPPORTED`) are never findings.

@@ -162,6 +162,7 @@ describe('scheduler', () => {
           runId: ulid<SpeculativeRunId>(),
           contentKey,
           clean,
+          cached: false,
           findingCount: clean ? 0 : 1,
           finished: ulid<EventId>(),
         }

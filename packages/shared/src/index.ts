@@ -12,6 +12,7 @@ export * from './errors.js';
 export * from './glob.js';
 export * from './ids.js';
 export * from './logger.js';
+export * from './module-dir.js';
 
 /** Wire-format version for the daemon API, MCP payloads and the event log. */
 export const INTERLOCK_PROTOCOL_VERSION = 1;

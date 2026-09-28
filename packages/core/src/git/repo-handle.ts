@@ -28,6 +28,12 @@ export interface ShadowRepo {
   readonly gitDir: string;
   /** The user repo this shadow mirrors. */
   readonly originPath: string;
+  /**
+   * Which clone this is: new every time the shadow is created, so anything
+   * naming commits made in it — a Finding's evidence, a cached verdict — can
+   * tell a rebuilt clone, which has none of them, from the one it knew.
+   */
+  readonly generation: string;
 }
 
 export type AnyRepo = UserRepo | ShadowRepo;
@@ -835,6 +841,42 @@ export async function runRequired(
     });
   }
   return result;
+}
+
+/** Each runner's git version, asked once. */
+const versions = new WeakMap<GitRunner, Promise<string>>();
+
+/**
+ * The version of the git a runner invokes, as git reports it — `2.55.0`.
+ *
+ * Part of what a cached verdict is keyed under, since `merge-tree`'s output has
+ * changed between releases. Asked once per runner and kept for the runner's
+ * life: a git upgraded under a running daemon is noticed at the next start.
+ * A failed ask is not kept, so the next caller asks again.
+ *
+ * Remembered per runner, not per shadow: the runner is what names a git
+ * binary, and every shadow it runs against gets the same answer. The shadow is
+ * only where the question is asked, because `version` is on no read-only list,
+ * and a verb nothing needs against a user repository stays off it.
+ */
+export function gitVersion(runner: GitRunner, shadow: ShadowRepo): Promise<string> {
+  const known = versions.get(runner);
+  if (known !== undefined) return known;
+  const asking = runRequired(runner, shadow, ['version']).then((result) => {
+    const match = /^git version (\S+)/u.exec(result.stdout);
+    if (match === null) {
+      throw new InterlockError('TOOLCHAIN_UNSUPPORTED', 'git did not report its version', {
+        remedy: 'Report the git in use; its `git version` output differs from the documented form.',
+        infra: true,
+      });
+    }
+    return match[1]!;
+  });
+  versions.set(runner, asking);
+  asking.catch(() => {
+    if (versions.get(runner) === asking) versions.delete(runner);
+  });
+  return asking;
 }
 
 /** Object ids as git writes them: SHA-1 or SHA-256 length, and nothing between. */

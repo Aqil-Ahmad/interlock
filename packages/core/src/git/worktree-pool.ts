@@ -255,6 +255,7 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
     rootPath: join(canonicalPool, name),
     gitDir: join(adminRoot, name),
     originPath: shadow.originPath,
+    generation: shadow.generation,
   });
 
   /**

@@ -7,11 +7,13 @@ import type {
   BranchRefId,
   DirtyState,
   Evidence,
+  Finding,
   FindingId,
   MergePair,
   MergePairId,
   InterlockError,
   RepoId,
+  SpeculativeRunId,
 } from '@interlock/shared';
 import { makePairKey } from '@interlock/shared';
 import {
@@ -26,7 +28,7 @@ import {
   oneOf,
   text,
   textOrNull,
-  toAnalyzerResult,
+  toCachedVerdict,
   toBranchRef,
   toMergePair,
 } from './rows.js';
@@ -183,12 +185,88 @@ describe('analyzer cache', () => {
   };
 
   it('answers `cached` rather than storing it', () => {
-    const params = analyzerCacheParams('k', result, '2026-01-01T00:00:00.000Z');
+    const params = analyzerCacheParams(
+      'k',
+      { result, runId: ulid<SpeculativeRunId>(), findings: [] },
+      '2026-01-01T00:00:00.000Z',
+    );
 
     expect(params).not.toHaveProperty('cached');
     // A result that reached this table was cached by the act of reading it, so
     // storing the flag would only record how some earlier caller got it.
-    expect(toAnalyzerResult({ ...params }).cached).toBe(true);
+    expect(toCachedVerdict({ ...params }).result.cached).toBe(true);
+  });
+
+  describe('the Findings a hit writes back', () => {
+    const [a, b] = [ulid<BranchRefId>(), ulid<BranchRefId>()];
+    const valid: Finding = {
+      id: ulid<FindingId>(),
+      runId: ulid<SpeculativeRunId>(),
+      kind: 'textual',
+      rule: 'overlapping-edit',
+      severity: 'high',
+      confidence: 1,
+      status: 'open',
+      title: 'Both branches edited total.ts',
+      description: 'total.ts',
+      attribution: { branchA: a, branchB: b, originBranch: null, rationale: 'both' },
+      evidence: [
+        { type: 'span', branchRefId: a, path: 'total.ts', startLine: 1, endLine: 2, excerpt: 'x' },
+      ],
+      firstSeenAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      resolvedAt: null,
+    };
+    const rowWith = (findings: unknown) => ({
+      ...analyzerCacheParams(
+        'k',
+        { result, runId: ulid<SpeculativeRunId>(), findings: [] },
+        '2026-01-01T00:00:00.000Z',
+      ),
+      findings: JSON.stringify(findings),
+    });
+
+    it('reads back what was written', () => {
+      expect(toCachedVerdict(rowWith([valid])).findings).toEqual([valid]);
+    });
+
+    // One field wrong at a time, each of which would otherwise be written into
+    // the findings table and fail every later read of the repository's.
+    it.each([
+      ['not a list', valid],
+      ['an item that is not an object', ['finding']],
+      ['an item that is null', [null]],
+      ['a missing id', [{ ...valid, id: undefined }]],
+      ['an unknown kind', [{ ...valid, kind: 'guess' }]],
+      ['an unknown severity', [{ ...valid, severity: 'bogus' }]],
+      ['an unknown status', [{ ...valid, status: 'maybe' }]],
+      ['a confidence that is not a number', [{ ...valid, confidence: '1' }]],
+      ['a resolvedAt that is neither text nor null', [{ ...valid, resolvedAt: 0 }]],
+      ['no attribution', [{ ...valid, attribution: null }]],
+      [
+        'an attribution with no first branch',
+        [{ ...valid, attribution: { ...valid.attribution, branchA: null } }],
+      ],
+      [
+        'an attribution missing a branch',
+        [{ ...valid, attribution: { ...valid.attribution, branchB: 1 } }],
+      ],
+      [
+        'an attribution without its rationale',
+        [{ ...valid, attribution: { ...valid.attribution, rationale: null } }],
+      ],
+      [
+        'an origin that is neither text nor null',
+        [{ ...valid, attribution: { ...valid.attribution, originBranch: 7 } }],
+      ],
+      ['evidence that is not a list', [{ ...valid, evidence: {} }]],
+      ['evidence with no type', [{ ...valid, evidence: [{ path: 'total.ts' }] }]],
+      ['evidence that is not an object', [{ ...valid, evidence: [null] }]],
+    ] as const)('refuses %s', (_, findings) => {
+      const error = refusal(() => toCachedVerdict(rowWith(findings)));
+      expect(error.code).toBe('STORE_UNAVAILABLE');
+      expect(error.details).toMatchObject({ column: 'findings' });
+    });
   });
 });
 

@@ -34,6 +34,7 @@ describe('merged migrations do not change', () => {
   const DIGESTS: Record<number, string> = {
     1: '5ac880112af05020',
     2: '8e093305cdab6bbf',
+    3: '1000d99ead1b0a42',
   };
 
   it('has a recorded digest for every migration, and every digest matches', () => {
