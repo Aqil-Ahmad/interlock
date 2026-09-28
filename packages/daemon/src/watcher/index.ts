@@ -119,6 +119,13 @@ export function createWatcher(options: WatcherOptions): Watcher {
   };
 
   const onSignal = (signal: ChangeSignal): void => {
+    // The one trace that tells a change the platform never reported from one
+    // the pipeline dropped after hearing it.
+    log.debug('signal', {
+      kind: signal.kind,
+      worktreePath: signal.worktreePath,
+      paths: signal.paths.length,
+    });
     // The mark is what makes the hash worth doing on the next pass; a pass with
     // nothing marked reconciles refs and leaves every worktree alone.
     sweep.markChanged(signal.worktreePath);

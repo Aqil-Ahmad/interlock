@@ -3,9 +3,9 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from '
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveConfig, silentLogger, tokenPath } from '@interlock/shared';
-import type { EventRecord, Finding, SpanEvidence } from '@interlock/shared';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createLogger, resolveConfig, tokenPath } from '@interlock/shared';
+import type { EventRecord, Finding, LogRecord, SpanEvidence } from '@interlock/shared';
+import { afterEach, beforeEach, describe, expect, it, onTestFailed } from 'vitest';
 import { createDaemon } from '../src/daemon.js';
 import type { Daemon } from '../src/daemon.js';
 import { openStore } from '../src/store/index.js';
@@ -24,6 +24,12 @@ describe('two live sessions editing the same function', () => {
   let dataDir: string;
   let root: string;
   let daemon: Daemon;
+  /**
+   * Everything the daemon logged, printed only if the test fails: a timeout
+   * with no trail cannot say whether an edit's event never arrived or arrived
+   * and was lost further on.
+   */
+  let logs: LogRecord[];
 
   const git = (cwd: string, ...args: string[]): string =>
     execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe', encoding: 'utf8' });
@@ -89,9 +95,10 @@ describe('two live sessions editing the same function', () => {
     git(root, 'worktree', 'add', '-q', '-b', 'agent-a', join(base, 'a'));
     git(root, 'worktree', 'add', '-q', '-b', 'agent-b', join(base, 'b'));
 
+    logs = [];
     daemon = createDaemon({
       config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
-      logger: silentLogger,
+      logger: createLogger('daemon', { level: 'debug', sink: (record) => logs.push(record) }),
     });
   });
 
@@ -101,6 +108,11 @@ describe('two live sessions editing the same function', () => {
   });
 
   it('raises a textual Finding within 60 seconds, traceable to the edit', async () => {
+    onTestFailed(() => {
+      process.stderr.write(
+        `daemon log:\n${logs.map((record) => JSON.stringify(record)).join('\n')}\n`,
+      );
+    });
     await daemon.start();
     for (const [name, cwd] of [
       ['agent-a', join(base, 'a')],
