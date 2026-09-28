@@ -310,7 +310,7 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Done when:** throwaway pool commits and spent snapshot commits are collected, and the shadow's size stays bounded across a day of continuous checks.
       **Constraints:** a live slot's `HEAD` and index are already roots for git's own `prune` — verified, a worktree's `HEAD` is walked — but a snapshot commit a queued check still needs is referenced by nothing and must be made a root before anything collects. So is every commit a Finding's evidence names: a `merge-conflict` evidence carries `commitA` and `commitB`, the snapshot commits its run made, and a cache hit re-serves the evidence of the run that reached the verdict, so an open Finding can name commits days old. Collecting them leaves the evidence naming objects that are gone. Either the commits named by open Findings and by cached verdicts are roots, or a verdict whose commits are collected is dropped with them. A rebuilt clone is already covered: its generation is part of every verdict's key, so a rebuild misses rather than serving evidence from the clone before it. Never collect the user's store: the shadow borrows it through alternates.
 
-- [ ] **Retention**
+- [x] **Retention**
       **Files:** `packages/daemon/src/daemon.ts`, `packages/daemon/src/store/`, `packages/shared/src/config.ts`, `docs/threat-model.md`
       **What:** have the daemon enforce a retention window on its database, on start and on a timer, so continuous agent edits leave the store bounded — the database half of the disk bound the shadow's collection is the other half of.
 
