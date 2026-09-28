@@ -4,6 +4,14 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-28 — third review of the verdict cache: one taken, two stale
+
+- **Taken — a cached verdict's Findings were read back unchecked.** `rows.ts` trusts JSON columns by design, but a hit writes these back as live Findings, and the stakes were higher than the review put them: a bad enum passes the STRICT schema, lands in `findings`, and then fails every `listOpenFindings` for the repository, so one corrupt cache row would take down the repository's whole Finding list. They are now checked on read as a `findings` row is — the same fields, enums and nullability, and each evidence entry's type — and refused as `STORE_UNAVAILABLE`, the answer every other reader gives. The module comment names the exception.
+- **Stale — "verdicts of deleted branches are collected only by retention".** Deleting a branch cascades `branch_refs` → `merge_pairs` → `speculative_runs` → `analyzer_cache` through the new `run_id`, so they go the moment the branch does. Pinned with a store test; the Retention task needs nothing extra for it.
+- **Stale — "the `trees` and `bases` maps are unbounded".** Both go through `remember()`, the same 1,024-entry cap as the commit cache.
+- **Noted, not changed:** the supersession window during reconciliation, which the full run has at the same place; `cachedFrom` on the event beside `cached` on the result, which answer different readers. Two comments added: `gitVersion` is remembered per runner rather than per shadow, and the build digest of `src` under a test runner never matches `dist`, so the two never share a verdict.
+- **Mutation: 19, 18 caught.** Two first-run survivors were gaps — no null item, no bad first branch — now pinned. The third was a string check `includes` already makes, removed; so was `Number.isFinite`, which nothing parsed from JSON can fail.
+
 ## 2026-09-28 — second review of the verdict cache: three taken
 
 - **Taken — the build digest left out `@interlock/shared`, where redaction lives.** The classifier's excerpts go through shared's `redact()`, and a hit re-serves the cached excerpts, so a secret pattern added there would have kept serving excerpts redacted under the old patterns, as fresh Findings, to agents. The digest now covers both packages' modules, each in its place; shared says where its own modules load from, since nothing else can without a sibling import. Tested that shared's logger is inside the digest, and that a change in either directory changes it.
