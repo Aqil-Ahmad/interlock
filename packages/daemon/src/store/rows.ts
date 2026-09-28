@@ -52,7 +52,10 @@ import type {
  *
  * JSON columns are parsed and trusted. Validating each would be a schema
  * library, and the shapes they hold are the models this process wrote — the
- * check that matters is that the text still parses at all.
+ * check that matters is that the text still parses at all. The one exception
+ * is a cached verdict's Findings, which a hit writes back as live Findings:
+ * those are checked as a `findings` row is, since one malformed there would be
+ * written into that table and fail every later read of the repository's.
  */
 
 export type Row = Record<string, unknown>;
@@ -439,8 +442,53 @@ export function toCachedVerdict(row: Row): CachedVerdict {
       diagnostic: textOrNull(row, 'diagnostic'),
     },
     runId: text(row, 'run_id') as SpeculativeRunId,
-    findings: json<Finding[]>(row, 'findings'),
+    findings: cachedFindings(json<unknown>(row, 'findings')),
   };
+}
+
+/**
+ * A cached verdict's Findings, checked field by field as {@link toFinding}
+ * checks a row, and evidence as far as its discriminator. Anything else is the
+ * store being corrupt, which is how every other reader here answers it.
+ */
+function cachedFindings(value: unknown): Finding[] {
+  const expected = 'a list of Findings';
+  if (!Array.isArray(value)) throw corrupt('findings', expected);
+  return value.map((item: unknown): Finding => {
+    if (!isRecord(item) || !isRecord(item.attribution) || !Array.isArray(item.evidence)) {
+      throw corrupt('findings', expected);
+    }
+    const { attribution, evidence } = item;
+    const valid =
+      ['id', 'runId', 'rule', 'title', 'description', 'firstSeenAt', 'updatedAt'].every(
+        (field) => typeof item[field] === 'string',
+      ) &&
+      isStringOrNull(item.resolvedAt) &&
+      isOneOf(item.kind, ANALYZER_KINDS) &&
+      isOneOf(item.severity, SEVERITIES) &&
+      isOneOf(item.status, FINDING_STATUSES) &&
+      typeof item.confidence === 'number' &&
+      Number.isFinite(item.confidence) &&
+      typeof attribution.branchA === 'string' &&
+      typeof attribution.branchB === 'string' &&
+      typeof attribution.rationale === 'string' &&
+      isStringOrNull(attribution.originBranch) &&
+      evidence.every((entry: unknown) => isRecord(entry) && typeof entry.type === 'string');
+    if (!valid) throw corrupt('findings', expected);
+    return item as unknown as Finding;
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStringOrNull(value: unknown): boolean {
+  return value === null || typeof value === 'string';
+}
+
+function isOneOf(value: unknown, allowed: readonly string[]): boolean {
+  return typeof value === 'string' && allowed.includes(value);
 }
 
 export function analyzerCacheParams(

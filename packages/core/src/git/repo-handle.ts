@@ -854,8 +854,10 @@ const versions = new WeakMap<GitRunner, Promise<string>>();
  * life: a git upgraded under a running daemon is noticed at the next start.
  * A failed ask is not kept, so the next caller asks again.
  *
- * Takes the shadow because `version` is on no read-only list, and a verb
- * nothing needs against a user repository stays off it.
+ * Remembered per runner, not per shadow: the runner is what names a git
+ * binary, and every shadow it runs against gets the same answer. The shadow is
+ * only where the question is asked, because `version` is on no read-only list,
+ * and a verb nothing needs against a user repository stays off it.
  */
 export function gitVersion(runner: GitRunner, shadow: ShadowRepo): Promise<string> {
   const known = versions.get(runner);

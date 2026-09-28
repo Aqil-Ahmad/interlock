@@ -822,6 +822,14 @@ describe('store', () => {
       expect(await store.getCachedVerdict('k')).toBeNull();
     });
 
+    it('goes with a branch that is deleted, through its pairs and their runs', async () => {
+      await store.putCachedVerdict('k', { result, runId, findings: [raised] });
+
+      await store.deleteBranchRef(raised.attribution.branchA);
+
+      expect(await store.getCachedVerdict('k')).toBeNull();
+    });
+
     it('refuses a verdict naming a run that does not exist', async () => {
       await expect(
         store.putCachedVerdict('k', { result, runId: ulid<SpeculativeRunId>(), findings: [] }),

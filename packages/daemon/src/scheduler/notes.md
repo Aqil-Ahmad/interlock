@@ -130,7 +130,10 @@ the base, the shadow clone's generation, and the analyzer's fingerprint — its
 version, the git version, and a digest of the modules of `@interlock/core` and
 `@interlock/shared` — the merge and the classifier, and the redaction excerpts
 go through — so a build that changed any of them without bumping the version
-is still a miss. The generation is there because a verdict keeps its run's
+is still a miss. The digest is of whatever modules are loaded — `src` under
+a test runner, `dist` once built — so the two never share a verdict, and a
+number measured in one says nothing about hits in the other. The generation is
+there because a verdict keeps its run's
 evidence, which names commits made in that clone; a rebuilt clone has none of
 them. The in-memory check only remembers each pair's last content; the cache
 remembers every content judged, which is what catches an agent reverting and
