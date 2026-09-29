@@ -230,6 +230,40 @@ the classifier keys on it:
   symlink against a delete is `modify/delete` too — check the mode and the
   content before reading lines out of either side.
 
+## Collecting the shadow
+
+Everything Interlock writes into a shadow — capture blobs and trees, snapshot
+commits, merge trees, pool commits — is loose and nearly all of it
+unreferenced. `collectShadow` reclaims it with `git prune`, never `gc`: prune
+deletes only the shadow's own loose, unreachable objects older than the expiry,
+and reads the user's objects through alternates without touching them. `gc`
+repacks, and runs the maintenance the shadow switches off.
+
+- Pass the expiry as `--expire=@<epoch seconds>`. An ISO string ending in `Z`
+  was parsed as some other date and pruned nothing, with no error.
+- Roots are the shadow's refs and each pool slot's `HEAD` and index. A
+  snapshot commit or a capture's tree has no ref, so what must survive however
+  old gets one under `refs/interlock/keep/`, rewritten whole each pass. A keep
+  ref can name a tree.
+- An unreachable object younger than the expiry keeps what it reaches, so a
+  fresh commit keeps its old tree. git also freshens the mtime of an object it
+  is asked to write again, and prune checks each object's mtime just before
+  unlinking it — which is still a race with a writer, so collection holds the
+  repository's gate exclusively.
+- **One ref naming a missing object fails the whole prune** (exit 128). The
+  user's `gc` can remove a commit a stale `refs/remotes/user/*` ref still
+  names, or the parent of a kept snapshot commit. Refresh with `ensureShadow`
+  first, since its fetch runs with `--prune`, and check each keep candidate with
+  `rev-list --objects --quiet <oid> --not --remotes=user`: it fails on the
+  first missing commit or tree, and walks only what Interlock wrote on top of
+  the user's history.
+- `for-each-ref` still lists a ref whose object is gone, and
+  `update-ref -d --no-deref` deletes it. `update-ref` refuses to create a ref to
+  an object that does not exist.
+- In a test, age objects with `utimes` on the loose files rather than waiting,
+  and keep expiries at least an hour back. Prune compares whole seconds, so an
+  expiry of "now" takes an object written a moment later in the same second.
+
 ## Conflicts are results, not errors
 
 A conflicted merge is a successful analysis with a finding. Throw only when the

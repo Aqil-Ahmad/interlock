@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { InterlockError, ulid } from '@interlock/shared';
 import type { RepoId } from '@interlock/shared';
 import { repositoryDirHolding, repositoryDirsOf } from './repo-dirs.js';
-import { runRequired } from './repo-handle.js';
+import { assertObjectId, runRequired } from './repo-handle.js';
 import type { GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
 
 /**
@@ -295,6 +295,172 @@ async function isUsableShadow(
   if (bare !== 'true' || objectFormat !== source.objectFormat) return false;
 
   return alternatesOf(shadow.rootPath) === source.objectsDir;
+}
+
+/**
+ * Where the refs that keep objects from collection live.
+ *
+ * Their own namespace, rewritten whole on every collection: nothing else in the
+ * shadow names a snapshot commit or a capture's tree, so these are the only
+ * roots such an object has.
+ */
+export const KEEP_REFS_PREFIX = 'refs/interlock/keep/';
+
+/**
+ * How long a collection may run before the runner stops it.
+ *
+ * `prune` walks everything reachable, and the shadow reaches the user's whole
+ * history through `refs/remotes/user/*`: seconds on a large repository, where
+ * the runner's default is sized for one ordinary command.
+ */
+const COLLECT_TIMEOUT_MS = 10 * 60_000;
+
+export interface CollectOptions {
+  readonly runner: GitRunner;
+  /** Unreachable objects last written before this go; anything younger stays. */
+  readonly expireBefore: Date;
+  /**
+   * Objects kept however old — commits or trees — with everything they reach.
+   * Each is checked first, and one whose history cannot be walked is left out.
+   */
+  readonly keep: readonly string[];
+}
+
+export interface CollectReport {
+  /** Keep refs in place once the pass had rewritten them. */
+  readonly kept: number;
+  /**
+   * Candidates left unkept: missing, or reaching an object that is missing —
+   * a snapshot commit whose parent the user's `gc` removed. One such ref would
+   * stop `prune` walking at all.
+   */
+  readonly unkeepable: readonly string[];
+  readonly removed: number;
+  readonly looseBefore: number;
+  readonly looseAfter: number;
+  readonly kibBefore: number;
+  readonly kibAfter: number;
+  readonly durationMs: number;
+}
+
+/**
+ * Collect the objects Interlock wrote into a shadow and no longer needs.
+ *
+ * `git prune`, never `git gc`: it deletes the shadow's own loose, unreachable
+ * objects older than the expiry, and only those. The user's objects, borrowed
+ * through alternates, are read to decide reachability and never touched; `gc`
+ * would repack and run the maintenance the shadow switches off. Roots are the
+ * shadow's refs — the user's branches, the keep refs rewritten here — and each
+ * pool slot's `HEAD` and index.
+ *
+ * Refresh the shadow first: a ref naming an object the user's `gc` has since
+ * removed stops `prune` walking, and a refresh is what drops such a ref.
+ */
+export async function collectShadow(
+  shadow: ShadowRepo,
+  options: CollectOptions,
+): Promise<CollectReport> {
+  const { runner, keep } = options;
+  const expire = options.expireBefore.getTime();
+  if (!Number.isFinite(expire)) {
+    throw new InterlockError('CONFIG_INVALID', 'The collection expiry is not a date', {
+      remedy: 'Pass a valid Date.',
+    });
+  }
+  for (const oid of keep) assertObjectId(oid, 'keep');
+  const startedAt = Date.now();
+  const before = await looseObjects(shadow, runner);
+
+  const kept: string[] = [];
+  const unkeepable: string[] = [];
+  for (const oid of new Set(keep)) {
+    if (await walkable(shadow, runner, oid)) kept.push(oid);
+    else unkeepable.push(oid);
+  }
+  await rewriteKeepRefs(shadow, runner, kept);
+
+  const pruned = await runRequired(
+    runner,
+    shadow,
+    // Whole seconds since the epoch: exact, where git's date parser reads an
+    // ISO string with a `Z` as some other date and prunes nothing.
+    ['prune', '--verbose', `--expire=@${String(Math.floor(expire / 1000))}`],
+    { timeoutMs: COLLECT_TIMEOUT_MS },
+  );
+  const removed = pruned.stdout
+    .split('\n')
+    .filter((line) => /^[0-9a-f]{40,64} (?:blob|tree|commit|tag)$/u.test(line)).length;
+  const after = await looseObjects(shadow, runner);
+
+  return {
+    kept: kept.length,
+    unkeepable,
+    removed,
+    looseBefore: before.count,
+    looseAfter: after.count,
+    kibBefore: before.kib,
+    kibAfter: after.kib,
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+/**
+ * Whether everything an object reaches can be read.
+ *
+ * Scoped to stop at the user's branches, whose history is theirs to keep whole:
+ * what is walked is what Interlock wrote on top of it — a snapshot commit, its
+ * tree, and a parent the user may have rewritten away. Quiet, so a candidate
+ * reaching a long stretch of history the user deleted costs a walk and no
+ * output to buffer: the first missing object fails it.
+ */
+async function walkable(shadow: ShadowRepo, runner: GitRunner, oid: string): Promise<boolean> {
+  const walk = await runner.run(shadow, [
+    'rev-list',
+    '--objects',
+    '--quiet',
+    oid,
+    '--not',
+    '--remotes=user',
+  ]);
+  return walk.exitCode === 0;
+}
+
+/** Make the keep refs exactly `oids`, one ref each, named by the object. */
+async function rewriteKeepRefs(
+  shadow: ShadowRepo,
+  runner: GitRunner,
+  oids: readonly string[],
+): Promise<void> {
+  const listed = await runRequired(runner, shadow, [
+    'for-each-ref',
+    '--format=%(refname)',
+    KEEP_REFS_PREFIX,
+  ]);
+  const present = new Set(listed.stdout.split('\n').filter((line) => line !== ''));
+  const wanted = new Set(oids.map((oid) => `${KEEP_REFS_PREFIX}${oid}`));
+  for (const ref of present) {
+    // A ref this pass does not want may name an object that is gone, which is
+    // the very ref that would stop `prune`; `--no-deref` deletes it unread.
+    if (!wanted.has(ref))
+      await runRequired(runner, shadow, ['update-ref', '-d', '--no-deref', ref]);
+  }
+  for (const oid of oids) {
+    const ref = `${KEEP_REFS_PREFIX}${oid}`;
+    if (!present.has(ref)) await runRequired(runner, shadow, ['update-ref', ref, oid]);
+  }
+}
+
+/** The shadow's loose objects, by count and by size in KiB, as `count-objects` reports them. */
+async function looseObjects(
+  shadow: ShadowRepo,
+  runner: GitRunner,
+): Promise<{ count: number; kib: number }> {
+  const counted = await runRequired(runner, shadow, ['count-objects', '-v']);
+  const field = (name: string): number => {
+    const match = new RegExp(`^${name}: (\\d+)$`, 'mu').exec(counted.stdout);
+    return match === null ? 0 : Number(match[1]);
+  };
+  return { count: field('count'), kib: field('size') };
 }
 
 /** The object store a shadow borrows, as its alternates file names it, or null. */

@@ -28,7 +28,7 @@ import {
   speculativeMerge,
 } from '../src/index.js';
 import type { GitRunner, UserRepo } from '../src/index.js';
-import { ensureShadow } from '../src/git/shadow.js';
+import { collectShadow, ensureShadow } from '../src/git/shadow.js';
 import { createWorktreePool } from '../src/git/worktree-pool.js';
 import { captureState, describeDiff, diffState, isClean } from './support/repo-state.js';
 import type { RepoState } from './support/repo-state.js';
@@ -107,6 +107,7 @@ describe('user repositories are never modified', () => {
     let excused = 0;
     let findings = 0;
     let pooled = 0;
+    const kept: string[] = [];
 
     for (const branch of branches) {
       let snapshot: { id: SnapshotId; treeOid: string } | undefined;
@@ -133,6 +134,7 @@ describe('user repositories are never modified', () => {
         });
         expect(intoShadow.treeOid).toBe(whole.treeOid);
         snapshotCommit = (await commitSnapshotInShadow(shadow, intoShadow, { runner })).commitSha;
+        kept.push(snapshotCommit);
 
         snapshot = { id: ulid<SnapshotId>(), treeOid: whole.treeOid };
       }
@@ -212,6 +214,17 @@ describe('user repositories are never modified', () => {
 
       diffed += 1;
     }
+
+    // Collection last, with an expiry in the future so every unreachable object
+    // the shadow holds is old enough: the widest `prune` there can be, walking
+    // the user's history through alternates while this repository is hashed.
+    await ensureShadow(handle, { runner, dataDir, repoId: repo.id });
+    const collected = await collectShadow(shadow, {
+      runner,
+      expireBefore: new Date(Date.now() + 60 * 60_000),
+      keep: kept,
+    });
+    expect(collected.unkeepable).toEqual([]);
 
     return { diffed, excused, findings, pooled };
   };
