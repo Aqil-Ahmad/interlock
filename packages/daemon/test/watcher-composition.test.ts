@@ -294,6 +294,28 @@ describe('watcher composition', () => {
       expect(passes).toBe(1);
     });
 
+    it('refuses such a debounce whatever interval it is given', () => {
+      let refusal: unknown;
+      try {
+        createWatcher({
+          config: resolveConfig({
+            dataDir: join(base, 'data'),
+            repos: [root],
+            scheduler: { debounceMs: 60_000 },
+          }),
+          store,
+          bus,
+          runner: createGitRunner(),
+          logger: createLogger('test', { level: 'error', sink: () => undefined }),
+          // A cadence of its own does not make the scheduler settle any sooner.
+          sweepIntervalMs: 200,
+        });
+      } catch (error) {
+        refusal = error;
+      }
+      expect(isInterlockError(refusal) && refusal.code).toBe('CONFIG_INVALID');
+    });
+
     it('refuses a debounce the budget cannot carry, before watching anything', () => {
       let refusal: unknown;
       try {

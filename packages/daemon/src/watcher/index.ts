@@ -66,9 +66,11 @@ export function createWatcher(options: WatcherOptions): Watcher {
   const { config, store, bus, runner } = options;
   // Every pass probes each worktree, so an edit the platform never reported is
   // found by the next one; the interval is whatever the budget leaves once the
-  // scheduler's settle ceiling and the run are paid for.
-  const intervalMs =
-    options.sweepIntervalMs ?? fallbackSweepIntervalMs(config.scheduler.debounceMs);
+  // scheduler's settle ceiling and the run are paid for. Derived even when an
+  // interval is given: that is also the check that the debounce leaves the
+  // budget any room, and a test choosing its own cadence must not skip it.
+  const derivedMs = fallbackSweepIntervalMs(config.scheduler.debounceMs);
+  const intervalMs = options.sweepIntervalMs ?? derivedMs;
 
   const sweep = createSweep({
     store,
@@ -216,10 +218,12 @@ export function createWatcher(options: WatcherOptions): Watcher {
     const armed = await retarget();
     // The watches go up after the capture they follow, because it is that
     // pass which finds the worktrees to watch — so an edit between the two
-    // makes no event. One more pass probes them now the watch is up: an edit
-    // before this point is in it, and one after it is an event. At startup that
-    // is every worktree, which is what an edit made while the daemon starts
-    // would otherwise wait out the timer for.
+    // makes no event. One more pass probes them now the watch is asked for, so
+    // an edit in that gap is found here rather than at the next timed pass. It
+    // narrows the gap without closing it: a watch is not delivering the moment
+    // it is asked for, and an edit between this pass and the watch going live
+    // is still found only by the next timed pass's probe — which the budget is
+    // sized to carry.
     if (armed.length > 0) await sweep.all(armed);
   };
 

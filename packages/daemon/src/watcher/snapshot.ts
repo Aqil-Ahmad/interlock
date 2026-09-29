@@ -146,6 +146,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
   const failed = new Map<
     string,
     {
+      readonly branchRefId: BranchRefId;
       readonly probe: string;
       readonly headSha: string;
       readonly at: number;
@@ -195,6 +196,9 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       const failure = failed.get(branch.worktreePath);
       if (
         failure?.probe === signature &&
+        // Another branch checked out onto the same commit reads the same probe
+        // and the same head, and has never been captured at all.
+        failure.branchRefId === branch.id &&
         failure.headSha === branch.headSha &&
         !(previous?.kind === 'tree' && previous.changed) &&
         now() - failure.at < recaptureAfterMs
@@ -213,6 +217,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
         snapshot = await captureInto(handle, repo, branch.worktreePath);
       } catch (error) {
         failed.set(branch.worktreePath, {
+          branchRefId: branch.id,
           probe: signature,
           headSha: branch.headSha,
           at: now(),
@@ -384,8 +389,8 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
 
 /**
  * A cheap fingerprint of what `status` said about a worktree: every path it
- * listed as changed in the worktree — unstaged or untracked — with that file's
- * timestamps, size and inode as they are now.
+ * listed — staged, unstaged or untracked — with that file's timestamps, size
+ * and inode as they are now.
  *
  * Nothing git is asked for here: the pass that brought the branch already ran
  * the status, against the user's own index and with optional locks off, so
@@ -397,10 +402,11 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
  * there for one that does not keep it faithfully. A clean tracked file is
  * `status`'s own to judge: it compares the same fields against the index.
  *
- * Staged paths are left out. Staging changes the index and not the worktree,
- * which is what a capture hashes, and any write to a staged file after staging
- * shows in the unstaged column. Paths are taken in the order `status` printed
- * them, which is git's own sorted order.
+ * Staged paths count as much as the others. A file written and staged between
+ * two passes — an agent's `git add` straight after the write — shows as
+ * nothing but staged by the next one, so leaving that column out misses the
+ * edit until the backstop. Paths are taken in the order `status` printed them,
+ * which is git's own sorted order.
  *
  * A path that cannot be stat'ed — a tracked file deleted — is signed by the
  * reason, so it reads the same on every pass rather than moving the probe each
@@ -408,6 +414,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
  */
 async function probe(worktreePath: string, dirty: DirtyState): Promise<string> {
   const listed = [
+    ...dirty.stagedFiles.map((path) => ['staged', path] as const),
     ...dirty.unstagedFiles.map((path) => ['unstaged', path] as const),
     ...dirty.untrackedFiles.map((path) => ['untracked', path] as const),
   ];

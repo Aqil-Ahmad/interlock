@@ -194,6 +194,22 @@ describe('snapshot pipeline', () => {
       expect(await timedPass()).toBe(1);
     });
 
+    it('moves for a file written and staged between two passes', async () => {
+      // An agent's `git add` straight after writing: by the next pass nothing
+      // is unstaged or untracked, and the change is visible only as staged.
+      writeFileSync(join(root, 'staged.txt'), 'new, and staged at once\n');
+      git(root, 'add', 'staged.txt');
+      expect(await timedPass()).toBe(1);
+
+      // And a tracked file edited and re-staged, which stays `M ` throughout.
+      writeFileSync(join(root, 'a.txt'), 'edited and staged\n');
+      git(root, 'add', 'a.txt');
+      expect(await timedPass()).toBe(1);
+      writeFileSync(join(root, 'a.txt'), 'edited and staged again\n');
+      git(root, 'add', 'a.txt');
+      expect(await timedPass()).toBe(1);
+    });
+
     it('moves for a new untracked file', async () => {
       writeFileSync(join(root, 'new.txt'), 'new\n');
       expect(await timedPass()).toBe(1);
@@ -315,6 +331,26 @@ describe('snapshot pipeline', () => {
         // Nothing in the worktree moved, so the probe reads the same; the
         // content it would hash sits on another commit now.
         git(root, 'commit', '-qm', 'moves the head only', '--allow-empty');
+        await expect(counting.reconcile(root)).rejects.toThrow();
+
+        expect(walks()).toBe(afterFailure + 1);
+      } finally {
+        chmodSync(join(root, 'locked.txt'), 0o644);
+      }
+    });
+
+    it('walks again at a failure for another branch on the same commit', async () => {
+      const { sweep: counting, walks } = countingSweep();
+      await counting.reconcile(root);
+      writeFileSync(join(root, 'locked.txt'), 'secret\n');
+      chmodSync(join(root, 'locked.txt'), 0o000);
+      try {
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        const afterFailure = walks();
+
+        // Same worktree, same files, same head: only the branch is new, and it
+        // has never been captured, so the old branch's failure is not its own.
+        git(root, 'checkout', '-q', '-b', 'switched');
         await expect(counting.reconcile(root)).rejects.toThrow();
 
         expect(walks()).toBe(afterFailure + 1);

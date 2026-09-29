@@ -57,6 +57,15 @@ and the allowance, capped at 30 s, and a debounce too long for any interval
 from 10 s up is refused at start. Changing the debounce moves the interval with
 it; neither can be changed without the other noticing.
 
+The probe's cost grows with what `status` lists, untracked files most of all:
+it lists each one, and each is stat'ed. On one worktree of 10,000 tracked files
+a probe pass measured 50 ms with nothing untracked, 102 ms with 5,000 untracked
+files and 598 ms with 50,000 — about 11 ms per thousand. A large generated
+directory nobody ignored therefore costs about 2% of a core per worktree every
+30 s, plus its share of the backstop hash; still well under the hash every
+minute it replaces, which on that worktree was 5.6 s a time. Ignoring such a
+directory, as a repository should, takes it out of both.
+
 A full re-hash still runs every ten minutes per worktree. It carries no budget —
 the probe does — and exists only for an edit the probe cannot see, which takes
 a write that restores the file's mtime in a repository with
