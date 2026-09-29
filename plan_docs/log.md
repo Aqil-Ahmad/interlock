@@ -4,6 +4,15 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-29 — review of the watcher fallback: five taken, all verified first
+
+- **Taken, and a correction to the entry below — staged paths do matter to the probe.** A file written and staged between two passes, an agent's `git add` straight after the write, shows as nothing but staged by the next pass; with that column left out the probe did not move, and the edit waited ten minutes for the backstop. Reproduced with a test before fixing. The mutation run had called dropping the column equivalent only because no test ever staged anything: an equivalence claimed without a fake that reached it. The column is back, and the test covers a new staged file and a tracked file edited and re-staged twice.
+- **Taken — a remembered capture failure ignored which branch it was.** The idle skip requires the same branch; the failure memo did not, so a `checkout -b` onto the same commit, reading the same probe and head, was answered with the old branch's failure and never captured until the backstop. Scoped to the branch now, tested.
+- **Taken — an explicit sweep interval skipped the debounce check.** The check lived only in the default's derivation, so a caller passing an interval could start with a debounce the budget cannot carry. It is derived either way now; a test's own cadence stays its own.
+- **Taken — the re-probe after arming was described as closing the gap.** It narrows it: a watch is not delivering the moment it is asked for, which is what the demo failure showed, and an edit after that pass waits for the next timed probe. The comment says so.
+- **Taken — the untracked listing's cost and visibility.** The CHANGELOG now names `--json` and the counts; notes.md records the probe against untracked volume: on one worktree of 10,000 tracked files, 50 ms with none, 102 ms with 5,000, 598 ms with 50,000 — about 11 ms per thousand — against a 5.6 s hash at 50,000.
+- **Mutation: 3, 3 caught.**
+
 ## 2026-09-28 — an edit the filesystem never reported
 
 - **Reproduced before fixing: the watch was not live yet.** The demo's logger now keeps the daemon's log and prints it on failure; the full suite, looped in a separate worktree, failed on run 12 of 12 at 60.97 s. The log names the cause: both edits landed about 10 ms after the daemon reported started — watches armed, sessions registered — and no `signal` was ever logged for either. The recursive watch had returned and was not delivering yet. The 30 s pass did not hash (inside the old 60 s ceiling), and the 60 s one found both edits as the test's deadline expired. Not an event dropped mid-session, and not fixable by ordering: the edits came after the watches were armed.
