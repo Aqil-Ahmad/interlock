@@ -135,6 +135,9 @@ describe('daemon', () => {
     );
 
     expect(pass).toMatchObject({ level: 'info', events: 1, complete: true });
+    // The daemon names when it started, so a run an earlier process left
+    // unfinished can be told from one of its own.
+    expect(Date.parse(String(pass.abandonedBefore))).toBeLessThanOrEqual(Date.now());
     expect(pass.windowMs).toBe(config.retention.windowMs);
     expect((await readLog()).map((record) => record.at)).not.toContain(old);
   });

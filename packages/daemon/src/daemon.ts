@@ -157,6 +157,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
   };
 
   async function begin(): Promise<void> {
+    // Taken before anything that could start a run, so every run this process
+    // starts is later than it.
+    const startedAt = new Date().toISOString();
     const runner = options.runner ?? createGitRunner();
     // Before the lock, which is the first thing written to the data dir.
     await refuseDataDirInRepos(config.dataDir, config.repos, runner);
@@ -231,6 +234,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
         store,
         windowMs: config.retention.windowMs,
         logger: options.logger,
+        // Every run this daemon starts is later than this, so an unfinished one
+        // started before it was left by a process that is gone.
+        abandonedBefore: startedAt,
         ...(options.retentionIntervalMs === undefined
           ? {}
           : { intervalMs: options.retentionIntervalMs }),

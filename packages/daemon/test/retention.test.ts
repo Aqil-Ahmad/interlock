@@ -2,8 +2,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createLogger, ulid } from '@interlock/shared';
-import type { EventId, EventRecord, LogRecord } from '@interlock/shared';
+import { createLogger, makePairKey, ulid } from '@interlock/shared';
+import type {
+  EventId,
+  EventRecord,
+  LogRecord,
+  SnapshotId,
+  SpeculativeRunId,
+} from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RETENTION_INTERVAL_MS, createRetention, retentionIntervalFor } from '../src/retention.js';
 import type { Retention } from '../src/retention.js';
@@ -129,6 +135,74 @@ describe('retention', () => {
     await until(() => passesLogged().length >= 1, 'the first pass');
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(passesLogged()).toHaveLength(1);
+  });
+
+  it('prunes an abandoned run only when told when the owning process began', async () => {
+    const repoId = (
+      await store.upsertRepo({
+        id: ulid(),
+        rootPath: '/r',
+        defaultBranch: 'main',
+        shadowPath: '/s',
+        config: {},
+        discoveredAt: '',
+        lastSeenAt: '',
+      })
+    ).id;
+    const branchOf = async (name: string) =>
+      (
+        await store.upsertBranchRef({
+          id: ulid(),
+          repoId,
+          ref: `refs/heads/${name}`,
+          name,
+          headSha: 'a'.repeat(40),
+          worktreePath: null,
+          dirty: null,
+          sessionId: null,
+          firstSeenAt: '',
+          updatedAt: '',
+        })
+      ).id;
+    const [a, b] = [await branchOf('a'), await branchOf('b')];
+    const pair = await store.upsertMergePair({
+      id: ulid(),
+      repoId,
+      a,
+      b,
+      key: makePairKey(a, b),
+      mergeBaseSha: 'b'.repeat(40),
+      priority: 0,
+      lastRunAt: null,
+      stale: false,
+    });
+    const abandoned = {
+      id: ulid<SpeculativeRunId>(),
+      mergePairId: pair.id,
+      snapshotA: ulid<SnapshotId>(),
+      snapshotB: ulid<SnapshotId>(),
+      status: 'running' as const,
+      mergeOutcome: null,
+      analyzerResults: [],
+      findingIds: [],
+      startedAt: new Date(NOW - 9 * DAY).toISOString(),
+      finishedAt: null,
+      durationMs: null,
+    };
+    await store.upsertRun(abandoned);
+
+    expect(await make().pass()).toMatchObject({ runs: 0 });
+    expect(await store.getRun(abandoned.id)).not.toBeNull();
+
+    retention = createRetention({
+      store,
+      windowMs: 7 * DAY,
+      logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+      now: () => NOW,
+      abandonedBefore: new Date(NOW - DAY).toISOString(),
+    });
+    expect(await retention.pass()).toMatchObject({ runs: 1 });
+    expect(await store.getRun(abandoned.id)).toBeNull();
   });
 
   it('joins a pass already running', async () => {

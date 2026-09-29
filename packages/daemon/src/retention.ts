@@ -26,6 +26,12 @@ export interface RetentionOptions {
   readonly intervalMs?: number;
   /** The clock the cutoff is read from. */
   readonly now?: () => number;
+  /**
+   * When the process that owns the store started: an unfinished run started
+   * before it was left by a daemon that is gone. Left out, no unfinished run is
+   * pruned — which is the answer for anything that cannot vouch for that.
+   */
+  readonly abandonedBefore?: string;
 }
 
 /**
@@ -72,8 +78,16 @@ export function createRetention(options: RetentionOptions): Retention {
     // timer's pass has nothing to catch it, and ends the process.
     try {
       before = new Date(now() - windowMs).toISOString();
-      const report = await store.prune(before);
-      log.info('pruned the store', { before, windowMs, ...report });
+      const report = await store.prune(
+        before,
+        options.abandonedBefore === undefined ? {} : { abandonedBefore: options.abandonedBefore },
+      );
+      log.info('pruned the store', {
+        before,
+        windowMs,
+        abandonedBefore: options.abandonedBefore ?? null,
+        ...report,
+      });
       return report;
     } catch (error) {
       // A pass that failed leaves everything it did not reach for the next,

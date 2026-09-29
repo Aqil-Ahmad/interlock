@@ -168,6 +168,16 @@ export interface Store {
 export interface PruneOptions {
   /** Rows per transaction. A test lowers it to see a pass split into batches. */
   readonly batchSize?: number;
+  /**
+   * When the process that owns the store started.
+   *
+   * A run is `running` from its start until it records how it ended, so the
+   * row of one still in flight and the row of one a crashed daemon left behind
+   * look alike, however old. Only one process holds a data dir at a time, so a
+   * run started before this one was can be in flight in nothing: it is
+   * abandoned, and only such a run is pruned unfinished. Left out, none is.
+   */
+  readonly abandonedBefore?: string;
 }
 
 /** What one pass deleted, by the table retention targets; cascades are not counted. */
@@ -560,14 +570,17 @@ class SqliteStore implements Store {
               SELECT 1 FROM findings f
               WHERE f.run_id = r.id AND f.status IN ('open', 'stale'))
           LIMIT :limit)`),
-      // A run still unfinished a whole window after it started is one a daemon
-      // died in the middle of: a run takes seconds, and shutdown records the
-      // ones it interrupts. Findings are written only as a run completes, so
-      // none can hold it.
+      // Unfinished, and started before both the cutoff and the process that owns
+      // the store — so abandoned by a daemon that died mid-run, not in flight.
+      // A run writes its Findings before it records itself complete, so one cut
+      // off in between holds them, and is kept as a finished one would be.
       pruneUnfinishedRuns: db.prepare(`
         DELETE FROM speculative_runs WHERE id IN (
-          SELECT id FROM speculative_runs
-          WHERE finished_at IS NULL AND started_at < :cutoff
+          SELECT r.id FROM speculative_runs r
+          WHERE r.finished_at IS NULL AND r.started_at < :cutoff
+            AND NOT EXISTS (
+              SELECT 1 FROM findings f
+              WHERE f.run_id = r.id AND f.status IN ('open', 'stale'))
           LIMIT :limit)`),
       // Only superseded ones. A branch that has been idle longer than the
       // retention window still has a current change set, and it is the one thing
@@ -753,31 +766,30 @@ class SqliteStore implements Store {
   }
 
   prune(before: string, options: PruneOptions = {}): Promise<PruneReport> {
-    const parsed = Date.parse(before);
-    if (Number.isNaN(parsed)) {
+    const cutoff = instant(before);
+    const owner = options.abandonedBefore === undefined ? null : instant(options.abandonedBefore);
+    if (cutoff === null || (owner === null && options.abandonedBefore !== undefined)) {
       return Promise.reject(
-        new InterlockError('CONFIG_INVALID', 'The retention cutoff is not a timestamp', {
-          details: { before },
+        new InterlockError('CONFIG_INVALID', 'A retention bound is not a timestamp', {
+          details: { before, abandonedBefore: options.abandonedBefore ?? null },
           remedy: 'Pass an ISO-8601 timestamp, as `new Date().toISOString()` produces.',
         }),
       );
     }
-    // Stored timestamps are `toISOString()` output, whose fixed shape is what
-    // makes a lexical comparison an ordering. Normalising the cutoff to that
-    // shape keeps an offset-bearing argument from comparing as another date.
-    const cutoff = new Date(parsed).toISOString();
     const limit = options.batchSize ?? PRUNE_BATCH;
     if (!Number.isInteger(limit) || limit < 1) {
       return Promise.reject(new RangeError('batchSize must be a positive integer'));
     }
 
-    this.#pruning ??= this.#prune(cutoff, limit).finally(() => {
+    // Abandoned means started before the cutoff and before the owner both.
+    const abandoned = owner === null ? null : owner < cutoff ? owner : cutoff;
+    this.#pruning ??= this.#prune(cutoff, limit, abandoned).finally(() => {
       this.#pruning = null;
     });
     return this.#pruning;
   }
 
-  async #prune(cutoff: string, limit: number): Promise<PruneReport> {
+  async #prune(cutoff: string, limit: number, abandoned: string | null): Promise<PruneReport> {
     const startedAt = performance.now();
     const deleted = { events: 0, runs: 0, changeSets: 0, verdicts: 0, sessions: 0 };
     let batches = 0;
@@ -786,15 +798,19 @@ class SqliteStore implements Store {
 
     // Runs first: what they take by cascade — resolved Findings, their
     // evidence, verdicts — is then gone before the events are weighed.
-    const passes: readonly [keyof typeof deleted, StatementSync][] = [
-      ['runs', this.#statements.pruneRuns],
-      ['runs', this.#statements.pruneUnfinishedRuns],
-      ['changeSets', this.#statements.pruneChangeSets],
-      ['verdicts', this.#statements.pruneVerdicts],
-      ['sessions', this.#statements.pruneSessions],
-      ['events', this.#statements.pruneEvents],
+    type Pass = [keyof typeof deleted, StatementSync, string];
+    // Unfinished runs only with proof of which were abandoned.
+    const unfinished: Pass[] =
+      abandoned === null ? [] : [['runs', this.#statements.pruneUnfinishedRuns, abandoned]];
+    const passes: Pass[] = [
+      ['runs', this.#statements.pruneRuns, cutoff],
+      ...unfinished,
+      ['changeSets', this.#statements.pruneChangeSets, cutoff],
+      ['verdicts', this.#statements.pruneVerdicts, cutoff],
+      ['sessions', this.#statements.pruneSessions, cutoff],
+      ['events', this.#statements.pruneEvents, cutoff],
     ];
-    passing: for (const [table, statement] of passes) {
+    passing: for (const [table, statement, bound] of passes) {
       for (;;) {
         // The daemon waits for a pass before closing, so this is a caller that
         // did not; what is left is the next pass's.
@@ -805,7 +821,9 @@ class SqliteStore implements Store {
         const batchStartedAt = performance.now();
         // `changes` is a bigint only for a statement that could touch more rows
         // than a double addresses, which a batch cannot.
-        const removed = this.#transaction(() => Number(statement.run({ cutoff, limit }).changes));
+        const removed = this.#transaction(() =>
+          Number(statement.run({ cutoff: bound, limit }).changes),
+        );
         longestBatchMs = Math.max(longestBatchMs, performance.now() - batchStartedAt);
         batches += 1;
         deleted[table] += removed;
@@ -883,4 +901,16 @@ class SqliteStore implements Store {
       // replace it with a symptom.
     }
   }
+}
+
+/**
+ * An instant in the shape stored timestamps have, or null for none.
+ *
+ * Stored timestamps are `toISOString()` output, whose fixed shape is what makes
+ * a lexical comparison an ordering; normalising to it keeps an offset-bearing
+ * argument from comparing as another date.
+ */
+function instant(value: string): string | null {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
 }

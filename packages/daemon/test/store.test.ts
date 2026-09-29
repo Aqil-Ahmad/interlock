@@ -1194,34 +1194,68 @@ describe('store', () => {
       expect(countRows('evidence')).toBe(dropped.evidence.length);
     });
 
-    it('drops a run left unfinished a whole window after it started, and nothing younger', async () => {
-      const repoId = (await store.upsertRepo(repo())).id;
-      const a = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/a', name: 'a' })))
-        .id;
-      const b = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/b', name: 'b' })))
-        .id;
-      const pairId = (await store.upsertMergePair(pair(repoId, a, b))).id;
-      // A run takes seconds and shutdown records the ones it interrupts, so one
-      // still `running` a window later is what a daemon that died mid-run left.
-      const abandoned = run(pairId, {
-        status: 'running',
-        startedAt: T.early,
-        finishedAt: null,
-        durationMs: null,
-      });
-      const inFlight = run(pairId, {
-        status: 'running',
-        startedAt: T.late,
-        finishedAt: null,
-        durationMs: null,
-      });
-      await store.upsertRun(abandoned);
-      await store.upsertRun(inFlight);
+    describe('unfinished runs', () => {
+      let pairId: MergePairId;
+      let a: BranchRefId;
+      let b: BranchRefId;
+      const unfinished = (startedAt: string): SpeculativeRun =>
+        run(pairId, { status: 'running', startedAt, finishedAt: null, durationMs: null });
 
-      await store.prune(T.mid);
+      beforeEach(async () => {
+        const repoId = (await store.upsertRepo(repo())).id;
+        a = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/a', name: 'a' }))).id;
+        b = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/b', name: 'b' }))).id;
+        pairId = (await store.upsertMergePair(pair(repoId, a, b))).id;
+      });
 
-      expect(await store.getRun(abandoned.id)).toBeNull();
-      expect(await store.getRun(inFlight.id)).not.toBeNull();
+      it('drops one a process that is gone left, past the window', async () => {
+        const abandoned = unfinished(T.early);
+        await store.upsertRun(abandoned);
+
+        // The daemon started at T.mid: nothing it started began before that.
+        expect(await store.prune(T.late, { abandonedBefore: T.mid })).toMatchObject({ runs: 1 });
+        expect(await store.getRun(abandoned.id)).toBeNull();
+      });
+
+      it('keeps one this process started, however old — it may still be running', async () => {
+        // Past the cutoff, and after the process began: live as far as anything
+        // here can prove.
+        const live = unfinished(T.mid);
+        await store.upsertRun(live);
+
+        await store.prune(T.late, { abandonedBefore: T.early });
+
+        expect(await store.getRun(live.id)).not.toBeNull();
+      });
+
+      it('keeps every one when nothing says which process left it', async () => {
+        const abandoned = unfinished(T.early);
+        await store.upsertRun(abandoned);
+
+        await store.prune(T.late);
+
+        expect(await store.getRun(abandoned.id)).not.toBeNull();
+      });
+
+      it('keeps one whose process died after writing its Findings and before finishing', async () => {
+        // A run writes its Findings, then records itself complete; a crash in
+        // between leaves it unfinished and holding them.
+        const cut = unfinished(T.early);
+        await store.upsertRun(cut);
+        const open = finding(cut.id, a, b);
+        await store.upsertFinding(open);
+
+        await store.prune(T.late, { abandonedBefore: T.late });
+
+        expect(await store.getRun(cut.id)).not.toBeNull();
+        expect(await store.getFinding(open.id)).not.toBeNull();
+      });
+
+      it('refuses an abandonment instant that is not a timestamp', async () => {
+        await expect(store.prune(T.late, { abandonedBefore: 'at boot' })).rejects.toMatchObject({
+          code: 'CONFIG_INVALID',
+        });
+      });
     });
 
     it('drops superseded change sets but keeps the newest for each branch', async () => {
@@ -1444,8 +1478,8 @@ describe('store', () => {
       const report = await store.prune(T.mid, { batchSize: 2 });
 
       // Three batches of events — two, two and one — and one empty batch for
-      // each of the other five statements.
-      expect(report).toMatchObject({ events: 5, batches: 3 + 5, complete: true });
+      // each of the other four statements; unfinished runs are not asked for.
+      expect(report).toMatchObject({ events: 5, batches: 3 + 4, complete: true });
       expect(await collect(store.readEvents())).toHaveLength(1);
     });
 
