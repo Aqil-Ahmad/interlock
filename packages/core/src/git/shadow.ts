@@ -4,7 +4,7 @@ import { InterlockError, ulid } from '@interlock/shared';
 import type { RepoId } from '@interlock/shared';
 import { repositoryDirHolding, repositoryDirsOf } from './repo-dirs.js';
 import { assertObjectId, runRequired } from './repo-handle.js';
-import type { GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
+import type { GitRunOptions, GitRunner, ShadowRepo, UserRepo } from './repo-handle.js';
 
 /**
  * The shadow clone: the one repository Interlock is allowed to write to.
@@ -307,13 +307,16 @@ async function isUsableShadow(
 export const KEEP_REFS_PREFIX = 'refs/interlock/keep/';
 
 /**
- * How long a collection may run before the runner stops it.
+ * How long one collecting command may run before the runner stops it.
  *
- * `prune` walks everything reachable, and the shadow reaches the user's whole
- * history through `refs/remotes/user/*`: seconds on a large repository, where
- * the runner's default is sized for one ordinary command.
+ * Both walk everything reachable, which through `refs/remotes/user/*` is the
+ * user's whole history, and the first pass over a shadow that was never
+ * collected packs everything younger than the expiry: a day of continuous
+ * checks, a million loose objects, took 37 minutes. This guards against a
+ * wedged git only; a shutdown stops a collection through its signal, not by
+ * waiting this out.
  */
-const COLLECT_TIMEOUT_MS = 10 * 60_000;
+const COLLECT_TIMEOUT_MS = 60 * 60_000;
 
 export interface CollectOptions {
   readonly runner: GitRunner;
@@ -324,6 +327,12 @@ export interface CollectOptions {
    * Each is checked first, and one whose history cannot be walked is left out.
    */
   readonly keep: readonly string[];
+  /**
+   * Stops the collection at its next git command, and the one running: a walk
+   * of a large history must not hold up a daemon shutting down. What it
+   * stopped short of is left for the next collection.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export interface CollectReport {
@@ -335,32 +344,54 @@ export interface CollectReport {
    * stop `prune` walking at all.
    */
   readonly unkeepable: readonly string[];
-  readonly removed: number;
-  readonly looseBefore: number;
-  readonly looseAfter: number;
-  readonly kibBefore: number;
-  readonly kibAfter: number;
+  /** The shadow's own store before and after: borrowed objects are not counted. */
+  readonly before: ShadowStoreSize;
+  readonly after: ShadowStoreSize;
   readonly durationMs: number;
 }
 
+export interface ShadowStoreSize {
+  readonly loose: number;
+  readonly packed: number;
+  /** Loose and packed together, as `count-objects` measures them. */
+  readonly kib: number;
+}
+
 /**
- * Collect the objects Interlock wrote into a shadow and no longer needs.
+ * Collect the objects Interlock wrote into a shadow and no longer needs, and
+ * pack the rest.
  *
- * `git prune`, never `git gc`: it deletes the shadow's own loose, unreachable
- * objects older than the expiry, and only those. The user's objects, borrowed
- * through alternates, are read to decide reachability and never touched; `gc`
- * would repack and run the maintenance the shadow switches off. Roots are the
- * shadow's refs — the user's branches, the keep refs rewritten here — and each
- * pool slot's `HEAD` and index.
+ * Nearly everything Interlock writes is loose and unreferenced: a capture's
+ * blobs and trees, snapshot commits, merge trees. Left loose for a day of
+ * continuous checks that is a million files, 4.4 GiB on disk for 1.3 GiB of
+ * content, and a `prune` that takes nine minutes to list them. So every pass
+ * packs: reachable objects into one pack, unreachable ones younger than the
+ * expiry into a cruft pack, which records each object's own write time so it
+ * still ages out. The same day packed was 135 MB, and an hour's pass over it
+ * took half a minute.
+ *
+ * `repack -l` and `prune`, never `gc`. `-l` packs only the shadow's own
+ * objects: without it every object borrowed from the user's store through
+ * alternates is copied in. The user's objects are read to decide reachability
+ * and never touched; `gc` would run the maintenance the shadow switches off.
+ * Roots are the shadow's refs — the user's branches, the keep refs rewritten
+ * here — and each pool slot's `HEAD` and index.
+ *
+ * Repack first, prune after. An object in an old cruft pack that is written
+ * again gets a fresh loose copy; `prune` deletes a loose copy of anything
+ * packed, and a repack after it sees only the old time and drops the object.
+ * Repacking first reads the fresh copy. What the repack leaves loose is what
+ * is past the expiry, which the prune then deletes.
  *
  * Refresh the shadow first: a ref naming an object the user's `gc` has since
- * removed stops `prune` walking, and a refresh is what drops such a ref.
+ * removed stops both walking, and a refresh is what drops such a ref.
  */
 export async function collectShadow(
   shadow: ShadowRepo,
   options: CollectOptions,
 ): Promise<CollectReport> {
   const { runner, keep } = options;
+  const run: GitRunOptions = options.signal === undefined ? {} : { signal: options.signal };
   const expire = options.expireBefore.getTime();
   if (!Number.isFinite(expire)) {
     throw new InterlockError('CONFIG_INVALID', 'The collection expiry is not a date', {
@@ -369,37 +400,44 @@ export async function collectShadow(
   }
   for (const oid of keep) assertObjectId(oid, 'keep');
   const startedAt = Date.now();
-  const before = await looseObjects(shadow, runner);
+  const before = await storeSize(shadow, runner, run);
 
   const kept: string[] = [];
   const unkeepable: string[] = [];
   for (const oid of new Set(keep)) {
-    if (await walkable(shadow, runner, oid)) kept.push(oid);
+    if (await walkable(shadow, runner, oid, run)) kept.push(oid);
     else unkeepable.push(oid);
   }
-  await rewriteKeepRefs(shadow, runner, kept);
+  await rewriteKeepRefs(shadow, runner, kept, run);
 
-  const pruned = await runRequired(
+  // Whole seconds since the epoch: exact, where git's date parser reads an
+  // ISO string with a `Z` as some other date and prunes nothing.
+  const expiry = `@${String(Math.floor(expire / 1000))}`;
+  const long: GitRunOptions = { ...run, timeoutMs: COLLECT_TIMEOUT_MS };
+  await runRequired(
     runner,
     shadow,
-    // Whole seconds since the epoch: exact, where git's date parser reads an
-    // ISO string with a `Z` as some other date and prunes nothing.
-    ['prune', '--verbose', `--expire=@${String(Math.floor(expire / 1000))}`],
-    { timeoutMs: COLLECT_TIMEOUT_MS },
+    [
+      'repack',
+      '--cruft',
+      `--cruft-expiration=${expiry}`,
+      '-d',
+      '-l',
+      '-q',
+      // A bare repository writes a bitmap by default, which needs every
+      // reachable object in the pack — and the user's history is not.
+      '--no-write-bitmap-index',
+    ],
+    long,
   );
-  const removed = pruned.stdout
-    .split('\n')
-    .filter((line) => /^[0-9a-f]{40,64} (?:blob|tree|commit|tag)$/u.test(line)).length;
-  const after = await looseObjects(shadow, runner);
+  await runRequired(runner, shadow, ['prune', `--expire=${expiry}`], long);
+  const after = await storeSize(shadow, runner, run);
 
   return {
     kept: kept.length,
     unkeepable,
-    removed,
-    looseBefore: before.count,
-    looseAfter: after.count,
-    kibBefore: before.kib,
-    kibAfter: after.kib,
+    before,
+    after,
     durationMs: Date.now() - startedAt,
   };
 }
@@ -413,15 +451,17 @@ export async function collectShadow(
  * reaching a long stretch of history the user deleted costs a walk and no
  * output to buffer: the first missing object fails it.
  */
-async function walkable(shadow: ShadowRepo, runner: GitRunner, oid: string): Promise<boolean> {
-  const walk = await runner.run(shadow, [
-    'rev-list',
-    '--objects',
-    '--quiet',
-    oid,
-    '--not',
-    '--remotes=user',
-  ]);
+async function walkable(
+  shadow: ShadowRepo,
+  runner: GitRunner,
+  oid: string,
+  run: GitRunOptions,
+): Promise<boolean> {
+  const walk = await runner.run(
+    shadow,
+    ['rev-list', '--objects', '--quiet', oid, '--not', '--remotes=user'],
+    run,
+  );
   return walk.exitCode === 0;
 }
 
@@ -430,37 +470,44 @@ async function rewriteKeepRefs(
   shadow: ShadowRepo,
   runner: GitRunner,
   oids: readonly string[],
+  run: GitRunOptions,
 ): Promise<void> {
-  const listed = await runRequired(runner, shadow, [
-    'for-each-ref',
-    '--format=%(refname)',
-    KEEP_REFS_PREFIX,
-  ]);
+  const listed = await runRequired(
+    runner,
+    shadow,
+    ['for-each-ref', '--format=%(refname)', KEEP_REFS_PREFIX],
+    run,
+  );
   const present = new Set(listed.stdout.split('\n').filter((line) => line !== ''));
   const wanted = new Set(oids.map((oid) => `${KEEP_REFS_PREFIX}${oid}`));
   for (const ref of present) {
     // A ref this pass does not want may name an object that is gone, which is
     // the very ref that would stop `prune`; `--no-deref` deletes it unread.
     if (!wanted.has(ref))
-      await runRequired(runner, shadow, ['update-ref', '-d', '--no-deref', ref]);
+      await runRequired(runner, shadow, ['update-ref', '-d', '--no-deref', ref], run);
   }
   for (const oid of oids) {
     const ref = `${KEEP_REFS_PREFIX}${oid}`;
-    if (!present.has(ref)) await runRequired(runner, shadow, ['update-ref', ref, oid]);
+    if (!present.has(ref)) await runRequired(runner, shadow, ['update-ref', ref, oid], run);
   }
 }
 
-/** The shadow's loose objects, by count and by size in KiB, as `count-objects` reports them. */
-async function looseObjects(
+/** The shadow's own objects, as `count-objects` reports them. */
+async function storeSize(
   shadow: ShadowRepo,
   runner: GitRunner,
-): Promise<{ count: number; kib: number }> {
-  const counted = await runRequired(runner, shadow, ['count-objects', '-v']);
+  run: GitRunOptions,
+): Promise<ShadowStoreSize> {
+  const counted = await runRequired(runner, shadow, ['count-objects', '-v'], run);
   const field = (name: string): number => {
     const match = new RegExp(`^${name}: (\\d+)$`, 'mu').exec(counted.stdout);
     return match === null ? 0 : Number(match[1]);
   };
-  return { count: field('count'), kib: field('size') };
+  return {
+    loose: field('count'),
+    packed: field('in-pack'),
+    kib: field('size') + field('size-pack'),
+  };
 }
 
 /** The object store a shadow borrows, as its alternates file names it, or null. */

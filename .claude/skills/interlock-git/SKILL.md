@@ -234,10 +234,29 @@ the classifier keys on it:
 
 Everything Interlock writes into a shadow — capture blobs and trees, snapshot
 commits, merge trees, pool commits — is loose and nearly all of it
-unreferenced. `collectShadow` reclaims it with `git prune`, never `gc`: prune
-deletes only the shadow's own loose, unreachable objects older than the expiry,
-and reads the user's objects through alternates without touching them. `gc`
-repacks, and runs the maintenance the shadow switches off.
+unreferenced. `collectShadow` packs it and reclaims it with
+`git repack --cruft -d -l --cruft-expiration=@<t>` and then `git prune
+--expire=@<t>`, never `gc`. Both read the user's objects through alternates
+without touching them; `gc` runs the maintenance the shadow switches off.
+
+- **Pack every pass; never let loose objects pile up.** A day of continuous
+  checks left loose is a million files, 4.4 GiB on disk for 1.3 GiB of content,
+  and one `prune` over it took nine minutes, most of it in the file system.
+  Packed, the same day was 135 MB, and an hourly pass over it took half a
+  minute. The first pack of an existing million-file backlog took 37 minutes.
+- **`-l` is essential.** Without it `repack` copies every object the shadow
+  borrows through alternates into the shadow: a full copy of the repository.
+- A cruft pack records each unreachable object's own write time, so expiry
+  still works once packed. An object that was reachable is stamped with the
+  time of the pack it was in, so a released keep lives one expiry past the last
+  pass that kept it.
+- **Repack before prune.** Writing an object that exists only in a cruft pack
+  leaves a fresh loose copy, and `prune` deletes loose copies of packed objects.
+  Pruning first loses the fresh time, and the repack after it drops the object
+  as old. Repack first: it reads the loose time, and leaves loose only what is
+  past the expiry, for the prune to delete.
+- Pass `--no-write-bitmap-index`. A bare repository writes a bitmap by default,
+  which needs every reachable object in one pack, and the user's are not.
 
 - Pass the expiry as `--expire=@<epoch seconds>`. An ISO string ending in `Z`
   was parsed as some other date and pruned nothing, with no error.
@@ -250,7 +269,7 @@ repacks, and runs the maintenance the shadow switches off.
   is asked to write again, and prune checks each object's mtime just before
   unlinking it — which is still a race with a writer, so collection holds the
   repository's gate exclusively.
-- **One ref naming a missing object fails the whole prune** (exit 128). The
+- **One ref naming a missing object fails the whole prune or repack** (exit 128). The
   user's `gc` can remove a commit a stale `refs/remotes/user/*` ref still
   names, or the parent of a kept snapshot commit. Refresh with `ensureShadow`
   first, since its fetch runs with `--prune`, and check each keep candidate with
@@ -260,6 +279,14 @@ repacks, and runs the maintenance the shadow switches off.
 - `for-each-ref` still lists a ref whose object is gone, and
   `update-ref -d --no-deref` deletes it. `update-ref` refuses to create a ref to
   an object that does not exist.
+- **Wiring the pool into runs brings two obligations.** A slot's `HEAD` is a
+  prune root, and its commit has parents (`commit-tree -p commitA -p
+commitB`). If the user's `gc` removes anything in that ancestry, every
+  collection of the repository fails until the slot is refilled. So check each
+  slot's `HEAD` the way keep candidates are checked, and evict a slot that
+  fails before collecting. And the pool writes objects (`commit-tree`,
+  `reset --hard`), so every slot use holds the repository's gate shared, like a
+  run or a capture does.
 - In a test, age objects with `utimes` on the loose files rather than waiting,
   and keep expiries at least an hour back. Prune compares whole seconds, so an
   expiry of "now" takes an object written a moment later in the same second.

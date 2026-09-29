@@ -90,6 +90,17 @@ describe('collectShadow', () => {
     for (const file of looseFiles(join(shadow.gitDir, 'objects'))) utimesSync(file, at, at);
   };
 
+  /**
+   * Every pack the shadow holds, last written `ms` ago. A cruft pack records
+   * each object's own time, so this ages only what a pack's time speaks for:
+   * objects that were reachable when it was written.
+   */
+  const agePacks = (ms: number): void => {
+    const pack = join(shadow.gitDir, 'objects', 'pack');
+    const at = new Date(Date.now() - ms);
+    for (const file of readdirSync(pack)) utimesSync(join(pack, file), at, at);
+  };
+
   /** Uncommitted work in the main checkout, captured into the shadow and committed there. */
   const snapshot = async (content: string): Promise<{ commitSha: string; treeOid: string }> => {
     write('a.txt', content);
@@ -104,6 +115,7 @@ describe('collectShadow', () => {
       .filter(Boolean);
 
   const anHourAgo = (): Date => new Date(Date.now() - HOUR);
+  const twoHoursAgo = (): Date => new Date(Date.now() - 2 * HOUR);
 
   beforeEach(async () => {
     // git answers with fully-resolved paths, and on macOS /var is a symlink to
@@ -141,9 +153,56 @@ describe('collectShadow', () => {
     expect(readable(spent.treeOid)).toBe(false);
     expect(readable(fresh.commitSha)).toBe(true);
     expect(readable(fresh.treeOid)).toBe(true);
-    // The commit, its tree and the blob of the edited file.
-    expect(report.removed).toBe(3);
-    expect(report.looseAfter).toBe(report.looseBefore - 3);
+    // Each snapshot is a commit, its tree and the blob of the edited file:
+    // the spent one gone, the fresh one packed, and nothing left loose.
+    expect(report.before).toMatchObject({ loose: 6, packed: 0 });
+    expect(report.after).toMatchObject({ loose: 0, packed: 3 });
+  });
+
+  it('packs only its own objects, never one borrowed from the user', async () => {
+    commitOn('side', 'side.txt', 'side\n');
+    await refresh();
+    await snapshot('own\n');
+
+    const report = await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+
+    // Without `-l` the repack would copy in every object the user's history
+    // reaches: the shadow would hold its own copy of the repository.
+    expect(report.after.packed).toBe(3);
+  });
+
+  it('ages out an object once packed, on a later pass', async () => {
+    const spent = await snapshot('spent\n');
+    // Packed at an age inside the first expiry and past the second: the cruft
+    // pack records each object's own time, which is all that can age it now.
+    age(90 * 60_000);
+    await collectShadow(shadow, { runner, expireBefore: twoHoursAgo(), keep: [] });
+    expect(readable(spent.commitSha)).toBe(true);
+
+    const report = await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+
+    expect(readable(spent.commitSha)).toBe(false);
+    expect(report.before).toMatchObject({ loose: 0, packed: 3 });
+    expect(report.after).toMatchObject({ loose: 0, packed: 0 });
+  });
+
+  it('keeps an old packed object written again since', async () => {
+    // A capture of content seen long ago — an edit reverted — writes objects
+    // that exist only in the cruft pack. git leaves a fresh loose copy, and a
+    // prune ahead of the repack would delete it for being packed.
+    const reverted = await snapshot('reverted\n');
+    age(90 * 60_000);
+    await collectShadow(shadow, { runner, expireBefore: twoHoursAgo(), keep: [] });
+    write('a.txt', 'reverted\n');
+    const again = await captureDirtyState(dir, repo, { runner, objectStore: shadow });
+    git('checkout', '-q', '--', 'a.txt');
+    expect(again.treeOid).toBe(reverted.treeOid);
+
+    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+
+    expect(readable(reverted.treeOid)).toBe(true);
+    expect(readable(`${reverted.treeOid}:a.txt`)).toBe(true);
+    expect(readable(reverted.commitSha)).toBe(false);
   });
 
   it('keeps an old tree a commit made since still names', async () => {
@@ -187,12 +246,24 @@ describe('collectShadow', () => {
   it('rewrites the keep refs each pass, so an object no longer kept is collected', async () => {
     const once = await snapshot('once kept\n');
     await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [once.commitSha] });
-    age(2 * HOUR);
+    // Kept, it was packed with everything reachable, and once released it is
+    // aged from that pack's time: the last pass that kept it.
+    agePacks(2 * HOUR);
 
     await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
 
     expect(keepRefs()).toEqual([]);
     expect(readable(once.commitSha)).toBe(false);
+  });
+
+  it('gives an object released since the last pass a full expiry from then', async () => {
+    const once = await snapshot('once kept\n');
+    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [once.commitSha] });
+    agePacks(30 * 60_000);
+
+    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+
+    expect(readable(once.commitSha)).toBe(true);
   });
 
   it("keeps a pool slot's current commit and collects the one it replaced", async () => {
@@ -297,6 +368,33 @@ describe('collectShadow', () => {
     await collectShadow(shadow, { runner, expireBefore: new Date(Date.now() + HOUR), keep: [] });
 
     expect(looseFiles(userObjects).sort()).toEqual(before);
+  });
+
+  it('stops at its signal, prune included, and the next collection finishes the job', async () => {
+    const spent = await snapshot('spent\n');
+    age(2 * HOUR);
+    const controller = new AbortController();
+    const stopping: GitRunner = {
+      run: (target, args, options) => {
+        // Aborted as prune is asked for, so the signal reaches that command:
+        // the runner's own tests show one already running is killed.
+        if (args[0] === 'prune') controller.abort();
+        return runner.run(target, args, options);
+      },
+    };
+
+    const error = await rejection(
+      collectShadow(shadow, {
+        runner: stopping,
+        expireBefore: anHourAgo(),
+        keep: [],
+        signal: controller.signal,
+      }),
+    );
+    expect(error.details.stopped).toBe(true);
+
+    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    expect(readable(spent.commitSha)).toBe(false);
   });
 
   describe('refuses input before running anything', () => {
