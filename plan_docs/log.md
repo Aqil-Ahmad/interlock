@@ -4,6 +4,15 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-29 — second review of the watcher fallback: two taken, one stale, rest noted
+
+- **Taken — a failed capture was held to the backstop whatever failed.** A git timing out under load, or a shadow being rebuilt, clears with nothing on disk moving, and the memo then withheld the retry for up to ten minutes — past the budget. Failures are now retried on a backoff: at the next pass, doubling to the backstop, and at once if the probe, head or branch moves. The first wait is the shortest interval the timing chain allows, so the first retry is the next pass whatever the interval. Tested with a git that fails once and recovers, the doubling, a restart for a new failure, and the cap.
+- **Taken, as a number rather than a cap — the stored untracked listing.** At 50,000 untracked files a branch's dirty state is 1.4 MB, rewritten in 3.5 ms every pass: one row replaced, not rows accumulating. In notes.md with the remedy. A cap would change a persisted model's shape, which is a migration, for a case a repository fixes by ignoring the directory.
+- **Stale — "a capture failure aborts the branch loop".** The sweep catches each branch's failure, logs it, carries on through the rest, and rejects once at the end; "snapshots every other branch when one of them throws" pins it. The tests' `rejects.toThrow()` is that end-of-pass report.
+- **Taken as comments:** reusing the stored error is sound only while nothing downstream reads more than its code and message — said where it is stored; and at the longest debounce accepted, 7 s, the chain is the budget exactly, with the allowance its only slack — said in notes.md.
+- **Noted, not changed:** a re-probe also runs for a worktree whose watch fell back to polling — one pass, harmless; an end-to-end run at a 7 s debounce was not added, since a single edit settles at the debounce and never reaches the ceiling it would be testing, which the arithmetic tests cover.
+- **Mutation: 6, 6 caught,** after the first run's three survivors — a streak not restarting for a new failure, and the cap — were pinned.
+
 ## 2026-09-29 — review of the watcher fallback: five taken, all verified first
 
 - **Taken, and a correction to the entry below — staged paths do matter to the probe.** A file written and staged between two passes, an agent's `git add` straight after the write, shows as nothing but staged by the next pass; with that column left out the probe did not move, and the edit waited ten minutes for the backstop. Reproduced with a test before fixing. The mutation run had called dropping the column equivalent only because no test ever staged anything: an equivalence claimed without a fake that reached it. The column is back, and the test covers a new staged file and a tracked file edited and re-staged twice.
