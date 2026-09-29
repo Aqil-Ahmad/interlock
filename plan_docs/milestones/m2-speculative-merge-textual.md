@@ -325,7 +325,9 @@ merge-tree` over the two commits reports the conflict — with neither side
   transaction, yielding between them, and the file is never vacuumed — freed
   pages are reused, which is the bound that matters. **Two tables had no
   bound at all**: ended agent sessions, and runs left `running` by a daemon that
-  died mid-run; both go once they are older than the window. **A cache hit does
+  died mid-run — proven abandoned by starting before the process that owns the
+  store, and holding no open Finding; both go once they are older than the
+  window. **A cache hit does
   not refresh a verdict**, deliberately: a verdict's evidence names the commits
   of the run that reached it, and the shadow's collection can only keep "objects
   younger than the window" safely if no verdict outlives it. The window's

@@ -4,6 +4,11 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-29 — CodeRabbit on retention: two taken, and a comment that was wrong
+
+- **Taken — an unfinished run could hold an open Finding, and the prune took it.** The store's comment said Findings are written only as a run completes; they are written first, and the run records itself complete after. A daemon that died in between leaves a run `running` and holding open Findings, and the unfinished-run delete had no open-Finding guard — past the window, the cascade took them. It has the same guard finished runs have now, pinned with exactly that crash.
+- **Taken — "unfinished and older than the window" cannot tell abandoned from in flight.** A run's row reads the same from its start until it records how it ended, and cancellation is cooperative with per-command timeouts, so age alone is a timing argument. The proof used instead is the one the data dir already gives: one process holds it at a time, so a run started before this process began is in flight in nothing. `prune` takes `abandonedBefore`, the daemon passes the instant it began — taken before anything can start a run — and an unfinished run goes only if it started before both that and the cutoff. Given no such instant, no unfinished run is pruned; each pass logs the one it used. Mutation: 6, 6 caught.
+
 ## 2026-09-29 — second review of retention: four taken, one already there
 
 - **Already there — the restart done-when.** `scheduler-demo.test.ts`, "keeps an open Finding traceable through a prune, and re-verifies it after a restart": a real Finding raised through the daemon, the daemon stopped, the store pruned with every row old, the chain walked back to the edit, a new daemon started, and exactly one open Finding afterwards with the same id and `firstSeenAt`, reached by a full run.
