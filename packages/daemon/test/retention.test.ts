@@ -231,6 +231,81 @@ describe('retention', () => {
     expect(await retention!.pass()).toMatchObject({ events: 1 });
   }, 20_000);
 
+  describe('collection after the store', () => {
+    const withCollect = (collect: (before: string) => Promise<void>): Retention => {
+      retention = createRetention({
+        store,
+        windowMs: 7 * DAY,
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => NOW,
+        collect,
+      });
+      return retention;
+    };
+
+    it('collects with the store’s cutoff, once the store is pruned', async () => {
+      const seen: { before: string; events: number }[] = [];
+      const retain = withCollect(async (before) => {
+        seen.push({ before, events: await count() });
+      });
+
+      await retain.pass();
+
+      // The verdicts naming what collection may take are gone before it runs.
+      expect(seen).toEqual([{ before: new Date(NOW - 7 * DAY).toISOString(), events: 1 }]);
+    });
+
+    it('does not collect when pruning the store failed', async () => {
+      const seen: string[] = [];
+      const retain = withCollect((before) => {
+        seen.push(before);
+        return Promise.resolve();
+      });
+      const other = new DatabaseSync(dbPath);
+      other.exec('BEGIN IMMEDIATE');
+      try {
+        expect(await retain.pass()).toBeNull();
+      } finally {
+        other.exec('ROLLBACK');
+        other.close();
+      }
+      // Verdicts older than the cutoff are still there, and still servable.
+      expect(seen).toEqual([]);
+    }, 20_000);
+
+    it('reports the store’s pass when collection throws, and says which failed', async () => {
+      const retain = withCollect(() => Promise.reject(new Error('shadow gone')));
+
+      expect(await retain.pass()).toMatchObject({ events: 1 });
+      expect(logs).toContainEqual(
+        expect.objectContaining({ level: 'warn', msg: 'collecting after the store failed' }),
+      );
+      expect(logs).not.toContainEqual(expect.objectContaining({ msg: 'pruning the store failed' }));
+    });
+
+    it('waits for a collection in flight when stopped', async () => {
+      let finish!: () => void;
+      let collected = false;
+      const retain = withCollect(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = () => {
+              collected = true;
+              resolve();
+            };
+          }),
+      );
+      const passing = retain.pass();
+      await until(() => finish !== undefined, 'the collection to start');
+
+      const stopping = retain.stop();
+      finish();
+      await stopping;
+      expect(collected).toBe(true);
+      await passing;
+    });
+  });
+
   it('resolves a pass whose cutoff is no date, rather than rejecting out of the timer', async () => {
     // Validation refuses such a window; this is the pass's own guard, since a
     // rejection from the timer's pass has nothing to catch it and ends the

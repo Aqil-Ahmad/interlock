@@ -67,7 +67,23 @@ export interface RunPipeline {
   detach(): void;
   plan(repoId: RepoId, branchRefId: BranchRefId): Promise<PairPlan>;
   runPair(request: PairRunRequest, signal: AbortSignal): Promise<PairRunResult>;
+  /**
+   * The trees a queued check of this repository would merge: each branch's
+   * content as last seen. An idle branch's is as old as its last edit, and
+   * nothing in the shadow references it, so collection has to be told.
+   */
+  heldTrees(repoId: RepoId): readonly string[];
 }
+
+/**
+ * How long a snapshot commit is reused for its tree before another is made.
+ *
+ * A verdict names the commits its run merged, and a reused commit is as old as
+ * the first run of its tree — on an idle default branch, as old as the daemon.
+ * Bounded, a verdict's commits are never older than the verdict by more than
+ * this, which is the margin collection leaves below the retention cutoff.
+ */
+export const SNAPSHOT_COMMIT_REUSE_MS = 60 * 60_000;
 
 export interface RunPipelineOptions {
   readonly store: Store;
@@ -80,10 +96,14 @@ export interface RunPipelineOptions {
    * merges, classifies and redacts — `@interlock/core` and `@interlock/shared`.
    */
   readonly build?: string;
+  /** {@link SNAPSHOT_COMMIT_REUSE_MS} unless given: a bench compressing a day compresses this too. */
+  readonly commitReuseMs?: number;
 }
 
 /** A branch's content as the watcher last announced it. */
 interface Announced {
+  /** Null only on an event with no repository, which the watcher never publishes. */
+  readonly repoId: RepoId | null;
   readonly treeOid: string | null;
   readonly headSha: string | null;
   readonly changeSetId: ChangeSetId | null;
@@ -131,6 +151,7 @@ interface Skip {
 export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   const { store, bus, runner, shadows } = options;
   const build = options.build ?? analysisBuildId();
+  const commitReuseMs = options.commitReuseMs ?? SNAPSHOT_COMMIT_REUSE_MS;
   const log = (options.logger ?? silentLogger).child('run-pipeline');
 
   const announced = new Map<BranchRefId, Announced>();
@@ -141,7 +162,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
    * part of it; the tree is the identity and the first commit serves every
    * later merge of it.
    */
-  const commits = new Map<string, string>();
+  const commits = new Map<string, { readonly sha: string; readonly madeAt: number }>();
   /**
    * Committed-only change sets for branches no worktree holds, by head.
    *
@@ -358,6 +379,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     });
     log.debug('captured a side the watcher had not', { repoId: repo.id, branch: branch.name });
     const seen: Announced = {
+      repoId: repo.id,
       treeOid: snapshot.treeOid,
       headSha: snapshot.headSha,
       changeSetId: announced.get(branch.id)?.changeSetId ?? null,
@@ -380,17 +402,17 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     // path and loses every commit made in it, and a cached one would fail
     // every merge of a side that never changes again — usually the default
     // branch, and every pair against it.
-    if (known !== undefined) {
-      const present = await runner.run(shadow, ['cat-file', '-e', `${known}^{commit}`]);
-      if (present.exitCode === 0) return known;
-      commits.delete(key);
+    if (known !== undefined && Date.now() - known.madeAt < commitReuseMs) {
+      const present = await runner.run(shadow, ['cat-file', '-e', `${known.sha}^{commit}`]);
+      if (present.exitCode === 0) return known.sha;
     }
+    commits.delete(key);
     const made = await commitSnapshotInShadow(
       shadow,
       { treeOid, headSha, clean: false, takenAs: 'whole-tree', capturedAt },
       { runner },
     );
-    remember(commits, key, made.commitSha);
+    remember(commits, key, { sha: made.commitSha, madeAt: Date.now() });
     return made.commitSha;
   };
 
@@ -454,14 +476,24 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     }
 
     const handle = await handleOf(repo);
-    let shadow: ShadowRepo;
-    try {
-      shadow = await shadows.get(handle, repo.id);
-    } catch (error) {
-      shadows.forget(repo.id);
-      throw error;
-    }
+    // Held for the whole run: collection must not decide an object is garbage
+    // between this run writing it, or finding it already written, and a merge
+    // or a Finding naming it.
+    return shadows.use(handle, repo.id, (shadow) =>
+      analyse(request, signal, repo, handle, shadow, branchA, branchB),
+    );
+  };
 
+  const analyse = async (
+    request: PairRunRequest,
+    signal: AbortSignal,
+    repo: Repo,
+    handle: UserRepo,
+    shadow: ShadowRepo,
+    branchA: BranchRef,
+    branchB: BranchRef,
+  ): Promise<PairRunResult> => {
+    const { pair } = request.candidate;
     const idA = await identify(repo, handle, shadow, branchA);
     if ('skip' in idA) return { kind: 'skipped', reason: idA.skip };
     const idB = await identify(repo, handle, shadow, branchB);
@@ -919,6 +951,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
       subscriptions.push(
         bus.on('branch.snapshot', (event) => {
           announced.set(event.branchRefId, {
+            repoId: event.repoId,
             treeOid: event.treeOid,
             // Absent from events stored before the field existed.
             headSha: event.headSha ?? null,
@@ -935,6 +968,14 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
           if (event.repoId !== null) await resolveGone(event.repoId, event.branchRefId, id);
         }),
       );
+    },
+
+    heldTrees(repoId: RepoId): readonly string[] {
+      const held = new Set<string>();
+      for (const seen of announced.values()) {
+        if (seen.repoId === repoId && seen.treeOid !== null) held.add(seen.treeOid);
+      }
+      return [...held];
     },
 
     detach(): void {

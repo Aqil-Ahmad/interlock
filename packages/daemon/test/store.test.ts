@@ -713,6 +713,26 @@ describe('store', () => {
       expect(listed[0]?.evidence).toEqual(open.evidence);
     });
 
+    it('lists open and stale findings as live, with their evidence, and never resolved ones', async () => {
+      const speculative = run(pairId);
+      await store.upsertRun(speculative);
+      const open = finding(speculative.id, a, b);
+      const stale = finding(speculative.id, a, b, { status: 'stale' });
+      const resolved = finding(speculative.id, a, b, { status: 'resolved', resolvedAt: T.late });
+      await store.upsertFinding(open);
+      await store.upsertFinding(stale);
+      await store.upsertFinding(resolved);
+
+      const live = await store.listLiveFindings(repoId);
+
+      // A stale Finding is still one a re-verification may confirm, so what its
+      // evidence names has to outlast it; a resolved one is history.
+      expect(live.map((each) => each.id).sort()).toEqual([open.id, stale.id].sort());
+      expect(live.find((each) => each.id === stale.id)?.evidence).toEqual(stale.evidence);
+      const otherRepo = (await store.upsertRepo(repo({ rootPath: '/repos/other' }))).id;
+      expect(await store.listLiveFindings(otherRepo)).toEqual([]);
+    });
+
     it('leaves nothing behind when a finding cannot be stored', async () => {
       const orphan = finding(ulid<SpeculativeRunId>(), a, b);
 

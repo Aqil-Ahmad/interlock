@@ -118,6 +118,11 @@ export interface Store {
   getFinding(id: Finding['id']): Promise<Finding | null>;
   /** Findings that reproduce on the latest snapshots; stale ones are excluded. */
   listOpenFindings(repoId: Repo['id']): Promise<Finding[]>;
+  /**
+   * Findings still in play, open or stale: what retention keeps however old,
+   * and so what a shadow must keep the evidence of.
+   */
+  listLiveFindings(repoId: Repo['id']): Promise<Finding[]>;
 
   /** Append-only: there is no update or delete path for events. */
   appendEvent(record: EventRecord): Promise<void>;
@@ -378,6 +383,8 @@ class SqliteStore implements Store {
     readonly evidenceForFinding: StatementSync;
     readonly openFindings: StatementSync;
     readonly openFindingEvidence: StatementSync;
+    readonly liveFindings: StatementSync;
+    readonly liveFindingEvidence: StatementSync;
     readonly appendEvent: StatementSync;
     readonly maxEventId: StatementSync;
     readonly eventPage: StatementSync;
@@ -517,6 +524,19 @@ class SqliteStore implements Store {
           JOIN speculative_runs r ON r.id = f.run_id
           JOIN merge_pairs p ON p.id = r.merge_pair_id
         WHERE p.repo_id = ? AND f.status = 'open'
+        ORDER BY e.finding_id, e.ordinal`),
+      liveFindings: db.prepare(`
+        SELECT f.* FROM findings f
+          JOIN speculative_runs r ON r.id = f.run_id
+          JOIN merge_pairs p ON p.id = r.merge_pair_id
+        WHERE p.repo_id = ? AND f.status IN ('open', 'stale')
+        ORDER BY f.first_seen_at, f.id`),
+      liveFindingEvidence: db.prepare(`
+        SELECT e.finding_id, e.body FROM evidence e
+          JOIN findings f ON f.id = e.finding_id
+          JOIN speculative_runs r ON r.id = f.run_id
+          JOIN merge_pairs p ON p.id = r.merge_pair_id
+        WHERE p.repo_id = ? AND f.status IN ('open', 'stale')
         ORDER BY e.finding_id, e.ordinal`),
 
       appendEvent: db.prepare(
@@ -718,17 +738,36 @@ class SqliteStore implements Store {
   }
 
   listOpenFindings(repoId: Repo['id']): Promise<Finding[]> {
-    return settled(() => {
-      const rows = this.#statements.openFindings.all(repoId);
-      const evidence = new Map<string, Evidence[]>();
-      for (const row of this.#statements.openFindingEvidence.all(repoId)) {
-        const findingId = text(row, 'finding_id');
-        const list = evidence.get(findingId) ?? [];
-        list.push(toEvidence(row));
-        evidence.set(findingId, list);
-      }
-      return rows.map((row) => toFinding(row, evidence.get(text(row, 'id')) ?? []));
-    });
+    return settled(() =>
+      this.#findingsWith(
+        this.#statements.openFindings,
+        this.#statements.openFindingEvidence,
+        repoId,
+      ),
+    );
+  }
+
+  listLiveFindings(repoId: Repo['id']): Promise<Finding[]> {
+    return settled(() =>
+      this.#findingsWith(
+        this.#statements.liveFindings,
+        this.#statements.liveFindingEvidence,
+        repoId,
+      ),
+    );
+  }
+
+  /** One query for the Findings and one for all their evidence, rather than one per Finding. */
+  #findingsWith(findings: StatementSync, evidenceOf: StatementSync, repoId: Repo['id']): Finding[] {
+    const rows = findings.all(repoId);
+    const evidence = new Map<string, Evidence[]>();
+    for (const row of evidenceOf.all(repoId)) {
+      const findingId = text(row, 'finding_id');
+      const list = evidence.get(findingId) ?? [];
+      list.push(toEvidence(row));
+      evidence.set(findingId, list);
+    }
+    return rows.map((row) => toFinding(row, evidence.get(text(row, 'id')) ?? []));
   }
 
   appendEvent(record: EventRecord): Promise<void> {

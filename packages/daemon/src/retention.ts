@@ -32,6 +32,11 @@ export interface RetentionOptions {
    * pruned — which is the answer for anything that cannot vouch for that.
    */
   readonly abandonedBefore?: string;
+  /**
+   * Run after the store is pruned, with its cutoff, and only when that
+   * succeeded: what it may reclaim is what the store no longer names.
+   */
+  readonly collect?: (before: string) => Promise<void>;
 }
 
 /**
@@ -88,6 +93,7 @@ export function createRetention(options: RetentionOptions): Retention {
         abandonedBefore: options.abandonedBefore ?? null,
         ...report,
       });
+      if (options.collect !== undefined) await collectAfter(options.collect, before);
       return report;
     } catch (error) {
       // A pass that failed leaves everything it did not reach for the next,
@@ -97,6 +103,21 @@ export function createRetention(options: RetentionOptions): Retention {
         reason: error instanceof Error ? error.message : String(error),
       });
       return null;
+    }
+  };
+
+  /** A collection that throws is its own failure, not the store's, whose pruning is done. */
+  const collectAfter = async (
+    collect: (before: string) => Promise<void>,
+    before: string,
+  ): Promise<void> => {
+    try {
+      await collect(before);
+    } catch (error) {
+      log.warn('collecting after the store failed', {
+        before,
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
   };
 

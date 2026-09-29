@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createGitRunner } from '@interlock/core';
 import type { GitRunner } from '@interlock/core';
 import { createDaemon } from '../src/daemon.js';
+import { SNAPSHOT_COMMIT_REUSE_MS } from '../src/scheduler/run-pipeline.js';
 import type { Daemon } from '../src/daemon.js';
 import { openStore } from '../src/store/index.js';
 import { rejection } from './support/rejection.js';
@@ -140,6 +141,25 @@ describe('daemon', () => {
     expect(Date.parse(String(pass.abandonedBefore))).toBeLessThanOrEqual(Date.now());
     expect(pass.windowMs).toBe(config.retention.windowMs);
     expect((await readLog()).map((record) => record.at)).not.toContain(old);
+  });
+
+  it('collects each repository’s shadow in the same pass, after the store', async () => {
+    await daemon.start();
+    const collected = await until(
+      () => Promise.resolve(logs.find((record) => record.msg === 'collected the shadow') ?? null),
+      'a shadow collection',
+    );
+
+    const pruned = logs.findIndex((record) => record.msg === 'pruned the store');
+    expect(pruned).toBeGreaterThanOrEqual(0);
+    expect(pruned).toBeLessThan(logs.indexOf(collected));
+    // The margin below the store's cutoff: a verdict still held may name a
+    // commit up to that much older than itself.
+    const before = String(logs[pruned]!.before);
+    expect(Date.parse(String(collected.expireBefore))).toBe(
+      Date.parse(before) - SNAPSHOT_COMMIT_REUSE_MS,
+    );
+    expect(collected).toMatchObject({ level: 'info', unkeepable: [] });
   });
 
   it('prunes again on its timer, and a pass in flight holds up a stop', async () => {
