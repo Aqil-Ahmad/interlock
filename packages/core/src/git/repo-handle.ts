@@ -376,6 +376,13 @@ export interface GitRunOptions {
    */
   readonly objectStore?: ShadowRepo;
   readonly timeoutMs?: number;
+  /**
+   * Stop the command early: it is sent `SIGTERM`, the same signal a timeout
+   * sends, so git removes its own lock and temporary files on the way out.
+   * For the one long-running command that must not hold a shutdown up —
+   * collecting a shadow, which walks the whole history.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export interface GitRunnerOptions {
@@ -457,6 +464,15 @@ function gitFailed(
   remedy: string,
 ): InterlockError {
   return new InterlockError('GIT_COMMAND_FAILED', message, { details, remedy, infra: true });
+}
+
+/** A command stopped through its signal: infrastructure, like a timeout, and never a result. */
+function stopped(details: Record<string, unknown>): InterlockError {
+  return gitFailed(
+    'git was stopped before it finished',
+    { ...details, stopped: true },
+    'None needed: the caller asked for it to stop.',
+  );
 }
 
 /**
@@ -698,6 +714,7 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
         ...args,
       ];
       const startedAt = Date.now();
+      const { signal } = runOptions;
 
       return new Promise<GitResult>((resolve, reject) => {
         const child = execFile(
@@ -709,6 +726,7 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
             maxBuffer,
             windowsHide: true,
             encoding: 'utf8',
+            ...(signal === undefined ? {} : { signal }),
           },
           (error, stdout, stderr) => {
             const durationMs = Date.now() - startedAt;
@@ -716,6 +734,14 @@ export function createGitRunner(options: GitRunnerOptions = {}): GitRunner {
             if (error === null) {
               log.debug('git ok', { args: args.map(redact), exitCode: 0, durationMs });
               resolve({ stdout, stderr, exitCode: 0 });
+              return;
+            }
+
+            // Before the timeout check: an abort kills with the same SIGTERM,
+            // and a command stopped on request did not run out of time.
+            if (signal?.aborted === true) {
+              log.debug('git stopped', { args: args.map(redact), durationMs });
+              reject(stopped({ durationMs }));
               return;
             }
 
