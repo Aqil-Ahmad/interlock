@@ -149,10 +149,52 @@ export interface Store {
    */
   putCachedVerdict(key: string, verdict: CachedVerdict): Promise<boolean>;
 
-  /** Enforce retention: prune old runs and events beyond the configured window. */
-  prune(before: string): Promise<number>;
+  /**
+   * Enforce retention: delete what is older than `before` and nothing still in
+   * use — a run holding an open or stale Finding, the events that trace it back
+   * to the edit behind it, a branch's newest change set.
+   *
+   * In small batches, each its own transaction, yielding between them: SQLite
+   * has one writer, and one transaction over a window's worth of rows would
+   * hold the run pipeline's writes for as long as it took. A call made while a
+   * pass is running joins it rather than starting another, and gets that pass's
+   * report — its cutoff, not the one it asked for.
+   */
+  prune(before: string, options?: PruneOptions): Promise<PruneReport>;
 
   close(): Promise<void>;
+}
+
+export interface PruneOptions {
+  /** Rows per transaction. A test lowers it to see a pass split into batches. */
+  readonly batchSize?: number;
+  /**
+   * When the process that owns the store started.
+   *
+   * A run is `running` from its start until it records how it ended, so the
+   * row of one still in flight and the row of one a crashed daemon left behind
+   * look alike, however old. Only one process holds a data dir at a time, so a
+   * run started before this one was can be in flight in nothing: it is
+   * abandoned, and only such a run is pruned unfinished. Left out, none is.
+   */
+  readonly abandonedBefore?: string;
+}
+
+/** What one pass deleted, by the table retention targets; cascades are not counted. */
+export interface PruneReport {
+  readonly events: number;
+  /** Finished runs, and runs a daemon that died mid-run left unfinished. */
+  readonly runs: number;
+  readonly changeSets: number;
+  readonly verdicts: number;
+  readonly sessions: number;
+  /** Transactions the pass took. */
+  readonly batches: number;
+  /** The longest any one of them held the writer. */
+  readonly longestBatchMs: number;
+  readonly durationMs: number;
+  /** False when the store closed part-way; the next pass carries on. */
+  readonly complete: boolean;
 }
 
 export interface StoreOptions {
@@ -176,6 +218,16 @@ const DB_FILE_MODE = 0o600;
  * through the API, so contention beyond that is a bug rather than a load level.
  */
 const BUSY_TIMEOUT_MS = 5_000;
+
+/**
+ * Rows each retention transaction deletes, per table.
+ *
+ * Small enough that a batch holds the writer for milliseconds — the run
+ * pipeline writes a run, its events and its Findings between batches — and
+ * large enough that a pass over one timer interval's worth of aged rows is a
+ * handful of batches.
+ */
+const PRUNE_BATCH = 500;
 
 /**
  * Rows per batch when replaying the event log.
@@ -333,9 +385,13 @@ class SqliteStore implements Store {
     readonly putVerdict: StatementSync;
     readonly pruneEvents: StatementSync;
     readonly pruneRuns: StatementSync;
+    readonly pruneUnfinishedRuns: StatementSync;
     readonly pruneChangeSets: StatementSync;
     readonly pruneVerdicts: StatementSync;
+    readonly pruneSessions: StatementSync;
   };
+  /** The pass in progress, which a second call joins. */
+  #pruning: Promise<PruneReport> | null = null;
 
   constructor(db: DatabaseSync, log: Logger) {
     this.#db = db;
@@ -483,27 +539,75 @@ class SqliteStore implements Store {
           findings    = excluded.findings,
           created_at  = excluded.created_at`),
 
-      pruneEvents: db.prepare('DELETE FROM events WHERE at < ?'),
+      // The events a run that still holds an open or stale Finding needs are its
+      // own and everything they lead back to through `caused_by`: the
+      // `pair.scheduled` it answered and the edit behind that. Without them an
+      // old open Finding keeps its run and loses its explanation. Computed in
+      // the statement that deletes, so a Finding opened between batches is seen
+      // by the next one — though an earlier batch of the same pass may already
+      // have taken any of its chain that was past the window; a new Finding's
+      // chain is the edit and run just published, so in practice none is. The
+      // kept set is small, since open Findings are few.
+      pruneEvents: db.prepare(`
+        WITH RECURSIVE kept(id) AS (
+          SELECT id FROM events
+          WHERE run_id IN (SELECT run_id FROM findings WHERE status IN ('open', 'stale'))
+          UNION
+          SELECT e.caused_by FROM events e JOIN kept k ON e.id = k.id
+          WHERE e.caused_by IS NOT NULL)
+        DELETE FROM events WHERE id IN (
+          SELECT id FROM events
+          WHERE at < :cutoff AND id NOT IN (SELECT id FROM kept)
+          ORDER BY at LIMIT :limit)`),
       // A run holding an open or stale finding is live state, however old it is:
       // stale means "not re-verified yet", so dropping it would silently retract
       // a warning rather than resolve it.
       pruneRuns: db.prepare(`
-        DELETE FROM speculative_runs
-        WHERE finished_at IS NOT NULL AND finished_at < ?
-          AND NOT EXISTS (
-            SELECT 1 FROM findings f
-            WHERE f.run_id = speculative_runs.id AND f.status IN ('open', 'stale'))`),
+        DELETE FROM speculative_runs WHERE id IN (
+          SELECT r.id FROM speculative_runs r
+          WHERE r.finished_at IS NOT NULL AND r.finished_at < :cutoff
+            AND NOT EXISTS (
+              SELECT 1 FROM findings f
+              WHERE f.run_id = r.id AND f.status IN ('open', 'stale'))
+          LIMIT :limit)`),
+      // Unfinished, and started before both the cutoff and the process that owns
+      // the store — so abandoned by a daemon that died mid-run, not in flight.
+      // A run writes its Findings before it records itself complete, so one cut
+      // off in between holds them, and is kept as a finished one would be.
+      pruneUnfinishedRuns: db.prepare(`
+        DELETE FROM speculative_runs WHERE id IN (
+          SELECT r.id FROM speculative_runs r
+          WHERE r.finished_at IS NULL AND r.started_at < :cutoff
+            AND NOT EXISTS (
+              SELECT 1 FROM findings f
+              WHERE f.run_id = r.id AND f.status IN ('open', 'stale'))
+          LIMIT :limit)`),
       // Only superseded ones. A branch that has been idle longer than the
       // retention window still has a current change set, and it is the one thing
       // describing what that branch is carrying.
       pruneChangeSets: db.prepare(`
-        DELETE FROM change_sets
-        WHERE computed_at < ?
-          AND EXISTS (
-            SELECT 1 FROM change_sets newer
-            WHERE newer.branch_ref_id = change_sets.branch_ref_id
-              AND newer.computed_at > change_sets.computed_at)`),
-      pruneVerdicts: db.prepare('DELETE FROM analyzer_cache WHERE created_at < ?'),
+        DELETE FROM change_sets WHERE id IN (
+          SELECT c.id FROM change_sets c
+          WHERE c.computed_at < :cutoff
+            AND EXISTS (
+              SELECT 1 FROM change_sets newer
+              WHERE newer.branch_ref_id = c.branch_ref_id
+                AND newer.computed_at > c.computed_at)
+          LIMIT :limit)`),
+      // By when it was written, never when it was last used: a hit does not
+      // refresh it. Its evidence names the commits of the run that reached it,
+      // and the shadow's collection keeps objects younger than the window — safe
+      // only if no verdict can outlive the window those commits were made in.
+      pruneVerdicts: db.prepare(`
+        DELETE FROM analyzer_cache WHERE key IN (
+          SELECT key FROM analyzer_cache WHERE created_at < :cutoff LIMIT :limit)`),
+      // Ended ones only. A live session is what attributes a branch, and one an
+      // agent never ended is ended by the reaper once it goes quiet.
+      pruneSessions: db.prepare(`
+        DELETE FROM agent_sessions WHERE id IN (
+          SELECT id FROM agent_sessions
+          WHERE ended_at IS NOT NULL AND ended_at < :cutoff
+          LIMIT :limit)`),
     };
   }
 
@@ -661,37 +765,85 @@ class SqliteStore implements Store {
     });
   }
 
-  /**
-   * Returns the rows deleted from the four tables retention targets. Cascades
-   * are not counted: they follow from the schema rather than from the policy.
-   */
-  prune(before: string): Promise<number> {
-    return settled(() => {
-      const parsed = Date.parse(before);
-      if (Number.isNaN(parsed)) {
-        throw new InterlockError('CONFIG_INVALID', 'The retention cutoff is not a timestamp', {
-          details: { before },
+  prune(before: string, options: PruneOptions = {}): Promise<PruneReport> {
+    const cutoff = instant(before);
+    const owner = options.abandonedBefore === undefined ? null : instant(options.abandonedBefore);
+    if (cutoff === null || (owner === null && options.abandonedBefore !== undefined)) {
+      return Promise.reject(
+        new InterlockError('CONFIG_INVALID', 'A retention bound is not a timestamp', {
+          details: { before, abandonedBefore: options.abandonedBefore ?? null },
           remedy: 'Pass an ISO-8601 timestamp, as `new Date().toISOString()` produces.',
+        }),
+      );
+    }
+    const limit = options.batchSize ?? PRUNE_BATCH;
+    if (!Number.isInteger(limit) || limit < 1) {
+      return Promise.reject(new RangeError('batchSize must be a positive integer'));
+    }
+
+    // Abandoned means started before the cutoff and before the owner both.
+    const abandoned = owner === null ? null : owner < cutoff ? owner : cutoff;
+    this.#pruning ??= this.#prune(cutoff, limit, abandoned).finally(() => {
+      this.#pruning = null;
+    });
+    return this.#pruning;
+  }
+
+  async #prune(cutoff: string, limit: number, abandoned: string | null): Promise<PruneReport> {
+    const startedAt = performance.now();
+    const deleted = { events: 0, runs: 0, changeSets: 0, verdicts: 0, sessions: 0 };
+    let batches = 0;
+    let longestBatchMs = 0;
+    let complete = true;
+
+    // Runs first: what they take by cascade — resolved Findings, their
+    // evidence, verdicts — is then gone before the events are weighed.
+    type Pass = [keyof typeof deleted, StatementSync, string];
+    // Unfinished runs only with proof of which were abandoned.
+    const unfinished: Pass[] =
+      abandoned === null ? [] : [['runs', this.#statements.pruneUnfinishedRuns, abandoned]];
+    const passes: Pass[] = [
+      ['runs', this.#statements.pruneRuns, cutoff],
+      ...unfinished,
+      ['changeSets', this.#statements.pruneChangeSets, cutoff],
+      ['verdicts', this.#statements.pruneVerdicts, cutoff],
+      ['sessions', this.#statements.pruneSessions, cutoff],
+      ['events', this.#statements.pruneEvents, cutoff],
+    ];
+    passing: for (const [table, statement, bound] of passes) {
+      for (;;) {
+        // The daemon waits for a pass before closing, so this is a caller that
+        // did not; what is left is the next pass's.
+        if (this.#closed) {
+          complete = false;
+          break passing;
+        }
+        const batchStartedAt = performance.now();
+        // `changes` is a bigint only for a statement that could touch more rows
+        // than a double addresses, which a batch cannot.
+        const removed = this.#transaction(() =>
+          Number(statement.run({ cutoff: bound, limit }).changes),
+        );
+        longestBatchMs = Math.max(longestBatchMs, performance.now() - batchStartedAt);
+        batches += 1;
+        deleted[table] += removed;
+        if (removed < limit) break;
+        // Let the writes queued behind this batch through before the next.
+        await new Promise<void>((resolve) => {
+          setImmediate(resolve);
         });
       }
-      // Stored timestamps are `toISOString()` output, whose fixed shape is what
-      // makes a lexical comparison an ordering. Normalising the cutoff to that
-      // shape keeps an offset-bearing argument from comparing as another date.
-      const cutoff = new Date(parsed).toISOString();
+    }
 
-      // `changes` is a bigint only for a statement that could touch more rows
-      // than a double addresses, which no retention pass will.
-      const deleted = this.#transaction(
-        () =>
-          Number(this.#statements.pruneEvents.run(cutoff).changes) +
-          Number(this.#statements.pruneRuns.run(cutoff).changes) +
-          Number(this.#statements.pruneChangeSets.run(cutoff).changes) +
-          Number(this.#statements.pruneVerdicts.run(cutoff).changes),
-      );
-
-      this.#log.info('pruned', { before: cutoff, rows: deleted });
-      return deleted;
-    });
+    const report: PruneReport = {
+      ...deleted,
+      batches,
+      longestBatchMs: Math.round(longestBatchMs * 10) / 10,
+      durationMs: Math.round(performance.now() - startedAt),
+      complete,
+    };
+    this.#log.debug('pruned', { before: cutoff, ...report });
+    return report;
   }
 
   close(): Promise<void> {
@@ -749,4 +901,16 @@ class SqliteStore implements Store {
       // replace it with a symptom.
     }
   }
+}
+
+/**
+ * An instant in the shape stored timestamps have, or null for none.
+ *
+ * Stored timestamps are `toISOString()` output, whose fixed shape is what makes
+ * a lexical comparison an ordering; normalising to it keeps an offset-bearing
+ * argument from comparing as another date.
+ */
+function instant(value: string): string | null {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
 }

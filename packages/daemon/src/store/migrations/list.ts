@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { INITIAL_SCHEMA } from './001-initial.js';
 import { addSessionLiveness } from './002-session-liveness.js';
 import { addAnalyzerCacheRun } from './003-analyzer-cache-run.js';
+import { addRetentionIndexes } from './004-retention.js';
 
 /**
  * Schema migrations.
@@ -33,6 +34,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', up: INITIAL_SCHEMA },
   { version: 2, name: 'session-liveness', up: addSessionLiveness },
   { version: 3, name: 'analyzer-cache-run', up: addAnalyzerCacheRun },
+  { version: 4, name: 'retention', up: addRetentionIndexes },
 ];
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce(

@@ -9,6 +9,8 @@ import type { DataDirHold } from './data-dir.js';
 import type { ApiServer } from './api/index.js';
 import { EventBus } from './bus/index.js';
 import { createSessionRegistry } from './hooks/index.js';
+import { createRetention } from './retention.js';
+import type { Retention } from './retention.js';
 import { publishRuntime, unpublishRuntime } from './runtime-file.js';
 import { createScheduler } from './scheduler/index.js';
 import type { Scheduler } from './scheduler/index.js';
@@ -26,10 +28,11 @@ import type { WatchFactory, Watcher } from './watcher/index.js';
  * which keeps the rest of the codebase testable without a running system.
  *
  * Startup order matters — data-dir hold → store (migrations must succeed) →
- * bus → API → scheduler → watcher. The scheduler listens before the watcher's
- * first pass, or the branches that pass announces are never planned. Shutdown
+ * bus → API → scheduler → watcher → retention. The scheduler listens before the
+ * watcher's first pass, or the branches that pass announces are never planned;
+ * retention starts once the daemon is up, and prunes in the background. Shutdown
  * stops the watcher first, so nothing new is scheduled, then lets the runs in
- * flight land before the store closes under them.
+ * flight and a retention pass land before the store closes under them.
  */
 
 export interface DaemonOptions {
@@ -44,6 +47,8 @@ export interface DaemonOptions {
    * signal away and show the budget holding without it.
    */
   readonly watchFactory?: WatchFactory;
+  /** Overridable so a test does not wait out the retention cadence. */
+  readonly retentionIntervalMs?: number;
 }
 
 export interface Daemon {
@@ -93,6 +98,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * commands and which would otherwise name a dead agent until someone asked.
    */
   let reaper: ReturnType<typeof setInterval> | null = null;
+  let retention: Retention | null = null;
   /**
    * Appends, chained so the log stays in the order it was published.
    *
@@ -156,6 +162,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
   };
 
   async function begin(): Promise<void> {
+    // Taken before anything that could start a run, so every run this process
+    // starts is later than it.
+    const startedAt = new Date().toISOString();
     const runner = options.runner ?? createGitRunner();
     // Before the lock, which is the first thing written to the data dir.
     await refuseDataDirInRepos(config.dataDir, config.repos, runner);
@@ -223,6 +232,22 @@ export function createDaemon(options: DaemonOptions): Daemon {
       };
       publishRuntime(config.dataDir, runtime, log);
       log.info('daemon started', { port: runtime.port, repos: config.repos.length });
+
+      // After the daemon is up, never before: a store that has not been pruned
+      // in a while holds a backlog, and the first pass clears it in the
+      // background, a batch at a time.
+      retention = createRetention({
+        store,
+        windowMs: config.retention.windowMs,
+        logger: options.logger,
+        // Every run this daemon starts is later than this, so an unfinished one
+        // started before it was left by a process that is gone.
+        abandonedBefore: startedAt,
+        ...(options.retentionIntervalMs === undefined
+          ? {}
+          : { intervalMs: options.retentionIntervalMs }),
+      });
+      retention.start();
     } catch (error) {
       // A half-started daemon holds a port and a database handle, and the
       // next start would fail on both without saying why.
@@ -249,6 +274,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       clearInterval(reaper);
       reaper = null;
     }
+
+    // A pass writes to the store, so it lands before the store closes.
+    await retention?.stop();
+    retention = null;
 
     await api?.stop();
     api = null;
