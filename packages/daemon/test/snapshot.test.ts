@@ -416,6 +416,57 @@ describe('snapshot pipeline', () => {
       }
     });
 
+    it('starts the backoff over for a failure somewhere new', async () => {
+      let clock = 1_000_000;
+      const { sweep: counting, walks } = countingSweep({ now: () => clock });
+      await counting.reconcile(root);
+      writeFileSync(join(root, 'locked.txt'), 'secret\n');
+      chmodSync(join(root, 'locked.txt'), 0o000);
+      const walkedAt = async (seconds: number): Promise<boolean> => {
+        clock = 1_000_000 + seconds * 1_000;
+        const before = walks();
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        return walks() > before;
+      };
+      try {
+        expect(await walkedAt(0)).toBe(true);
+        expect(await walkedAt(10)).toBe(true);
+        // Something else was written: the probe moved, so this is walked at
+        // once, fails at the same file, and is a new failure — retried after
+        // the first wait again, not after the doubled one.
+        writeFileSync(join(root, 'other.txt'), 'other\n');
+        expect(await walkedAt(11)).toBe(true);
+        expect(await walkedAt(21)).toBe(true);
+      } finally {
+        chmodSync(join(root, 'locked.txt'), 0o644);
+      }
+    });
+
+    it('never waits longer than the backstop between walks', async () => {
+      let clock = 1_000_000;
+      const { sweep: counting, walks } = countingSweep({
+        recaptureAfterMs: 15_000,
+        now: () => clock,
+      });
+      await counting.reconcile(root);
+      writeFileSync(join(root, 'locked.txt'), 'secret\n');
+      chmodSync(join(root, 'locked.txt'), 0o000);
+      const walkedAt = async (seconds: number): Promise<boolean> => {
+        clock = 1_000_000 + seconds * 1_000;
+        const before = walks();
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        return walks() > before;
+      };
+      try {
+        expect(await walkedAt(0)).toBe(true);
+        expect(await walkedAt(10)).toBe(true);
+        // Doubled, the next wait would be 20 s; the backstop caps it at 15.
+        expect(await walkedAt(25)).toBe(true);
+      } finally {
+        chmodSync(join(root, 'locked.txt'), 0o644);
+      }
+    });
+
     it('walks again at a failure once the backstop is due', async () => {
       let clock = 1_000_000;
       const { sweep: counting, walks } = countingSweep({
