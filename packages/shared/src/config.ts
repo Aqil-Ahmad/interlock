@@ -96,7 +96,7 @@ export interface RetentionConfig {
   /**
    * How long the daemon's database keeps what it no longer needs: finished
    * runs, their events, superseded change sets, cached verdicts and ended
-   * sessions. Anything an open Finding still rests on is kept however old it
+   * sessions. Anything an open or stale Finding still rests on is kept however old it
    * is. It bounds the database, not the shadow clones.
    */
   readonly windowMs: number;
@@ -116,7 +116,7 @@ export const DEFAULT_DATA_DIR = join(homedir(), '.interlock');
  *
  * Five agents each saving every second grew the store about 58 MB an hour, so
  * a day bounds even that to about 1.4 GB, and a week would be ten times it.
- * Past a day the window buys little: anything an open Finding rests on is kept
+ * Past a day the window buys little: anything an open or stale Finding rests on is kept
  * however old, a restart re-verifies every pair, and a verdict that ages out
  * costs one ordinary run. A day still explains yesterday's work the next morning.
  */
