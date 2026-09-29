@@ -304,11 +304,45 @@ merge-tree` over the two commits reports the conflict — with neither side
   executed on the host, and the pool links no `node_modules`: how dependencies
   reach a check is the sandbox's.
 
-- [ ] **Shadow garbage collection**
-      **Files:** `packages/core/src/git/shadow.ts`
-      **What:** reclaim unreferenced objects in the shadow and bound its disk use, pool slots included.
-      **Done when:** throwaway pool commits and spent snapshot commits are collected, and the shadow's size stays bounded across a day of continuous checks.
-      **Constraints:** a live slot's `HEAD` and index are already roots for git's own `prune` — verified, a worktree's `HEAD` is walked — but a snapshot commit a queued check still needs is referenced by nothing and must be made a root before anything collects. So is every commit a Finding's evidence names: a `merge-conflict` evidence carries `commitA` and `commitB`, the snapshot commits its run made, and a cache hit re-serves the evidence of the run that reached the verdict, so an open Finding can name commits days old. Collecting them leaves the evidence naming objects that are gone. Either the commits named by open Findings and by cached verdicts are roots, or a verdict whose commits are collected is dropped with them. A rebuilt clone is already covered: its generation is part of every verdict's key, so a rebuild misses rather than serving evidence from the clone before it. Never collect the user's store: the shadow borrows it through alternates. If collection keeps "objects younger than the window" instead of rooting those commits, the window must be `retention.windowMs` or longer: retention prunes a verdict by when it was written and a hit never refreshes it, so no verdict outlives that window — but only that window.
+- [x] **Shadow garbage collection**
+      **Files:** `packages/core/src/git/shadow.ts`, `packages/daemon/src/shadows.ts`, `packages/daemon/src/daemon.ts`, `packages/daemon/src/retention.ts`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/watcher/snapshot.ts`, `packages/daemon/src/store/`, `scripts/scheduler-bench.ts`
+      **What:** reclaim the objects Interlock writes into each shadow — capture blobs and trees, snapshot commits, merge trees, pool commits, nearly all loose and unreferenced — so the shadow's disk use stays bounded under continuous checking.
+
+  Rewritten before starting, from what `git prune` was measured to do against a
+  bare shadow borrowing the user's store. **Collection is `git prune
+--expire=@<epoch>`**, never `gc`: it deletes only the shadow's own loose,
+  unreachable objects older than the expiry, reads the user's objects for
+  reachability and never touches them; `gc` would repack and run the
+  maintenance the shadow switches off. The expiry is exact seconds — an ISO
+  string with a `Z` was parsed as another date and pruned nothing.
+  **The expiry is the retention cutoff less a margin**, and collection runs in
+  the retention pass after the store is pruned, so a verdict older than the
+  window is gone before its objects are; the margin covers the one way a recent
+  verdict can name an old object — a snapshot commit reused from cache — whose
+  reuse gets an age bound to match. **Keep refs under `refs/interlock/keep/`**,
+  rewritten each pass, pin what age cannot vouch for: the commits an open or
+  stale Finding's evidence names, and each branch's current snapshot tree — a
+  queued check's input, which an idle branch never rewrites. **One damaged keep
+  candidate fails the whole prune** — a commit whose parent the user's `gc`
+  removed stops `prune` walking it — so each is checked first, scoped to stop at
+  the user's history, and a broken one is skipped and reported. **The shadow is
+  refreshed first** (`ensureShadow`, which fetches with `--prune`), so no stale
+  ref names an object the user's `gc` removed. **Collection is exclusive** per
+  repository against runs and captures, which share it, so nothing written
+  mid-walk is lost. A failure is infrastructure: logged, backed off, never a
+  run's failure. A rebuilt clone is already covered by the generation in every
+  verdict's key.
+
+  **Done when:** only old, unreachable objects go — a fresh capture, a pool slot's
+  current commit and every kept object survive, a slot's previous commit and
+  resolved Findings' commits do not; an open Finding's evidence commits and every
+  still-servable verdict's exist after a collection; a keep candidate with broken
+  ancestry and a stale ref to a `gc`'d object each leave collection working; a
+  failure backs off without failing a run; the user's repository is
+  byte-identical and its object count unchanged; and a day of continuous checks,
+  compressed, shows the shadow's size flat after the first window, with the
+  numbers in `log.md`.
+  **Constraints:** never collect the user's store — `prune` runs on a `ShadowRepo` only, which the runner enforces. No background git maintenance. A queued or running check never loses an object it needs.
 
 - [x] **Retention**
       **Files:** `packages/daemon/src/daemon.ts`, `packages/daemon/src/store/`, `packages/shared/src/config.ts`, `docs/threat-model.md`

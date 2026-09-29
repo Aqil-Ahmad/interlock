@@ -4,6 +4,17 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-29 — shadow garbage collection
+
+- **Task rewritten before starting,** from what `git prune` was measured to do against a bare shadow borrowing the user's store. The rewrite is in the milestone: prune with `--expire=@<epoch>`, never `gc`; the expiry is the retention cutoff less a margin, collected in the retention pass after the store; keep refs for live Findings' evidence and each branch's last-seen tree; candidates checked first; refresh first; exclusive per repository against runs and captures; failure is infrastructure, backed off.
+- **Found — an ISO expiry with a `Z` prunes nothing,** silently: git read it as another date. Epoch seconds are exact.
+- **Found — one keep ref naming a missing object fails the whole prune** (exit 128), and so does a stale `refs/remotes/user/*` ref after the user's `gc`. So collection refreshes first, checks each candidate with a quiet `rev-list` scoped to stop at the user's history, and skips and reports one that is broken. `for-each-ref` still lists a ref whose object is gone, so the rewrite deletes it.
+- **Decided — snapshot commits are reused for at most an hour** (`SNAPSHOT_COMMIT_REUSE_MS`), and the expiry sits that far below the retention cutoff. Before this a reused commit was as old as the daemon, so a verdict written a minute ago could name a commit from days ago. Bounded, no servable verdict names an object older than the expiry. Checked by probe that prune keeps whatever a recent object reaches, so a fresh commit keeps its old tree.
+- **Decided — keep open and stale Findings, not only open.** Retention keeps both. Added `listLiveFindings` rather than widening `listOpenFindings`, which feeds what is shown as current.
+- **Decided — the gate is writer-preferring.** Runs and captures hold it shared and collection alone, and a run asking while a collection waits queues behind it. Otherwise a steady stream of runs would starve collection. The gap between the watcher's capture and its announcement is outside the gate, which is safe because anything written then is fresh and the expiry is at least two hours back.
+- **Measured** with `INTERLOCK_BENCH_MODE=retention`: 10,000 files, five branches each saving every second, 2,657 runs, a 3-minute window over 5 windows, and the reuse bound compressed to 1/24 of the window as the defaults have it. Uncollected, the shadow grows 46k loose objects and 37 MB an hour. With collection it reaches 2,236 objects (1.8 MB) at the first window, then holds at 2,484–2,537 objects (1.98–2.01 MB) through windows two to five, with no packs. 30 collections removed 8,887 objects; the longest took 1.05 s, most of it walking the user's history.
+- **Mutation: 24, 24 caught,** after the one survivor (held trees not scoped to their repository) was pinned.
+
 ## 2026-09-29 — merged dev into the watcher fallback, and one more review point
 
 - **Merged `origin/dev`, retention.** Two conflicts, both additive: `DaemonOptions` keeps `watchFactory` beside `retentionIntervalMs`, and the demo file keeps both new tests; retention's restarted daemon goes through the file's own `build`, so its log is kept too. The log itself came through with its markers still in, reported resolved; resolved by hand, every entry kept, newest first. `pnpm verify` green at 1,251 tests.
