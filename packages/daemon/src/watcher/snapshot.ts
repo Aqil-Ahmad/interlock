@@ -203,18 +203,22 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       // through to the hash, so a worktree that came back is announced now.
       const sameBranch = previous?.kind === 'tree' && previous.branchRefId === branch.id;
       const signature = await probe(branch.worktreePath, branch.dirty);
+      const failure = failed.get(branch.worktreePath);
       if (
         previous?.kind === 'tree' &&
         sameBranch &&
         previous.headSha === branch.headSha &&
         !previous.changed &&
         previous.probe === signature &&
+        // A failed walk spent whatever mark asked for it and recorded no tree,
+        // so the tree held here may predate what that mark reported. The
+        // retry below decides when to look again, not this.
+        failure === undefined &&
         now() - previous.at < recaptureAfterMs
       ) {
         await rememberOn(branch, previous.snapshotId);
         return;
       }
-      const failure = failed.get(branch.worktreePath);
       if (
         failure?.probe === signature &&
         // Another branch checked out onto the same commit reads the same probe

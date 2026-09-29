@@ -390,6 +390,41 @@ describe('snapshot pipeline', () => {
       expect(snapshots()).toHaveLength(1);
     });
 
+    it('retries a marked capture that failed, though nothing moved the probe', async () => {
+      // A signal asked for the walk and the walk failed: the mark is spent, the
+      // probe reads as it did, and reusing the old tree on the next pass would
+      // drop what the signal reported until the backstop.
+      let clock = 1_000_000;
+      let failing = false;
+      let walks = 0;
+      const real = createGitRunner();
+      const flaky = createSweep({
+        store,
+        bus,
+        dataDir: join(base, 'data'),
+        now: () => clock,
+        runner: {
+          run: (repo, args, runOptions) => {
+            if (args[0] === 'add') walks += 1;
+            return failing && args[0] === 'add'
+              ? Promise.resolve({ stdout: '', stderr: '', exitCode: 128 })
+              : real.run(repo, args, runOptions);
+          },
+        },
+      });
+      await flaky.reconcile(root);
+      flaky.markChanged(root);
+      failing = true;
+      await expect(flaky.reconcile(root)).rejects.toThrow();
+      const afterFailure = walks;
+
+      failing = false;
+      clock += 10_000;
+      await flaky.reconcile(root);
+
+      expect(walks).toBe(afterFailure + 1);
+    });
+
     it('backs off a failure that lasts, doubling towards the backstop', async () => {
       let clock = 1_000_000;
       const { sweep: counting, walks } = countingSweep({ now: () => clock });
