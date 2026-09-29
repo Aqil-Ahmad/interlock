@@ -4,6 +4,17 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-30 — review of shadow collection: packing taken, shutdown taken, pool noted
+
+- **Valid, and worse than the review estimated — the default window was unmeasured.** A synthetic shadow at the default's scale (25 hours of the bench's load: 1,147,000 loose objects built the way the bench writes them) is 4.4 GiB on disk for 1.3 GiB of content, since each small object takes a whole block. One hourly prune over it took 548 s, most of it system time listing files, and the collection timeout was 10 minutes.
+- **Taken — pack every pass: `repack --cruft -d -l --cruft-expiration=@<t>`, then prune.** The same day packed was 135 MB. The hour after, with 46k new loose objects, took 7.5 s to prune and 24 s to repack. The one-time pack of a day's backlog took 37 minutes, so the timeout is now an hour; a shutdown stops a collection through its signal instead of waiting it out. The compressed bench now holds at 84–104 loose objects and a 305–321 KiB pack from the first window on, against about 2,500 loose objects and 2 MB before. The longest collection took 1.16 s.
+- **Not taken — a two-hour expiry with verdicts that carry Findings aged to match.** That changes the store's retention semantics for one class of verdict, and at the bench's load still leaves about 140k loose files. Packing fixes the file count and the walk at any expiry.
+- **Found by probe — prune before repack loses an object written again.** Writing an object that exists only in a cruft pack leaves a fresh loose copy; `prune` deletes loose copies of packed objects, and the repack after it saw only the old time and dropped the object. Repack first. Pinned with a reverted capture.
+- **Found — a released keep ages from its pack's time.** A kept object is packed with the reachable ones, so once released the cruft pack stamps it with that pack's time: it outlives its release by one expiry, never less. Pinned both ways.
+- **Taken — shutdown waited on a collection.** The runner takes an `AbortSignal`, and an abort is reported as stopped, never as a timeout. Retention aborts its collection on stop. The collector treats a stopped collection as no failure (no backoff) and starts no further repository once the signal has aborted.
+- **Noted in the skill — pool slots.** A slot's `HEAD` is a root with parents that the user's `gc` can remove, and the pool writes objects. Wiring the pool into runs has to check slot heads like keep candidates, evicting any that fail, and hold the gate shared.
+- **Mutation: 34, 33 caught.** The survivor, an early return for a signal already aborted, was redundant: Node kills such a child at once, and the runner reports it as stopped. It was removed.
+
 ## 2026-09-29 — shadow garbage collection
 
 - **Task rewritten before starting,** from what `git prune` was measured to do against a bare shadow borrowing the user's store. The rewrite is in the milestone: prune with `--expire=@<epoch>`, never `gc`; the expiry is the retention cutoff less a margin, collected in the retention pass after the store; keep refs for live Findings' evidence and each branch's last-seen tree; candidates checked first; refresh first; exclusive per repository against runs and captures; failure is infrastructure, backed off.

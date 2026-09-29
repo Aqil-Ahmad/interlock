@@ -332,6 +332,10 @@ merge-tree` over the two commits reports the conflict — with neither side
   mid-walk is lost. A failure is infrastructure: logged, backed off, never a
   run's failure. A rebuilt clone is already covered by the generation in every
   verdict's key.
+  **Revised after review:** collection also packs every pass (`repack --cruft
+-d -l`, before the prune), since a day of loose objects at the default window
+  measured 4.4 GiB and a nine-minute prune; a shutdown stops a collection in
+  progress rather than waiting for it.
 
   **Done when:** only old, unreachable objects go — a fresh capture, a pool slot's
   current commit and every kept object survive, a slot's previous commit and
