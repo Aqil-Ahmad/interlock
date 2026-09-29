@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createLogger, ulid } from '@interlock/shared';
 import type { EventId, EventRecord, LogRecord } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createRetention } from '../src/retention.js';
+import { RETENTION_INTERVAL_MS, createRetention, retentionIntervalFor } from '../src/retention.js';
 import type { Retention } from '../src/retention.js';
 import { openStore } from '../src/store/index.js';
 import type { Store } from '../src/store/index.js';
@@ -97,6 +97,24 @@ describe('retention', () => {
       events: 1,
       complete: true,
     });
+  });
+
+  it('runs hourly, or a quarter of the window when that is sooner', () => {
+    // A row outlives the window by at most one interval.
+    expect(retentionIntervalFor(DAY)).toBe(RETENTION_INTERVAL_MS);
+    expect(retentionIntervalFor(4 * 60 * 60_000)).toBe(RETENTION_INTERVAL_MS);
+    expect(retentionIntervalFor(60 * 60_000)).toBe(15 * 60_000);
+  });
+
+  it('takes its cadence from the window when given none', async () => {
+    retention = createRetention({
+      store,
+      windowMs: 200,
+      logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+    });
+    retention.start();
+    // Every 50 ms: three passes well inside what an hourly timer would allow.
+    await until(() => passesLogged().length >= 3, 'three passes');
   });
 
   it('prunes again on the timer', async () => {

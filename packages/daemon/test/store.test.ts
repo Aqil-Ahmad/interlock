@@ -1468,6 +1468,15 @@ describe('store', () => {
       await store.close();
 
       expect(await pass).toMatchObject({ events: 1, complete: false });
+
+      // Nothing is carried between passes: the next re-derives what is old from
+      // its cutoff, and takes what the cut-short one left.
+      store = await openStore({ path: dbPath });
+      expect(await store.prune(T.mid, { batchSize: 1 })).toMatchObject({
+        events: 2,
+        complete: true,
+      });
+      expect(await collect(store.readEvents())).toEqual([]);
     });
 
     it('refuses a batch size that is not a positive integer', async () => {

@@ -157,7 +157,8 @@ export interface Store {
    * In small batches, each its own transaction, yielding between them: SQLite
    * has one writer, and one transaction over a window's worth of rows would
    * hold the run pipeline's writes for as long as it took. A call made while a
-   * pass is running joins it rather than starting another.
+   * pass is running joins it rather than starting another, and gets that pass's
+   * report — its cutoff, not the one it asked for.
    */
   prune(before: string, options?: PruneOptions): Promise<PruneReport>;
 
@@ -533,7 +534,10 @@ class SqliteStore implements Store {
       // `pair.scheduled` it answered and the edit behind that. Without them an
       // old open Finding keeps its run and loses its explanation. Computed in
       // the statement that deletes, so a Finding opened between batches is seen
-      // by the next one; the kept set is small, since open Findings are few.
+      // by the next one — though an earlier batch of the same pass may already
+      // have taken any of its chain that was past the window; a new Finding's
+      // chain is the edit and run just published, so in practice none is. The
+      // kept set is small, since open Findings are few.
       pruneEvents: db.prepare(`
         WITH RECURSIVE kept(id) AS (
           SELECT id FROM events

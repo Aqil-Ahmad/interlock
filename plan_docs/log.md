@@ -4,6 +4,14 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-29 — second review of retention: four taken, one already there
+
+- **Already there — the restart done-when.** `scheduler-demo.test.ts`, "keeps an open Finding traceable through a prune, and re-verifies it after a restart": a real Finding raised through the daemon, the daemon stopped, the store pruned with every row old, the chain walked back to the edit, a new daemon started, and exactly one open Finding afterwards with the same id and `firstSeenAt`, reached by a full run.
+- **Taken — the pass cadence let a row live nearly twice a short window.** A row can outlive the window by one interval, and the interval was a flat hour, so a one-hour window kept rows for nearly two. The default interval is now an hour or a quarter of the window, whichever is sooner. The CHANGELOG and T7 say so.
+- **Taken — a pass cut short resumes.** Pinned: a store closed mid-pass, reopened, and the next pass takes what the first left, since nothing is carried between passes — each re-derives what is old from its cutoff.
+- **Taken, as wording — two overstatements.** The event query's comment now says an earlier batch of a pass may already have taken a new Finding's past-window chain, which in practice it has none of; `prune` says a joining caller gets the running pass's report, cutoff included.
+- **Taken — the verdict/shadow window coupling is now in the shadow collection task's constraint**, where its implementer reads it: a collection that keeps "objects younger than the window" instead of rooting the commits Findings and verdicts name must use `retention.windowMs` or longer.
+
 ## 2026-09-29 — review of retention: one taken, one noted
 
 - **Taken — a window past the range of a date crashed the daemon.** `retention.windowMs` had a floor and no ceiling, so `Number.MAX_SAFE_INTEGER` — a natural "keep forever" — passed validation, and `new Date(now - window).toISOString()` threw outside the pass's `try`. The timer's pass then rejected with nothing to catch it, which ends the process. Now bounded at ten years, which is "keep everything" for any machine this runs on, and the cutoff is computed inside the `try`, so a bad one fails the pass like any other. Both pinned, and both red before the fix.

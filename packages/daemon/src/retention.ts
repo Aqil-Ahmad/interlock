@@ -29,18 +29,29 @@ export interface RetentionOptions {
 }
 
 /**
- * How often a pass runs.
+ * The longest gap between passes.
  *
  * Each pass deletes what aged out since the last, so the cadence is what keeps
- * a pass small: an hour of a busy daemon's rows is a few batches. The window is
- * at least an hour, so nothing lives much past it.
+ * a pass small: an hour of a busy daemon's rows is a few batches.
  */
 export const RETENTION_INTERVAL_MS = 60 * 60_000;
+
+/**
+ * How often a pass runs for a window: hourly, or a quarter of the window if
+ * that is sooner.
+ *
+ * A row can outlive the window by one interval — it ages out just after a pass
+ * and waits for the next — so an hourly pass over a one-hour window would keep
+ * rows for nearly two. A quarter bounds that to a quarter over at any window.
+ */
+export function retentionIntervalFor(windowMs: number): number {
+  return Math.min(RETENTION_INTERVAL_MS, Math.floor(windowMs / 4));
+}
 
 export function createRetention(options: RetentionOptions): Retention {
   const log = options.logger.child('retention');
   const { store, windowMs } = options;
-  const intervalMs = options.intervalMs ?? RETENTION_INTERVAL_MS;
+  const intervalMs = options.intervalMs ?? retentionIntervalFor(windowMs);
   const now = options.now ?? Date.now;
 
   let timer: ReturnType<typeof setInterval> | null = null;
