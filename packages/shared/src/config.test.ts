@@ -77,6 +77,37 @@ describe('validateConfig', () => {
     expect(problems).toContain('sessions.staleAfterMs must be >= 1000');
   });
 
+  it('keeps a day of history by default, and nothing under an hour', () => {
+    expect(DEFAULT_CONFIG.retention.windowMs).toBe(24 * 60 * 60_000);
+    expect(validateConfig(DEFAULT_CONFIG)).toEqual([]);
+    expect(validateConfig({ ...DEFAULT_CONFIG, retention: { windowMs: 60 * 60_000 } })).toEqual([]);
+    expect(
+      validateConfig({ ...DEFAULT_CONFIG, retention: { windowMs: 60 * 60_000 - 1 } }),
+    ).toContain(
+      'retention.windowMs must be between 3600000 (one hour) and 315360000000 (ten years)',
+    );
+  });
+
+  it('refuses a retention window longer than ten years', () => {
+    // A "keep forever" value puts the cutoff outside the range a date can hold.
+    expect(
+      validateConfig({ ...DEFAULT_CONFIG, retention: { windowMs: Number.MAX_SAFE_INTEGER } }),
+    ).toContain(
+      'retention.windowMs must be between 3600000 (one hour) and 315360000000 (ten years)',
+    );
+    expect(validateConfig({ ...DEFAULT_CONFIG, retention: { windowMs: 315_360_000_000 } })).toEqual(
+      [],
+    );
+  });
+
+  it('refuses a retention window that is not a number', () => {
+    const problems = validateConfig({
+      ...DEFAULT_CONFIG,
+      retention: { windowMs: '1d' as unknown as number },
+    });
+    expect(problems).toContain('retention.windowMs must be a number');
+  });
+
   it('refuses a relative data dir, as it refuses a relative repository', () => {
     const problems = validateConfig({ ...DEFAULT_CONFIG, dataDir: 'relative/data' });
     expect(problems).toContain('dataDir must be absolute: relative/data');
@@ -343,6 +374,17 @@ describe('parseConfigFile', () => {
       sessions: { staleAfterMs: 1_000 },
     });
     expect(problemsOf(JSON.stringify({ sessions: { stale: 1 } }))[0]).toContain('`stale`');
+  });
+
+  it('reads the retention section like any other, over the default', () => {
+    expect(
+      parseConfigFile(JSON.stringify({ retention: { windowMs: 7_200_000 } }), PATH),
+    ).toStrictEqual({ retention: { windowMs: 7_200_000 } });
+    expect(problemsOf(JSON.stringify({ retention: { days: 1 } }))[0]).toContain('`days`');
+    expect(resolveConfig({ retention: { windowMs: 7_200_000 } }).retention.windowMs).toBe(
+      7_200_000,
+    );
+    expect(resolveConfig({}).retention).toStrictEqual(DEFAULT_CONFIG.retention);
   });
 
   it('refuses an unknown key inside a section', () => {

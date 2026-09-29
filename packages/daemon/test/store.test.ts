@@ -30,6 +30,7 @@ import { SCHEMA_VERSION, openStore, runMigrations } from '../src/store/index.js'
 import { INITIAL_SCHEMA } from '../src/store/migrations/001-initial.js';
 import { addSessionLiveness } from '../src/store/migrations/002-session-liveness.js';
 import { addAnalyzerCacheRun } from '../src/store/migrations/003-analyzer-cache-run.js';
+import { addRetentionIndexes } from '../src/store/migrations/004-retention.js';
 import type { Store } from '../src/store/index.js';
 import { rejection } from './support/rejection.js';
 
@@ -906,6 +907,69 @@ describe('store', () => {
    * through would put a verdict no analyzer produced, or a status no rule
    * assigned, in front of the scheduler as though it were real.
    */
+  describe('the retention migration', () => {
+    /** A store at schema 3, holding events written before the column existed. */
+    const atVersion3 = (path: string): DatabaseSync => {
+      const db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+      db.exec(INITIAL_SCHEMA);
+      addSessionLiveness(db);
+      addAnalyzerCacheRun(db);
+      db.exec('PRAGMA user_version = 3');
+      const insert = db.prepare(
+        'INSERT INTO events (id, repo_id, type, payload, at, caused_by) VALUES (?, NULL, ?, ?, ?, NULL)',
+      );
+      insert.run(
+        '01E',
+        'run.started',
+        JSON.stringify({ type: 'run.started', runId: 'R1' }),
+        T.early,
+      );
+      insert.run('01F', 'daemon.started', JSON.stringify({ type: 'daemon.started' }), T.early);
+      return db;
+    };
+
+    const indexes = (db: DatabaseSync, table: string): string[] =>
+      db
+        .prepare(`SELECT name FROM pragma_index_list('${table}')`)
+        .all()
+        .map((row) => String((row as { name: unknown }).name));
+
+    it('names the run of every event already written, rewriting none of them', () => {
+      const db = atVersion3(join(dataDir, 'v3.db'));
+      try {
+        const before = db.prepare('SELECT id, payload FROM events ORDER BY id').all();
+
+        expect(runMigrations(db, silentLogger)).toBe(SCHEMA_VERSION);
+
+        expect(db.prepare('SELECT id, run_id FROM events ORDER BY id').all()).toEqual([
+          { id: '01E', run_id: 'R1' },
+          { id: '01F', run_id: null },
+        ]);
+        expect(db.prepare('SELECT id, payload FROM events ORDER BY id').all()).toEqual(before);
+        expect(indexes(db, 'events')).toContain('idx_events_run');
+        expect(indexes(db, 'analyzer_cache')).toContain('idx_analyzer_cache_created');
+        expect(indexes(db, 'agent_sessions')).toContain('idx_agent_sessions_ended');
+      } finally {
+        db.close();
+      }
+    });
+
+    it('applies again to a database that already has it', () => {
+      const db = atVersion3(join(dataDir, 'again3.db'));
+      try {
+        runMigrations(db, silentLogger);
+        expect(() => addRetentionIndexes(db)).not.toThrow();
+        const columns = db
+          .prepare("SELECT name FROM pragma_table_xinfo('events')")
+          .all()
+          .map((row) => String((row as { name: unknown }).name));
+        expect(columns.filter((name) => name === 'run_id')).toHaveLength(1);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
   describe('enumerated columns', () => {
     let repoId: RepoId;
     let findingId: FindingId;
@@ -1098,7 +1162,7 @@ describe('store', () => {
       await store.appendEvent(event({ at: T.early }));
       await store.appendEvent(event({ at: T.late }));
 
-      expect(await store.prune(T.mid)).toBe(1);
+      expect(await store.prune(T.mid)).toMatchObject({ events: 1, runs: 0, complete: true });
       expect((await collect(store.readEvents())).map((each) => each.at)).toEqual([T.late]);
     });
 
@@ -1130,19 +1194,68 @@ describe('store', () => {
       expect(countRows('evidence')).toBe(dropped.evidence.length);
     });
 
-    it('keeps an unfinished run whatever its age', async () => {
-      const repoId = (await store.upsertRepo(repo())).id;
-      const a = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/a', name: 'a' })))
-        .id;
-      const b = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/b', name: 'b' })))
-        .id;
-      const pairId = (await store.upsertMergePair(pair(repoId, a, b))).id;
-      const running = run(pairId, { status: 'running', finishedAt: null, durationMs: null });
-      await store.upsertRun(running);
+    describe('unfinished runs', () => {
+      let pairId: MergePairId;
+      let a: BranchRefId;
+      let b: BranchRefId;
+      const unfinished = (startedAt: string): SpeculativeRun =>
+        run(pairId, { status: 'running', startedAt, finishedAt: null, durationMs: null });
 
-      await store.prune(T.late);
+      beforeEach(async () => {
+        const repoId = (await store.upsertRepo(repo())).id;
+        a = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/a', name: 'a' }))).id;
+        b = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/b', name: 'b' }))).id;
+        pairId = (await store.upsertMergePair(pair(repoId, a, b))).id;
+      });
 
-      expect(await store.getRun(running.id)).not.toBeNull();
+      it('drops one a process that is gone left, past the window', async () => {
+        const abandoned = unfinished(T.early);
+        await store.upsertRun(abandoned);
+
+        // The daemon started at T.mid: nothing it started began before that.
+        expect(await store.prune(T.late, { abandonedBefore: T.mid })).toMatchObject({ runs: 1 });
+        expect(await store.getRun(abandoned.id)).toBeNull();
+      });
+
+      it('keeps one this process started, however old — it may still be running', async () => {
+        // Past the cutoff, and after the process began: live as far as anything
+        // here can prove.
+        const live = unfinished(T.mid);
+        await store.upsertRun(live);
+
+        await store.prune(T.late, { abandonedBefore: T.early });
+
+        expect(await store.getRun(live.id)).not.toBeNull();
+      });
+
+      it('keeps every one when nothing says which process left it', async () => {
+        const abandoned = unfinished(T.early);
+        await store.upsertRun(abandoned);
+
+        await store.prune(T.late);
+
+        expect(await store.getRun(abandoned.id)).not.toBeNull();
+      });
+
+      it('keeps one whose process died after writing its Findings and before finishing', async () => {
+        // A run writes its Findings, then records itself complete; a crash in
+        // between leaves it unfinished and holding them.
+        const cut = unfinished(T.early);
+        await store.upsertRun(cut);
+        const open = finding(cut.id, a, b);
+        await store.upsertFinding(open);
+
+        await store.prune(T.late, { abandonedBefore: T.late });
+
+        expect(await store.getRun(cut.id)).not.toBeNull();
+        expect(await store.getFinding(open.id)).not.toBeNull();
+      });
+
+      it('refuses an abandonment instant that is not a timestamp', async () => {
+        await expect(store.prune(T.late, { abandonedBefore: 'at boot' })).rejects.toMatchObject({
+          code: 'CONFIG_INVALID',
+        });
+      });
     });
 
     it('drops superseded change sets but keeps the newest for each branch', async () => {
@@ -1212,9 +1325,243 @@ describe('store', () => {
       });
 
       // Written now, so a cutoff in the future is what puts it out of window.
-      expect(await store.prune('2099-01-01T00:00:00.000Z')).toBe(1);
+      expect(await store.prune('2099-01-01T00:00:00.000Z')).toMatchObject({ verdicts: 1, runs: 0 });
       expect(await store.getRun(held.id)).not.toBeNull();
       expect(await store.getCachedVerdict('k')).toBeNull();
+    });
+
+    describe('the events an open Finding rests on', () => {
+      /**
+       * The events a run leaves, in the order the pipeline publishes them and
+       * each naming the one before: the edit, the pair it scheduled, the run,
+       * and the Finding it raised.
+       */
+      const chain = async (runId: SpeculativeRunId, findingId: FindingId, at: string) => {
+        const records: EventRecord[] = [];
+        const add = async (payload: Record<string, unknown>): Promise<void> => {
+          const record = event({
+            type: payload.type as EventRecord['type'],
+            payload: { repoId: null, at, ...payload } as unknown as EventRecord['payload'],
+            at,
+            causedBy: records.at(-1)?.id ?? null,
+          });
+          records.push(record);
+          await store.appendEvent(record);
+        };
+        await add({ type: 'branch.snapshot', branchRefId: ulid(), treeOid: 't', headSha: 'h' });
+        await add({ type: 'pair.scheduled', mergePairId: ulid(), priority: 1, reason: 'overlap' });
+        await add({ type: 'run.started', runId, mergePairId: ulid() });
+        await add({ type: 'run.merge-completed', runId, clean: false, conflictedPaths: [] });
+        await add({
+          type: 'run.analyzer-completed',
+          runId,
+          analyzer: 'textual',
+          verdict: 'findings',
+        });
+        await add({ type: 'finding.raised', findingId, runId, kind: 'textual', rule: 'r' });
+        return records;
+      };
+
+      /** From an event back through `caused_by` to where the log stops. */
+      const walk = async (from: EventRecord): Promise<string[]> => {
+        const byId = new Map((await collect(store.readEvents())).map((e) => [e.id, e]));
+        const types: string[] = [];
+        for (let at: EventRecord | undefined = byId.get(from.id); at !== undefined;) {
+          types.push(at.type);
+          at = at.causedBy === null ? undefined : byId.get(at.causedBy);
+        }
+        return types;
+      };
+
+      let a: BranchRefId;
+      let b: BranchRefId;
+      let pairId: MergePairId;
+
+      beforeEach(async () => {
+        const repoId = (await store.upsertRepo(repo())).id;
+        a = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/a', name: 'a' }))).id;
+        b = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/b', name: 'b' }))).id;
+        pairId = (await store.upsertMergePair(pair(repoId, a, b))).id;
+      });
+
+      it('keeps them however old, beside a resolved Finding whose chain goes', async () => {
+        const held = run(pairId, { finishedAt: T.early });
+        const spent = run(pairId, { finishedAt: T.early });
+        await store.upsertRun(held);
+        await store.upsertRun(spent);
+        const open = finding(held.id, a, b);
+        const resolved = finding(spent.id, a, b, { status: 'resolved', resolvedAt: T.early });
+        await store.upsertFinding(open);
+        await store.upsertFinding(resolved);
+        const kept = await chain(held.id, open.id, T.early);
+        const gone = await chain(spent.id, resolved.id, T.early);
+        await store.appendEvent(event({ at: T.early }));
+
+        const report = await store.prune(T.late);
+
+        expect(await walk(kept.at(-1)!)).toEqual([
+          'finding.raised',
+          'run.analyzer-completed',
+          'run.merge-completed',
+          'run.started',
+          'pair.scheduled',
+          'branch.snapshot',
+        ]);
+        const left = new Set((await collect(store.readEvents())).map((e) => e.id));
+        expect(gone.filter((e) => left.has(e.id))).toEqual([]);
+        expect(left.size).toBe(kept.length);
+        expect(report).toMatchObject({ events: gone.length + 1, runs: 1 });
+      });
+
+      it('keeps a stale Finding’s chain as it keeps an open one’s', async () => {
+        const held = run(pairId, { finishedAt: T.early });
+        await store.upsertRun(held);
+        const stale = finding(held.id, a, b, { status: 'stale' });
+        await store.upsertFinding(stale);
+        const kept = await chain(held.id, stale.id, T.early);
+
+        await store.prune(T.late);
+
+        expect(await walk(kept.at(-1)!)).toHaveLength(kept.length);
+      });
+
+      it('keeps what leads to a recent run’s events when that is older than the window', async () => {
+        const held = run(pairId, { finishedAt: T.late });
+        await store.upsertRun(held);
+        const open = finding(held.id, a, b);
+        await store.upsertFinding(open);
+        const records = await chain(held.id, open.id, T.late);
+        // The edit behind a recent run, published long before it.
+        const edit = event({ at: T.early });
+        await store.appendEvent(edit);
+        const late = records[0]!;
+        const db = new DatabaseSync(dbPath);
+        try {
+          db.prepare('UPDATE events SET caused_by = ? WHERE id = ?').run(edit.id, late.id);
+        } finally {
+          db.close();
+        }
+
+        await store.prune(T.mid);
+
+        expect(await walk(records.at(-1)!)).toHaveLength(records.length + 1);
+      });
+
+      it('stops the walk at a cause the log no longer holds', async () => {
+        const held = run(pairId, { finishedAt: T.early });
+        await store.upsertRun(held);
+        const open = finding(held.id, a, b);
+        await store.upsertFinding(open);
+        const orphan = event({
+          type: 'run.started',
+          payload: {
+            type: 'run.started',
+            repoId: null,
+            at: T.early,
+            runId: held.id,
+            mergePairId: pairId,
+          },
+          causedBy: ulid<EventId>(),
+        });
+        await store.appendEvent(orphan);
+
+        await store.prune(T.late);
+
+        expect((await collect(store.readEvents())).map((e) => e.id)).toEqual([orphan.id]);
+      });
+    });
+
+    it('deletes in batches of the size asked for, each its own transaction', async () => {
+      for (let n = 0; n < 5; n++) await store.appendEvent(event({ at: T.early }));
+      await store.appendEvent(event({ at: T.late }));
+
+      const report = await store.prune(T.mid, { batchSize: 2 });
+
+      // Three batches of events — two, two and one — and one empty batch for
+      // each of the other four statements; unfinished runs are not asked for.
+      expect(report).toMatchObject({ events: 5, batches: 3 + 4, complete: true });
+      expect(await collect(store.readEvents())).toHaveLength(1);
+    });
+
+    it('joins a pass already running rather than starting another', async () => {
+      for (let n = 0; n < 3; n++) await store.appendEvent(event({ at: T.early }));
+
+      const first = store.prune(T.mid, { batchSize: 1 });
+      const second = store.prune(T.mid, { batchSize: 1 });
+
+      expect(second).toBe(first);
+      expect((await first).events).toBe(3);
+      // A pass after it is a new one.
+      expect(store.prune(T.mid)).not.toBe(first);
+    });
+
+    it('stops at the next batch when the store closes under it, and says so', async () => {
+      for (let n = 0; n < 3; n++) await store.appendEvent(event({ at: T.early }));
+
+      const pass = store.prune(T.mid, { batchSize: 1 });
+      await store.close();
+
+      expect(await pass).toMatchObject({ events: 1, complete: false });
+
+      // Nothing is carried between passes: the next re-derives what is old from
+      // its cutoff, and takes what the cut-short one left.
+      store = await openStore({ path: dbPath });
+      expect(await store.prune(T.mid, { batchSize: 1 })).toMatchObject({
+        events: 2,
+        complete: true,
+      });
+      expect(await collect(store.readEvents())).toEqual([]);
+    });
+
+    it('refuses a batch size that is not a positive integer', async () => {
+      await expect(store.prune(T.mid, { batchSize: 0 })).rejects.toThrow(RangeError);
+      await expect(store.prune(T.mid, { batchSize: 1.5 })).rejects.toThrow(RangeError);
+    });
+
+    it('drops ended sessions past the window, never a live one', async () => {
+      const repoId = (await store.upsertRepo(repo())).id;
+      const ended = session(repoId, { endedAt: T.early });
+      const recent = session(repoId, { externalSessionId: 'ext-2', endedAt: T.late });
+      const live = session(repoId, { externalSessionId: 'ext-3', startedAt: T.early });
+      for (const each of [ended, recent, live]) await store.upsertSession(each);
+
+      expect(await store.prune(T.mid)).toMatchObject({ sessions: 1 });
+      expect((await store.listSessions(repoId)).map((each) => each.id).sort()).toEqual(
+        [recent.id, live.id].sort(),
+      );
+    });
+
+    it('stops the file growing once freed pages are there to reuse, without a vacuum', async () => {
+      await store.close();
+      const payload = 'x'.repeat(2_000);
+      const cycle = async (): Promise<number> => {
+        const opened = await openStore({ path: dbPath });
+        for (let n = 0; n < 1_000; n++) {
+          await opened.appendEvent(
+            event({
+              at: T.early,
+              payload: {
+                type: 'daemon.started',
+                repoId: null,
+                at: T.early,
+                version: payload,
+                pid: n,
+              },
+            }),
+          );
+        }
+        await opened.prune(T.mid);
+        await opened.close();
+        return statSync(dbPath).size;
+      };
+
+      const first = await cycle();
+      const second = await cycle();
+      const third = await cycle();
+
+      expect(second).toBeLessThanOrEqual(first);
+      expect(third).toBeLessThanOrEqual(first);
+      store = await openStore({ path: dbPath });
     });
 
     it('refuses a cutoff that is not a timestamp', async () => {
@@ -1233,7 +1580,7 @@ describe('store', () => {
 
       // 02:00+02:00 is 00:00Z, which sorts before the event; compared as written
       // it would sort after it and take the event with it.
-      expect(await store.prune('2026-02-01T02:00:00.000+02:00')).toBe(0);
+      expect(await store.prune('2026-02-01T02:00:00.000+02:00')).toMatchObject({ events: 0 });
     });
   });
 });

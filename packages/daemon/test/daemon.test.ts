@@ -113,6 +113,57 @@ describe('daemon', () => {
     rmSync(base, { recursive: true, force: true });
   });
 
+  it('prunes its store once it is up, and logs what went', async () => {
+    // Rows from a month ago, written before this daemon started: a store left
+    // unpruned by an earlier run.
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString();
+    const seeded = await openStore({ path: join(dataDir, 'interlock.db') });
+    await seeded.appendEvent({
+      id: '01AAAAAAAAAAAAAAAAAAAAAAAA' as EventRecord['id'],
+      repoId: null,
+      type: 'daemon.started',
+      payload: { type: 'daemon.started', repoId: null, at: old, version: '0', pid: 1 },
+      at: old,
+      causedBy: null,
+    });
+    await seeded.close();
+
+    await daemon.start();
+    const pass = await until(
+      () => Promise.resolve(logs.find((record) => record.msg === 'pruned the store') ?? null),
+      'the first retention pass',
+    );
+
+    expect(pass).toMatchObject({ level: 'info', events: 1, complete: true });
+    // The daemon names when it started, so a run an earlier process left
+    // unfinished can be told from one of its own.
+    expect(Date.parse(String(pass.abandonedBefore))).toBeLessThanOrEqual(Date.now());
+    expect(pass.windowMs).toBe(config.retention.windowMs);
+    expect((await readLog()).map((record) => record.at)).not.toContain(old);
+  });
+
+  it('prunes again on its timer, and a pass in flight holds up a stop', async () => {
+    daemon = createDaemon({
+      config,
+      logger: createLogger('test', { level: 'trace', sink: (record) => logs.push(record) }),
+      sweepIntervalMs: 200,
+      retentionIntervalMs: 50,
+    });
+    await daemon.start();
+
+    await until(
+      () =>
+        Promise.resolve(
+          logs.filter((record) => record.msg === 'pruned the store').length >= 3 ? true : null,
+        ),
+      'three retention passes',
+    );
+    await daemon.stop();
+    const passes = logs.filter((record) => record.msg === 'pruned the store').length;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(logs.filter((record) => record.msg === 'pruned the store')).toHaveLength(passes);
+  });
+
   it('publishes the port it actually bound, owner-readable only', async () => {
     await daemon.start();
 
