@@ -359,6 +359,63 @@ describe('snapshot pipeline', () => {
       }
     });
 
+    it('walks again at a failure that went away on its own, at the next pass', async () => {
+      // git timing out under load: nothing on disk moves, and the next walk
+      // would succeed. Holding it to the backstop would miss the budget.
+      let clock = 1_000_000;
+      let failing = false;
+      const real = createGitRunner();
+      const flaky = createSweep({
+        store,
+        bus,
+        dataDir: join(base, 'data'),
+        now: () => clock,
+        runner: {
+          run: (repo, args, runOptions) =>
+            failing && args[0] === 'add'
+              ? Promise.resolve({ stdout: '', stderr: '', exitCode: 128 })
+              : real.run(repo, args, runOptions),
+        },
+      });
+      await flaky.reconcile(root);
+      writeFileSync(join(root, 'a.txt'), 'edited while git was struggling\n');
+      failing = true;
+      await expect(flaky.reconcile(root)).rejects.toThrow();
+
+      failing = false;
+      clock += 10_000;
+      events.length = 0;
+      await flaky.reconcile(root);
+
+      expect(snapshots()).toHaveLength(1);
+    });
+
+    it('backs off a failure that lasts, doubling towards the backstop', async () => {
+      let clock = 1_000_000;
+      const { sweep: counting, walks } = countingSweep({ now: () => clock });
+      await counting.reconcile(root);
+      writeFileSync(join(root, 'locked.txt'), 'secret\n');
+      chmodSync(join(root, 'locked.txt'), 0o000);
+      const walkedAt = async (seconds: number): Promise<boolean> => {
+        clock = 1_000_000 + seconds * 1_000;
+        const before = walks();
+        await expect(counting.reconcile(root)).rejects.toThrow();
+        return walks() > before;
+      };
+      try {
+        expect(await walkedAt(0)).toBe(true);
+        // Retried after 10 s, then 20 s, then 40 s: each wait twice the last.
+        expect(await walkedAt(5)).toBe(false);
+        expect(await walkedAt(10)).toBe(true);
+        expect(await walkedAt(25)).toBe(false);
+        expect(await walkedAt(30)).toBe(true);
+        expect(await walkedAt(65)).toBe(false);
+        expect(await walkedAt(70)).toBe(true);
+      } finally {
+        chmodSync(join(root, 'locked.txt'), 0o644);
+      }
+    });
+
     it('walks again at a failure once the backstop is due', async () => {
       let clock = 1_000_000;
       const { sweep: counting, walks } = countingSweep({

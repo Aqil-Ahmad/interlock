@@ -54,7 +54,9 @@ timestamps, size and inode — and the worktree is hashed only when that moved,
 so every pass can afford to look. The interval is not chosen: `timing.ts`
 derives it from the budget minus the ceiling the configured debounce implies
 and the allowance, capped at 30 s, and a debounce too long for any interval
-from 10 s up is refused at start. Changing the debounce moves the interval with
+from 10 s up is refused at start. At the longest debounce accepted, 7 s, the
+chain is the budget exactly — a 10 s interval and a 35 s ceiling — and the
+allowance is all the slack there is; at the default it keeps a further 5 s. Changing the debounce moves the interval with
 it; neither can be changed without the other noticing.
 
 The probe's cost grows with what `status` lists, untracked files most of all:
@@ -64,7 +66,17 @@ files and 598 ms with 50,000 — about 11 ms per thousand. A large generated
 directory nobody ignored therefore costs about 2% of a core per worktree every
 30 s, plus its share of the backstop hash; still well under the hash every
 minute it replaces, which on that worktree was 5.6 s a time. Ignoring such a
-directory, as a repository should, takes it out of both.
+directory, as a repository should, takes it out of both. The same listing is
+what the branch's stored dirty state holds, and the sweep rewrites that row on
+every pass: at 50,000 untracked files it is 1.4 MB, written in 3.5 ms — one row
+replaced rather than rows accumulating, but that much written per such branch
+every 30 s.
+
+A capture that fails — a file nobody can read, git timing out — records no
+tree, so the probe would send every pass on the same failing walk. The failure
+is remembered with the probe it happened at and retried on a backoff: at the
+next pass, then doubling to the ten-minute backstop, and at once if the probe,
+the head or the branch moves.
 
 A full re-hash still runs every ten minutes per worktree. It carries no budget —
 the probe does — and exists only for an edit the probe cannot see, which takes

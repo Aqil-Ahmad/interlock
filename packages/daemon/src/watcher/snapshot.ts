@@ -14,6 +14,7 @@ import type {
   SnapshotId,
 } from '@interlock/shared';
 import type { EventBus } from '../bus/index.js';
+import { MIN_SWEEP_INTERVAL_MS } from '../timing.js';
 import type { ShadowRegistry } from '../shadows.js';
 import type { Store } from '../store/index.js';
 
@@ -85,6 +86,14 @@ export interface SnapshotPipeline {
 const DEFAULT_RECAPTURE_AFTER_MS = 10 * 60_000;
 
 /**
+ * The first wait before a failed capture is walked again, doubling from there.
+ *
+ * The shortest interval the timing chain lets the watcher's timer run at, so
+ * the first retry is the next pass whatever the interval is.
+ */
+const FAILURE_RETRY_BASE_MS = MIN_SWEEP_INTERVAL_MS;
+
+/**
  * What was last said about a worktree.
  *
  * `unknown` is a state that was published rather than the absence of one: it is
@@ -142,6 +151,16 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
    * did before, sends every pass on a walk that fails at the same file. While
    * the probe holds still the same failure is reported again without the walk;
    * `chmod` moves a file's ctime, so fixing it is also what retries it.
+   *
+   * Not every failure is the worktree's: git timing out under load, or a
+   * shadow being rebuilt, clears on its own with nothing on disk moving. So the
+   * walk is retried on a backoff rather than held to the backstop — from the
+   * next pass, doubling to the backstop — which answers a transient failure
+   * within a pass and still spares most of the walks a lasting one would cost.
+   *
+   * The error is kept and thrown again as it was. Nothing downstream reads
+   * more than its code and message, and neither describes the moment it was
+   * thrown; a failure that did would need rebuilding here rather than reusing.
    */
   const failed = new Map<
     string,
@@ -149,7 +168,9 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       readonly branchRefId: BranchRefId;
       readonly probe: string;
       readonly headSha: string;
-      readonly at: number;
+      /** Failures in a row at this same branch, probe and head. */
+      readonly streak: number;
+      readonly retryAt: number;
       readonly error: unknown;
     }
   >();
@@ -201,7 +222,7 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
         failure.branchRefId === branch.id &&
         failure.headSha === branch.headSha &&
         !(previous?.kind === 'tree' && previous.changed) &&
-        now() - failure.at < recaptureAfterMs
+        now() < failure.retryAt
       ) {
         throw failure.error;
       }
@@ -216,11 +237,18 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
       try {
         snapshot = await captureInto(handle, repo, branch.worktreePath);
       } catch (error) {
+        const before = failed.get(branch.worktreePath);
+        const again =
+          before?.probe === signature &&
+          before.branchRefId === branch.id &&
+          before.headSha === branch.headSha;
+        const streak = again ? before.streak + 1 : 1;
         failed.set(branch.worktreePath, {
           branchRefId: branch.id,
           probe: signature,
           headSha: branch.headSha,
-          at: now(),
+          streak,
+          retryAt: now() + Math.min(recaptureAfterMs, FAILURE_RETRY_BASE_MS * 2 ** (streak - 1)),
           error,
         });
         throw error;
