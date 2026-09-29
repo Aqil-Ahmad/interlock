@@ -76,7 +76,8 @@ A capture that fails — a file nobody can read, git timing out — records no
 tree, so the probe would send every pass on the same failing walk. The failure
 is remembered with the probe it happened at and retried on a backoff: at the
 next pass, then doubling to the ten-minute backstop, and at once if the probe,
-the head or the branch moves.
+the head or the branch moves. While one is outstanding the tree from before it
+is never reused: the walk that failed may have been the one a signal asked for.
 
 A full re-hash still runs every ten minutes per worktree. It carries no budget —
 the probe does — and exists only for an edit the probe cannot see, which takes

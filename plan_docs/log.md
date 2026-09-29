@@ -4,6 +4,12 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-29 — merged dev into the watcher fallback, and one more review point
+
+- **Merged `origin/dev`, retention.** Two conflicts, both additive: `DaemonOptions` keeps `watchFactory` beside `retentionIntervalMs`, and the demo file keeps both new tests; retention's restarted daemon goes through the file's own `build`, so its log is kept too. The log itself came through with its markers still in, reported resolved; resolved by hand, every entry kept, newest first. `pnpm verify` green at 1,251 tests.
+- **The same startup miss, found twice.** Retention's log records an edit written the instant the daemon starts being missed until the 60-second ceiling, and wrote its restart test before start to avoid it. That is the failure this branch reproduced, and the probe is its fix: such an edit is now found by the next timed pass.
+- **Taken — a marked capture that failed could leave the old tree in place.** The walk clears the mark before it runs; when it fails, the next pass saw no mark, a probe unchanged and a tree inside the backstop, and reused the tree before reaching the retry, so the edit the signal reported waited ten minutes. An outstanding failure now keeps the idle skip from applying, and the backoff decides when to walk. Restoring the mark instead would have walked every pass and undone the backoff. Test first, failing as predicted; mutation 1, 1 caught.
+
 ## 2026-09-29 — second review of the watcher fallback: two taken, one stale, rest noted
 
 - **Taken — a failed capture was held to the backstop whatever failed.** A git timing out under load, or a shadow being rebuilt, clears with nothing on disk moving, and the memo then withheld the retry for up to ten minutes — past the budget. Failures are now retried on a backoff: at the next pass, doubling to the backstop, and at once if the probe, head or branch moves. The first wait is the shortest interval the timing chain allows, so the first retry is the next pass whatever the interval. Tested with a git that fails once and recovers, the doubling, a restart for a new failure, and the cap.
