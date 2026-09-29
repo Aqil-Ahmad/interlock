@@ -4,6 +4,11 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-29 — review of retention: one taken, one noted
+
+- **Taken — a window past the range of a date crashed the daemon.** `retention.windowMs` had a floor and no ceiling, so `Number.MAX_SAFE_INTEGER` — a natural "keep forever" — passed validation, and `new Date(now - window).toISOString()` threw outside the pass's `try`. The timer's pass then rejected with nothing to catch it, which ends the process. Now bounded at ten years, which is "keep everything" for any machine this runs on, and the cutoff is computed inside the `try`, so a bad one fails the pass like any other. Both pinned, and both red before the fix.
+- **Noted — a cache hit's link to the run it reused does not survive a prune.** A Finding a hit raises belongs to the hit's own run, and its `causedBy` chain back to the edit is kept. `cachedFrom` on the hit's `run.analyzer-completed` names the run whose analysis it reused; that run holds no open Finding, so it and its events go with the window. The Finding's evidence is on the Finding itself; what is lost is which earlier run first reached the verdict. Keeping it would mean keeping whole runs no open Finding holds.
+
 ## 2026-09-28 — retention
 
 - **Rewrote the task first: traceability and pruning conflicted.** `prune` kept a run holding an open Finding and deleted every event older than the cutoff, so an old open Finding kept its run and lost the `finding.raised`, `run.started`, `pair.scheduled` and `branch.snapshot` that explain it. An old event is now kept when an event of a run holding an open or stale Finding leads back to it through `caused_by`: a recursive `WITH` in the statement that deletes, so a Finding opened between batches is seen by the next. Seeded through `events.run_id`, a virtual generated column over the payload with an index (migration 4): no stored event is rewritten, and the plan is index lookups throughout. Pinned beside an old resolved Finding whose chain goes, a stale one, a chain reaching back past the window from a recent run, and a dangling cause.

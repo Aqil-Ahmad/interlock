@@ -131,6 +131,15 @@ const RETENTION_DEFAULT_MS = 24 * 60 * 60_000;
  */
 export const RETENTION_MIN_MS = 60 * 60_000;
 
+/**
+ * The longest retention window accepted: ten years, which is "keep everything"
+ * for any machine this runs on.
+ *
+ * Bounded because the cutoff is a date — the window taken from now — and a
+ * window past the range a date can hold makes the cutoff no date at all.
+ */
+export const RETENTION_MAX_MS = 10 * 365 * 24 * 60 * 60_000;
+
 export const DEFAULT_CONFIG: InterlockConfig = {
   repos: [],
   dataDir: DEFAULT_DATA_DIR,
@@ -738,8 +747,8 @@ export function validateConfig(config: InterlockConfig): string[] {
   requireNumber(
     config.retention.windowMs,
     'retention.windowMs',
-    `must be >= ${String(RETENTION_MIN_MS)} (one hour)`,
-    (n) => n >= RETENTION_MIN_MS,
+    `must be between ${String(RETENTION_MIN_MS)} (one hour) and ${String(RETENTION_MAX_MS)} (ten years)`,
+    (n) => n >= RETENTION_MIN_MS && n <= RETENTION_MAX_MS,
     problems,
   );
 

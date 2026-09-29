@@ -83,7 +83,21 @@ describe('validateConfig', () => {
     expect(validateConfig({ ...DEFAULT_CONFIG, retention: { windowMs: 60 * 60_000 } })).toEqual([]);
     expect(
       validateConfig({ ...DEFAULT_CONFIG, retention: { windowMs: 60 * 60_000 - 1 } }),
-    ).toContain('retention.windowMs must be >= 3600000 (one hour)');
+    ).toContain(
+      'retention.windowMs must be between 3600000 (one hour) and 315360000000 (ten years)',
+    );
+  });
+
+  it('refuses a retention window longer than ten years', () => {
+    // A "keep forever" value puts the cutoff outside the range a date can hold.
+    expect(
+      validateConfig({ ...DEFAULT_CONFIG, retention: { windowMs: Number.MAX_SAFE_INTEGER } }),
+    ).toContain(
+      'retention.windowMs must be between 3600000 (one hour) and 315360000000 (ten years)',
+    );
+    expect(validateConfig({ ...DEFAULT_CONFIG, retention: { windowMs: 315_360_000_000 } })).toEqual(
+      [],
+    );
   });
 
   it('refuses a retention window that is not a number', () => {

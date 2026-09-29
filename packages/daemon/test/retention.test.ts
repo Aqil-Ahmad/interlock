@@ -139,6 +139,24 @@ describe('retention', () => {
     expect(await retention!.pass()).toMatchObject({ events: 1 });
   }, 20_000);
 
+  it('resolves a pass whose cutoff is no date, rather than rejecting out of the timer', async () => {
+    // Validation refuses such a window; this is the pass's own guard, since a
+    // rejection from the timer's pass has nothing to catch it and ends the
+    // process.
+    retention = createRetention({
+      store,
+      windowMs: Number.MAX_SAFE_INTEGER,
+      logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+      now: () => NOW,
+    });
+
+    expect(await retention.pass()).toBeNull();
+    expect(logs).toContainEqual(
+      expect.objectContaining({ level: 'warn', msg: 'pruning the store failed' }),
+    );
+    expect(await count()).toBe(2);
+  });
+
   it('waits for a pass in flight when stopped, and runs none after', async () => {
     for (let n = 0; n < 50; n++) await store.appendEvent(event(NOW - 9 * DAY));
     const retain = make(20);

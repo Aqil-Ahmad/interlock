@@ -55,8 +55,12 @@ export function createRetention(options: RetentionOptions): Retention {
   };
 
   const run = async (): Promise<PruneReport | null> => {
-    const before = new Date(now() - windowMs).toISOString();
+    let before: string | null = null;
+    // Inside the `try`, so a cutoff that is no date — a window validation should
+    // have refused — fails the pass like anything else. A rejection from the
+    // timer's pass has nothing to catch it, and ends the process.
     try {
+      before = new Date(now() - windowMs).toISOString();
       const report = await store.prune(before);
       log.info('pruned the store', { before, windowMs, ...report });
       return report;
