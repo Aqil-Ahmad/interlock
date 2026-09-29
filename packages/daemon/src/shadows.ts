@@ -39,7 +39,12 @@ export interface ShadowRegistry {
   collect(
     handle: UserRepo,
     repoId: RepoId,
-    options: { readonly expireBefore: Date; readonly keep: () => Promise<readonly string[]> },
+    options: {
+      readonly expireBefore: Date;
+      readonly keep: () => Promise<readonly string[]>;
+      /** Stops the collection, and git with it; the gate is released either way. */
+      readonly signal?: AbortSignal;
+    },
   ): Promise<CollectReport>;
   /**
    * Drop a handle that failed, so the next caller resolves it afresh.
@@ -115,7 +120,7 @@ export function createShadowRegistry(options: ShadowRegistryOptions): ShadowRegi
       }
     },
 
-    async collect(handle, repoId, { expireBefore, keep }): Promise<CollectReport> {
+    async collect(handle, repoId, { expireBefore, keep, signal }): Promise<CollectReport> {
       const gate = gateOf(repoId);
       while (gate.collecting !== null) await gate.collecting;
       let release!: () => void;
@@ -143,6 +148,7 @@ export function createShadowRegistry(options: ShadowRegistryOptions): ShadowRegi
           runner: options.runner,
           expireBefore,
           keep: await keep(),
+          ...(signal === undefined ? {} : { signal }),
         });
       } finally {
         gate.collecting = null;
@@ -169,7 +175,7 @@ export interface ShadowCollector {
    * Collect with the retention pass's cutoff: whatever the store no longer
    * holds a verdict for, collection no longer has to keep.
    */
-  pass(before: string): Promise<void>;
+  pass(before: string, signal?: AbortSignal): Promise<void>;
 }
 
 export interface ShadowCollectorOptions {
@@ -214,7 +220,11 @@ export function createShadowCollector(options: ShadowCollectorOptions): ShadowCo
     return [...new Set(candidates.filter(isObjectId))];
   };
 
-  const collect = async (repo: Repo, expireBefore: Date): Promise<void> => {
+  const collect = async (
+    repo: Repo,
+    expireBefore: Date,
+    signal: AbortSignal | undefined,
+  ): Promise<void> => {
     const backoff = failing.get(repo.id);
     if (backoff !== undefined && now() < backoff.retryAt) {
       log.debug('backing off collecting a shadow', {
@@ -228,6 +238,7 @@ export function createShadowCollector(options: ShadowCollectorOptions): ShadowCo
       const report = await shadows.collect(handle, repo.id, {
         expireBefore,
         keep: () => keepFor(repo.id),
+        ...(signal === undefined ? {} : { signal }),
       });
       failing.delete(repo.id);
       log.info('collected the shadow', {
@@ -245,6 +256,12 @@ export function createShadowCollector(options: ShadowCollectorOptions): ShadowCo
         });
       }
     } catch (error) {
+      // Stopped on request is not a failure: nothing about the repository
+      // says to wait longer before the next attempt.
+      if (signal?.aborted === true) {
+        log.info('stopped collecting a shadow', { repoId: repo.id });
+        return;
+      }
       const failures = (backoff?.failures ?? 0) + 1;
       const waitMs = Math.min(
         COLLECTION_BACKOFF_MS * 2 ** (failures - 1),
@@ -261,7 +278,7 @@ export function createShadowCollector(options: ShadowCollectorOptions): ShadowCo
   };
 
   return {
-    async pass(before: string): Promise<void> {
+    async pass(before: string, signal?: AbortSignal): Promise<void> {
       const expireBefore = new Date(Date.parse(before) - marginMs);
       let repos: Repo[];
       try {
@@ -274,7 +291,10 @@ export function createShadowCollector(options: ShadowCollectorOptions): ShadowCo
       }
       // One at a time: each walks a whole history, and each holds its
       // repository's runs off while it does.
-      for (const repo of repos) await collect(repo, expireBefore);
+      for (const repo of repos) {
+        if (signal?.aborted === true) return;
+        await collect(repo, expireBefore, signal);
+      }
     },
   };
 }

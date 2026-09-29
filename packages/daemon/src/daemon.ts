@@ -253,7 +253,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         abandonedBefore: startedAt,
         // In the same pass, after the store: a verdict is pruned before the
         // objects it names, so none can be served naming what is gone.
-        collect: (before) => collector.pass(before),
+        collect: (before, signal) => collector.pass(before, signal),
         ...(options.retentionIntervalMs === undefined
           ? {}
           : { intervalMs: options.retentionIntervalMs }),

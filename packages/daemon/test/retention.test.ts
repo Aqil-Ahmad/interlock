@@ -232,7 +232,9 @@ describe('retention', () => {
   }, 20_000);
 
   describe('collection after the store', () => {
-    const withCollect = (collect: (before: string) => Promise<void>): Retention => {
+    const withCollect = (
+      collect: (before: string, signal: AbortSignal) => Promise<void>,
+    ): Retention => {
       retention = createRetention({
         store,
         windowMs: 7 * DAY,
@@ -283,25 +285,25 @@ describe('retention', () => {
       expect(logs).not.toContainEqual(expect.objectContaining({ msg: 'pruning the store failed' }));
     });
 
-    it('waits for a collection in flight when stopped', async () => {
-      let finish!: () => void;
-      let collected = false;
+    it('stops a collection in flight when stopped, and waits for it to wind up', async () => {
+      let collected: 'stopped' | null = null;
+      let started = false;
       const retain = withCollect(
-        () =>
+        (_before, signal) =>
           new Promise<void>((resolve) => {
-            finish = () => {
-              collected = true;
+            started = true;
+            signal.addEventListener('abort', () => {
+              collected = 'stopped';
               resolve();
-            };
+            });
           }),
       );
       const passing = retain.pass();
-      await until(() => finish !== undefined, 'the collection to start');
+      await until(() => started, 'the collection to start');
 
-      const stopping = retain.stop();
-      finish();
-      await stopping;
-      expect(collected).toBe(true);
+      await retain.stop();
+
+      expect(collected).toBe('stopped');
       await passing;
     });
   });

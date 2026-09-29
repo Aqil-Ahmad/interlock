@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -1380,10 +1381,17 @@ describe('run pipeline', () => {
         )
       ).rootPath;
 
-    /** Everything the shadow wrote so far, last written `ms` ago: a day passing, for `prune`. */
+    /**
+     * Everything the shadow wrote so far, last written `ms` ago: a day passing,
+     * for collection. Packs too, for what a pack's time speaks for.
+     */
     const age = async (ms: number): Promise<void> => {
       const objects = join(await shadowPath(), 'objects');
       const at = new Date(Date.now() - ms);
+      const packs = join(objects, 'pack');
+      if (existsSync(packs)) {
+        for (const file of readdirSync(packs)) utimesSync(join(packs, file), at, at);
+      }
       for (const dir of readdirSync(objects).filter((name) => /^[0-9a-f]{2}$/u.test(name))) {
         for (const file of readdirSync(join(objects, dir)))
           utimesSync(join(objects, dir, file), at, at);
@@ -1527,6 +1535,8 @@ describe('run pipeline', () => {
       await observe();
       expect(await run()).toMatchObject({ kind: 'analysed', clean: true });
       expect(await store.getFinding(finding!.id)).toMatchObject({ status: 'resolved' });
+      // Kept, the commits were packed; released, they age from that pack's
+      // time, the last pass that kept them.
       await age(30 * 24 * HOUR);
 
       await collector().pass(new Date().toISOString());

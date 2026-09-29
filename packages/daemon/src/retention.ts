@@ -12,7 +12,11 @@ import type { PruneReport, Store } from './store/index.js';
  */
 export interface Retention {
   start(): void;
-  /** Cancel the timer and wait for a pass in flight, so the store can close under nothing. */
+  /**
+   * Cancel the timer, stop a collection in flight, and wait for the pass, so
+   * the store can close under nothing. The store's own prune is short batches
+   * and runs to its end; a collection walks a whole history, and is stopped.
+   */
   stop(): Promise<void>;
   /** Run a pass now, or join the one running. Resolves null when the pass failed. */
   pass(): Promise<PruneReport | null>;
@@ -36,7 +40,7 @@ export interface RetentionOptions {
    * Run after the store is pruned, with its cutoff, and only when that
    * succeeded: what it may reclaim is what the store no longer names.
    */
-  readonly collect?: (before: string) => Promise<void>;
+  readonly collect?: (before: string, signal: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -68,6 +72,7 @@ export function createRetention(options: RetentionOptions): Retention {
   let timer: ReturnType<typeof setInterval> | null = null;
   let first: ReturnType<typeof setImmediate> | null = null;
   let running: Promise<PruneReport | null> | null = null;
+  const stopping = new AbortController();
 
   const pass = (): Promise<PruneReport | null> => {
     running ??= run().finally(() => {
@@ -108,11 +113,11 @@ export function createRetention(options: RetentionOptions): Retention {
 
   /** A collection that throws is its own failure, not the store's, whose pruning is done. */
   const collectAfter = async (
-    collect: (before: string) => Promise<void>,
+    collect: (before: string, signal: AbortSignal) => Promise<void>,
     before: string,
   ): Promise<void> => {
     try {
-      await collect(before);
+      await collect(before, stopping.signal);
     } catch (error) {
       log.warn('collecting after the store failed', {
         before,
@@ -140,6 +145,7 @@ export function createRetention(options: RetentionOptions): Retention {
       first = null;
       if (timer !== null) clearInterval(timer);
       timer = null;
+      stopping.abort();
       await running;
     },
 

@@ -335,6 +335,42 @@ describe('shadow registry', () => {
       });
     });
 
+    it('treats a collection stopped on request as no failure, and collects at the next pass', async () => {
+      const controller = new AbortController();
+      let stopAtPrune = true;
+      const stopping: GitRunner = {
+        run: (target, args, options) => {
+          if (args[0] === 'prune' && stopAtPrune) controller.abort();
+          return pruning.run(target, args, options);
+        },
+      };
+      const collecting = createShadowCollector({
+        shadows: createShadowRegistry({ runner: stopping, dataDir: join(base, 'data') }),
+        store,
+        runner: stopping,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      await collecting.pass(new Date(clock).toISOString(), controller.signal);
+
+      expect(messages()).toContain('stopped collecting a shadow');
+      expect(messages()).not.toContain('collecting a shadow failed');
+      // No backoff: the very next pass, at the same instant, collects.
+      stopAtPrune = false;
+      await collecting.pass(new Date(clock).toISOString());
+      expect(messages().at(-1)).toBe('collected the shadow');
+    });
+
+    it('collects no repository once its signal has aborted', async () => {
+      await collector().pass(new Date(clock).toISOString(), AbortSignal.abort());
+
+      expect(prunes).toBe(0);
+      expect(messages()).toEqual([]);
+    });
+
     it('waits a day at most between attempts', async () => {
       const collecting = collector();
       failPrune = true;

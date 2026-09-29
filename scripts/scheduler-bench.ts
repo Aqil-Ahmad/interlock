@@ -251,7 +251,7 @@ async function startSystem(
       windowMs: options.retention.windowMs,
       intervalMs: options.retention.intervalMs,
       logger,
-      collect: (before) => collector.pass(before),
+      collect: (before, signal) => collector.pass(before, signal),
     });
     retention.start();
   }
@@ -537,7 +537,7 @@ async function retentionMain(): Promise<void> {
           },
           passes: system.passes.length,
           collections: system.collections.length,
-          removed: system.collections.reduce((sum, report) => sum + report.removed, 0),
+          largestPackKib: Math.max(...system.collections.map((report) => report.after.kib)),
           longestCollectionMs: Math.max(...system.collections.map((report) => report.durationMs)),
           longestBatchMs: Math.max(...system.passes.map((pass) => pass.longestBatchMs)),
           longestPassMs: Math.max(...system.passes.map((pass) => pass.durationMs)),
