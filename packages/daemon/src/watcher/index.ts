@@ -5,6 +5,7 @@ import type { InterlockConfig, Logger } from '@interlock/shared';
 import type { EventBus } from '../bus/index.js';
 import type { ShadowRegistry } from '../shadows.js';
 import type { Store } from '../store/index.js';
+import { fallbackSweepIntervalMs } from '../timing.js';
 import { createSweep } from './sweep.js';
 import { createWorktreeWatcher } from './worktree-watcher.js';
 import type { ChangeSignal, WatchFactory, WatchTarget } from './worktree-watcher.js';
@@ -34,7 +35,11 @@ export interface WatcherOptions {
   readonly logger: Logger;
   /** Shared with the run pipeline, so both write into one shadow per repository. */
   readonly shadows?: ShadowRegistry;
-  /** Overridable so a test does not wait out the cadence. */
+  /**
+   * Overridable so a test does not wait out the cadence. Taken as given: the
+   * default is derived from the edit-to-Finding budget, and a test that sets
+   * this drives the passes itself.
+   */
   readonly sweepIntervalMs?: number;
   /** The kernel boundary, passed through to the filesystem watcher. */
   readonly watchFactory?: WatchFactory;
@@ -48,18 +53,6 @@ export interface Watcher {
 }
 
 /**
- * How often the timer reconciles every repository.
- *
- * A pass over three worktrees of ten thousand files measures 375–505ms, so this
- * is 1.3–1.7% of one core and well under a fifth of a percent of the machine —
- * under the 2% budget on either reading of it. Nothing is traded away for the
- * interval: real edits arrive as filesystem signals and land at the debounce
- * ceiling about two seconds later, and this only backstops what the platform
- * failed to report.
- */
-const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
-
-/**
  * How long `stop` waits for work already in flight.
  *
  * A `git status` on an unreachable mount runs to the runner's own timeout, and
@@ -71,7 +64,13 @@ const DRAIN_TIMEOUT_MS = 5_000;
 export function createWatcher(options: WatcherOptions): Watcher {
   const log = options.logger.child('watcher');
   const { config, store, bus, runner } = options;
-  const intervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
+  // Every pass probes each worktree, so an edit the platform never reported is
+  // found by the next one; the interval is whatever the budget leaves once the
+  // scheduler's settle ceiling and the run are paid for. Derived even when an
+  // interval is given: that is also the check that the debounce leaves the
+  // budget any room, and a test choosing its own cadence must not skip it.
+  const derivedMs = fallbackSweepIntervalMs(config.scheduler.debounceMs);
+  const intervalMs = options.sweepIntervalMs ?? derivedMs;
 
   const sweep = createSweep({
     store,
@@ -119,6 +118,13 @@ export function createWatcher(options: WatcherOptions): Watcher {
   };
 
   const onSignal = (signal: ChangeSignal): void => {
+    // The one trace that tells a change the platform never reported from one
+    // the pipeline dropped after hearing it.
+    log.debug('signal', {
+      kind: signal.kind,
+      worktreePath: signal.worktreePath,
+      paths: signal.paths.length,
+    });
     // The mark is what makes the hash worth doing on the next pass; a pass with
     // nothing marked reconciles refs and leaves every worktree alone.
     sweep.markChanged(signal.worktreePath);
@@ -147,8 +153,12 @@ export function createWatcher(options: WatcherOptions): Watcher {
    * watch set is derived from the store after every full pass rather than fixed
    * at startup. Watching a target that is already watched is a no-op there, so
    * a recursive watch over a whole repository is never dropped and rebuilt.
+   *
+   * Answers the repositories with a worktree watched from now on that was not
+   * before: those have a stretch — from their last capture until now — that no
+   * event covers.
    */
-  const retarget = async (): Promise<void> => {
+  const retarget = async (): Promise<string[]> => {
     const wanted = new Map<string, WatchTarget>();
     const owners = new Map<string, string>();
 
@@ -180,7 +190,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
     // Reading the store took several awaits, and `stop` may have run in one of
     // them. Re-arming here would open watches after `close` tore them down, and
     // nothing would ever close them.
-    if (stopping) return;
+    if (stopping) return [];
 
     repoByWorktree.clear();
     for (const [path, rootPath] of owners) repoByWorktree.set(path, rootPath);
@@ -191,10 +201,13 @@ export function createWatcher(options: WatcherOptions): Watcher {
       watcher.unwatch(watched);
       applied.delete(watched);
     }
+    const unwatched = new Set(wanted.keys());
+    for (const path of watcher.watching) unwatched.delete(path);
     for (const [path, target] of wanted) {
       watcher.watch(target);
       applied.set(path, describe(target));
     }
+    return [...new Set([...unwatched].map((path) => owners.get(path)!))];
   };
 
   const refresh = async (): Promise<void> => {
@@ -202,7 +215,16 @@ export function createWatcher(options: WatcherOptions): Watcher {
     if (outcome.failed.length > 0) {
       log.warn('some repositories could not be reconciled', { failed: outcome.failed.length });
     }
-    await retarget();
+    const armed = await retarget();
+    // The watches go up after the capture they follow, because it is that
+    // pass which finds the worktrees to watch — so an edit between the two
+    // makes no event. One more pass probes them now the watch is asked for, so
+    // an edit in that gap is found here rather than at the next timed pass. It
+    // narrows the gap without closing it: a watch is not delivering the moment
+    // it is asked for, and an edit between this pass and the watch going live
+    // is still found only by the next timed pass's probe — which the budget is
+    // sized to carry.
+    if (armed.length > 0) await sweep.all(armed);
   };
 
   return {

@@ -3,14 +3,15 @@ import { mkdtempSync, realpathSync, rmSync, watch, writeFileSync } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { createGitRunner } from '@interlock/core';
-import { createLogger, resolveConfig } from '@interlock/shared';
+import { createLogger, isInterlockError, resolveConfig } from '@interlock/shared';
 import type { InterlockEvent, LogRecord } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventBus } from '../src/bus/index.js';
 import { openStore } from '../src/store/index.js';
 import type { Store } from '../src/store/index.js';
 import { createWatcher } from '../src/watcher/index.js';
-import type { Watcher } from '../src/watcher/index.js';
+import type { WatchFactory, Watcher } from '../src/watcher/index.js';
+import { silentWatch } from './support/silent-watch.js';
 
 /**
  * The three watcher parts joined together, which is where the mistakes that no
@@ -84,6 +85,9 @@ describe('watcher composition', () => {
     git(root, 'commit', '-qm', 'one');
     git(root, 'worktree', 'add', '-q', '-b', 'feature', linked);
 
+    // A test that never starts one leaves this unset, and `afterEach` then has
+    // nothing to stop.
+    watcher = undefined as unknown as Watcher;
     events = [];
     logs = [];
     watched = [];
@@ -96,7 +100,7 @@ describe('watcher composition', () => {
   });
 
   afterEach(async () => {
-    await watcher.stop();
+    if ((watcher as Watcher | undefined) !== undefined) await watcher.stop();
     await store.close();
     rmSync(base, { recursive: true, force: true });
   });
@@ -210,6 +214,128 @@ describe('watcher composition', () => {
     await pass;
 
     expect(watched).toStrictEqual([]);
+  });
+
+  describe('with no filesystem signal at all', () => {
+    const deaf = async (factory: WatchFactory = silentWatch): Promise<Watcher> => {
+      const created = createWatcher({
+        config: resolveConfig({ dataDir: join(base, 'data'), repos: [root] }),
+        store,
+        bus,
+        runner: createGitRunner(),
+        logger: createLogger('test', { level: 'trace', sink: (record) => logs.push(record) }),
+        sweepIntervalMs: NEVER_SWEEPS_MS,
+        watchFactory: factory,
+      });
+      await created.start();
+      return created;
+    };
+
+    it('finds an edit on the next timed pass, reported or not', async () => {
+      watcher = await deaf();
+      events.length = 0;
+
+      writeFileSync(join(linked, 'a.txt'), 'edited, and nobody said so\n');
+      // What the timer does: a full pass, with nothing marked.
+      await watcher.refresh();
+
+      const published = events.filter((event) => event.type === 'branch.snapshot');
+      expect(published).toHaveLength(1);
+      expect(published[0]).toMatchObject({ fileCount: 1 });
+    });
+
+    it('sees an edit that lands after the first capture and before the watch', async () => {
+      let landed = false;
+      // The edit is made as the watch on the linked worktree is being set up:
+      // after the pass that captured it, before any watch could report it.
+      watcher = await deaf((path) => {
+        if (path === linked && !landed) {
+          landed = true;
+          writeFileSync(join(linked, 'a.txt'), 'written while the daemon started\n');
+        }
+        return silentWatch();
+      });
+
+      expect(landed).toBe(true);
+      const feature = events.filter(
+        (event): event is Extract<InterlockEvent, { type: 'branch.snapshot' }> =>
+          event.type === 'branch.snapshot' && event.fileCount === 1,
+      );
+      // Seen by the time start returns, not at the next timed pass.
+      expect(feature).toHaveLength(1);
+    });
+
+    it('probes once more only for worktrees whose watch is new', async () => {
+      let passes = 0;
+      const real = createGitRunner();
+      const created = createWatcher({
+        config: resolveConfig({ dataDir: join(base, 'data'), repos: [root] }),
+        store,
+        bus,
+        // One `for-each-ref` per repository per pass: it counts passes.
+        runner: {
+          run: (repo, args, options) => {
+            if (args[0] === 'for-each-ref') passes += 1;
+            return real.run(repo, args, options);
+          },
+        },
+        logger: createLogger('test', { level: 'error', sink: () => undefined }),
+        sweepIntervalMs: NEVER_SWEEPS_MS,
+        watchFactory: silentWatch,
+      });
+      watcher = created;
+      await created.start();
+      // The first pass, and the one after the watches went up.
+      expect(passes).toBe(2);
+
+      passes = 0;
+      await created.refresh();
+      // Every watch was already up: one pass, as the timer runs it.
+      expect(passes).toBe(1);
+    });
+
+    it('refuses such a debounce whatever interval it is given', () => {
+      let refusal: unknown;
+      try {
+        createWatcher({
+          config: resolveConfig({
+            dataDir: join(base, 'data'),
+            repos: [root],
+            scheduler: { debounceMs: 60_000 },
+          }),
+          store,
+          bus,
+          runner: createGitRunner(),
+          logger: createLogger('test', { level: 'error', sink: () => undefined }),
+          // A cadence of its own does not make the scheduler settle any sooner.
+          sweepIntervalMs: 200,
+        });
+      } catch (error) {
+        refusal = error;
+      }
+      expect(isInterlockError(refusal) && refusal.code).toBe('CONFIG_INVALID');
+    });
+
+    it('refuses a debounce the budget cannot carry, before watching anything', () => {
+      let refusal: unknown;
+      try {
+        createWatcher({
+          config: resolveConfig({
+            dataDir: join(base, 'data'),
+            repos: [root],
+            scheduler: { debounceMs: 60_000 },
+          }),
+          store,
+          bus,
+          runner: createGitRunner(),
+          logger: createLogger('test', { level: 'error', sink: () => undefined }),
+        });
+      } catch (error) {
+        refusal = error;
+      }
+      expect(isInterlockError(refusal) && refusal.code).toBe('CONFIG_INVALID');
+      expect(watched).toEqual([]);
+    });
   });
 
   it('stops without leaving a timer or a watch behind, twice over', async () => {

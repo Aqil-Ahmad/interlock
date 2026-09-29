@@ -3,11 +3,13 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from '
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveConfig, silentLogger, tokenPath } from '@interlock/shared';
-import type { EventRecord, Finding, SpanEvidence } from '@interlock/shared';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createLogger, resolveConfig, tokenPath } from '@interlock/shared';
+import type { EventRecord, Finding, LogRecord, SpanEvidence } from '@interlock/shared';
+import { afterEach, beforeEach, describe, expect, it, onTestFailed } from 'vitest';
 import { createDaemon } from '../src/daemon.js';
 import type { Daemon } from '../src/daemon.js';
+import type { WatchFactory } from '../src/watcher/index.js';
+import { silentWatch } from './support/silent-watch.js';
 import { openStore } from '../src/store/index.js';
 
 /**
@@ -24,6 +26,12 @@ describe('two live sessions editing the same function', () => {
   let dataDir: string;
   let root: string;
   let daemon: Daemon;
+  /**
+   * Everything the daemon logged, printed only if the test fails: a timeout
+   * with no trail cannot say whether an edit's event never arrived or arrived
+   * and was lost further on.
+   */
+  let logs: LogRecord[];
 
   const git = (cwd: string, ...args: string[]): string =>
     execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe', encoding: 'utf8' });
@@ -99,10 +107,8 @@ describe('two live sessions editing the same function', () => {
     git(root, 'worktree', 'add', '-q', '-b', 'agent-a', join(base, 'a'));
     git(root, 'worktree', 'add', '-q', '-b', 'agent-b', join(base, 'b'));
 
-    daemon = createDaemon({
-      config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
-      logger: silentLogger,
-    });
+    logs = [];
+    daemon = build();
   });
 
   afterEach(async () => {
@@ -110,7 +116,40 @@ describe('two live sessions editing the same function', () => {
     rmSync(base, { recursive: true, force: true });
   });
 
+  /** The daemon at its defaults: nothing about its timing is shortened for a test. */
+  const build = (watchFactory?: WatchFactory): Daemon =>
+    createDaemon({
+      config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
+      logger: createLogger('daemon', { level: 'debug', sink: (record) => logs.push(record) }),
+      ...(watchFactory === undefined ? {} : { watchFactory }),
+    });
+
+  /** Print the daemon's log if this test fails: a timeout alone says nothing about why. */
+  const logOnFailure = (): void => {
+    onTestFailed(() => {
+      process.stderr.write(
+        `daemon log:\n${logs.map((record) => JSON.stringify(record)).join('\n')}\n`,
+      );
+    });
+  };
+
+  /** Both agents edit the same line, and the first Finding is awaited, against the budget. */
+  const conflictingEdits = async (): Promise<{ raised: EventRecord; elapsed: number }> => {
+    const editedAt = Date.now();
+    writeFileSync(join(base, 'a', 'total.ts'), source('items.reduce((n, i) => n + i.price, 0)'));
+    writeFileSync(join(base, 'b', 'total.ts'), source('items.filter(Boolean).length'));
+
+    let raised: EventRecord | undefined;
+    while (raised === undefined) {
+      if (Date.now() - editedAt > 60_000) throw new Error('no Finding within 60 seconds');
+      raised = (await events()).find((record) => record.type === 'finding.raised');
+      if (raised === undefined) await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return { raised, elapsed: Date.now() - editedAt };
+  };
+
   it('raises a textual Finding within 60 seconds, traceable to the edit', async () => {
+    logOnFailure();
     await daemon.start();
     for (const [name, cwd] of [
       ['agent-a', join(base, 'a')],
@@ -126,17 +165,7 @@ describe('two live sessions editing the same function', () => {
       expect(status).toBe(200);
     }
 
-    const editedAt = Date.now();
-    writeFileSync(join(base, 'a', 'total.ts'), source('items.reduce((n, i) => n + i.price, 0)'));
-    writeFileSync(join(base, 'b', 'total.ts'), source('items.filter(Boolean).length'));
-
-    let raised: EventRecord | undefined;
-    while (raised === undefined) {
-      if (Date.now() - editedAt > 60_000) throw new Error('no Finding within 60 seconds');
-      raised = (await events()).find((record) => record.type === 'finding.raised');
-      if (raised === undefined) await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    const elapsed = Date.now() - editedAt;
+    const { raised, elapsed } = await conflictingEdits();
     expect(elapsed).toBeLessThan(60_000);
 
     const payload = raised.payload as Extract<EventRecord['payload'], { type: 'finding.raised' }>;
@@ -168,6 +197,20 @@ describe('two live sessions editing the same function', () => {
       'pair.scheduled',
     ]);
     expect(chain[5]).toMatch(/^branch\./u);
+  }, 90_000);
+
+  it('raises it within 60 seconds with no filesystem signal at all', async () => {
+    // Every watch accepted and none of them ever reports: the edits are found
+    // by the watcher's timed passes alone, at the daemon's own interval.
+    logOnFailure();
+    await daemon.stop();
+    daemon = build(() => silentWatch());
+    await daemon.start();
+
+    const { elapsed } = await conflictingEdits();
+
+    expect(elapsed).toBeLessThan(60_000);
+    expect(logs.some((record) => record.msg === 'signal')).toBe(false);
   }, 90_000);
 
   it('keeps an open Finding traceable through a prune, and re-verifies it after a restart', async () => {
@@ -218,10 +261,7 @@ describe('two live sessions editing the same function', () => {
     // Restart: nothing the daemon remembered survives, so it re-announces every
     // worktree and re-merges the pair — against a store with no verdict to
     // reuse — and the conflict it finds is the Finding it already had.
-    daemon = createDaemon({
-      config: resolveConfig({ dataDir, repos: [root], daemon: { port: 0 } }),
-      logger: silentLogger,
-    });
+    daemon = build();
     const restartedAt = new Date().toISOString();
     await daemon.start();
     await until(

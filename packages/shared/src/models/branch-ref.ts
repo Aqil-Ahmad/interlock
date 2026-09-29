@@ -41,6 +41,7 @@ export interface DirtyState {
   readonly snapshotId: SnapshotId | null;
   readonly stagedFiles: readonly string[];
   readonly unstagedFiles: readonly string[];
+  /** Each untracked file, never the directory holding them. */
   readonly untrackedFiles: readonly string[];
   readonly capturedAt: string;
 }
