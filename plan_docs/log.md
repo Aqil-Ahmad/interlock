@@ -4,6 +4,10 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-30 — the two ast-semantic cases get a decision task
+
+- **Added — M4 task "Decide what catches the two `ast-semantic` cases".** The open question sat inside the pre-filter's constraints with no checkbox. Its labels also disagree with M4's own exit criterion, which gives behavioural conflicts like `same-symbol-dual-edit` to the targeted-test analyzer; `duplicate-implementation` breaks nothing any analyzer here can see. M8's metric freeze now depends on it.
+
 ## 2026-09-30 — second review of the fixture suite
 
 - **Taken — a thrown infrastructure error stopped the whole suite.** The runner turned one into an infrastructure failure on the path to the merge but not inside an analyzer, although the contract only says an analyzer _returns_ one. An analyzer that throws an infra `InterlockError` now fails its fixture alone, reported apart and naming the analyzer; anything else still stops the suite, being a fault. Both are tested with an analyzer that throws.
