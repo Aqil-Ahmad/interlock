@@ -231,6 +231,33 @@ describe('shadow registry', () => {
       expect(report.durationMs).toBeGreaterThanOrEqual(report.quietMs + report.pausedMs);
     });
 
+    it('runs one collection of a repository at a time, pinning included', async () => {
+      // Every command, in order: a second collection's refresh begins only
+      // once the first has pruned and packed. Overlapped, the second would
+      // rewrite the keep refs under the first's walk.
+      const seen: string[] = [];
+      const recording: GitRunner = {
+        run: (target, args, options) => {
+          seen.push(args.includes('fetch') ? 'fetch' : args[0]!);
+          return runner.run(target, args, options);
+        },
+      };
+      const shadows = createShadowRegistry({ runner: recording, dataDir: join(base, 'data') });
+      await shadows.get(repo, repoId);
+      seen.length = 0;
+
+      await Promise.all([
+        shadows.collect(repo, repoId, collectNow),
+        shadows.collect(repo, repoId, collectNow),
+      ]);
+
+      const fetches = seen.flatMap((verb, index) => (verb === 'fetch' ? [index] : []));
+      expect(fetches).toHaveLength(2);
+      const firstDone = Math.max(seen.indexOf('prune'), seen.indexOf('repack'));
+      expect(firstDone).toBeGreaterThan(fetches[0]!);
+      expect(fetches[1]).toBeGreaterThan(firstDone);
+    });
+
     it('lets a run go on after a collection that failed', async () => {
       const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
       await expect(
