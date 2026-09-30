@@ -199,14 +199,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
       const runs = createRunPipeline({ store, bus, runner, shadows, logger: options.logger });
       pipeline = runs;
       runs.attach();
-      scheduler = createScheduler({
+      const scheduling = createScheduler({
         config,
         bus,
         logger: options.logger,
         plan: (repoId, branchRefId) => runs.plan(repoId, branchRefId),
         runPair: (request, signal) => runs.runPair(request, signal),
       });
-      scheduler.start();
+      scheduler = scheduling;
+      scheduling.start();
 
       watcher = createWatcher({
         config,
@@ -242,6 +243,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         runner,
         heldTrees: (repoId) => runs.heldTrees(repoId),
         marginMs: SNAPSHOT_COMMIT_REUSE_MS,
+        quiet: () => scheduling.idle(),
         logger: options.logger,
       });
       retention = createRetention({

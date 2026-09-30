@@ -1,5 +1,5 @@
-import { collectShadow, ensureShadow, isObjectId, openUserRepo } from '@interlock/core';
-import type { CollectReport, GitRunner, ShadowRepo, UserRepo } from '@interlock/core';
+import { collectShadow, ensureShadow, isObjectId, openUserRepo, pinKeep } from '@interlock/core';
+import type { GitRunner, ShadowRepo, ShadowStoreSize, UserRepo } from '@interlock/core';
 import type { Logger, Repo, RepoId } from '@interlock/shared';
 import type { Store } from './store/index.js';
 
@@ -29,12 +29,15 @@ export interface ShadowRegistry {
    */
   use<T>(handle: UserRepo, repoId: RepoId, work: (shadow: ShadowRepo) => Promise<T>): Promise<T>;
   /**
-   * Refresh the shadow and collect it, alone.
+   * Refresh the shadow, pin what it must keep, and collect it.
    *
-   * Waits for everything holding the shadow to finish, and holds off anything
-   * that asks after it: a steady stream of runs would otherwise keep a
-   * collection waiting forever. `keep` is read once that wait is over, so it
-   * describes a shadow nothing is writing to.
+   * Everything up to the collection proper runs beside the checks writing to
+   * the shadow: the refresh and the keep refs move refs and delete nothing, and
+   * anything a check writes meanwhile is younger than any expiry. Only
+   * `repack` and `prune` hold the shadow alone. For that part the collection
+   * waits for everything holding the shadow to finish, and holds off anything
+   * that asks after it: a steady stream of runs would otherwise keep it
+   * waiting forever. One collection per repository at a time.
    */
   collect(
     handle: UserRepo,
@@ -42,10 +45,16 @@ export interface ShadowRegistry {
     options: {
       readonly expireBefore: Date;
       readonly keep: () => Promise<readonly string[]>;
+      /**
+       * Settles when now is a good time to hold the shadow alone: checks go
+       * on meanwhile, and the collection waits for them rather than they for
+       * it. Its caller bounds it; left out, the shadow is taken at once.
+       */
+      readonly quiet?: () => Promise<void>;
       /** Stops the collection, and git with it; the gate is released either way. */
       readonly signal?: AbortSignal;
     },
-  ): Promise<CollectReport>;
+  ): Promise<ShadowCollection>;
   /**
    * Drop a handle that failed, so the next caller resolves it afresh.
    *
@@ -54,6 +63,24 @@ export interface ShadowRegistry {
    * pointing every caller at the broken one.
    */
   forget(repoId: RepoId): void;
+}
+
+/** What one collection kept, what it left, and what it cost the checks. */
+export interface ShadowCollection {
+  readonly kept: number;
+  /** Candidates whose history the user's `gc` removed, left out of the keep refs. */
+  readonly unkeepable: readonly string[];
+  readonly before: ShadowStoreSize;
+  readonly after: ShadowStoreSize;
+  /** How long the collection waited for a quiet moment, checks running meanwhile. */
+  readonly quietMs: number;
+  /**
+   * How long checks and captures of the repository were held off: from the
+   * collection asking for the shadow alone, through waiting for those holding
+   * it, to the end of `repack` and `prune`. The delay an edit can meet.
+   */
+  readonly pausedMs: number;
+  readonly durationMs: number;
 }
 
 export interface ShadowRegistryOptions {
@@ -67,10 +94,36 @@ export interface ShadowRegistryOptions {
  */
 interface Gate {
   holders: number;
+  /** Settles when the collection before this one is done, pinning included. */
+  serial: Promise<void>;
   /** Settles when the collection holding or awaiting the gate is done. */
   collecting: Promise<void> | null;
   /** Wakes a waiting collection when the last holder leaves. */
   drained: (() => void) | null;
+}
+
+/**
+ * Run `work` with the shadow to itself: new holders wait from the moment this
+ * asks, and `work` starts once the holders already in have left.
+ */
+async function alone<T>(gate: Gate, work: () => Promise<T>): Promise<T> {
+  while (gate.collecting !== null) await gate.collecting;
+  let release!: () => void;
+  gate.collecting = new Promise((resolve) => {
+    release = resolve;
+  });
+  try {
+    if (gate.holders > 0) {
+      await new Promise<void>((resolve) => {
+        gate.drained = resolve;
+      });
+      gate.drained = null;
+    }
+    return await work();
+  } finally {
+    gate.collecting = null;
+    release();
+  }
 }
 
 export function createShadowRegistry(options: ShadowRegistryOptions): ShadowRegistry {
@@ -80,7 +133,7 @@ export function createShadowRegistry(options: ShadowRegistryOptions): ShadowRegi
   const gateOf = (repoId: RepoId): Gate => {
     let gate = gates.get(repoId);
     if (gate === undefined) {
-      gate = { holders: 0, collecting: null, drained: null };
+      gate = { holders: 0, serial: Promise.resolve(), collecting: null, drained: null };
       gates.set(repoId, gate);
     }
     return gate;
@@ -120,39 +173,58 @@ export function createShadowRegistry(options: ShadowRegistryOptions): ShadowRegi
       }
     },
 
-    async collect(handle, repoId, { expireBefore, keep, signal }): Promise<CollectReport> {
+    async collect(
+      handle,
+      repoId,
+      { expireBefore, keep, quiet, signal },
+    ): Promise<ShadowCollection> {
       const gate = gateOf(repoId);
-      while (gate.collecting !== null) await gate.collecting;
-      let release!: () => void;
-      gate.collecting = new Promise((resolve) => {
-        release = resolve;
+      const previous = gate.serial;
+      let finished!: () => void;
+      gate.serial = new Promise((resolve) => {
+        finished = resolve;
       });
+      await previous;
       try {
-        if (gate.holders > 0) {
-          await new Promise<void>((resolve) => {
-            gate.drained = resolve;
-          });
-          gate.drained = null;
-        }
+        const startedAt = Date.now();
         // Refreshed, not the cached handle: the fetch prunes a ref naming a
         // branch the user deleted, whose commit their `gc` may since have
-        // removed — and one such ref stops `prune` walking at all. A clone
-        // rebuilt by this call is the handle from now on.
+        // removed — and one such ref stops the collection walking at all. A
+        // clone rebuilt by this call is the handle from now on.
         const refreshing = ensureShadow(handle, { ...options, repoId });
         handles.set(repoId, refreshing);
         refreshing.catch(() => {
           if (handles.get(repoId) === refreshing) handles.delete(repoId);
         });
         const shadow = await refreshing;
-        return await collectShadow(shadow, {
+        const pinned = await pinKeep(shadow, {
           runner: options.runner,
-          expireBefore,
           keep: await keep(),
           ...(signal === undefined ? {} : { signal }),
         });
+
+        const quietFrom = Date.now();
+        if (quiet !== undefined) await quiet();
+        signal?.throwIfAborted();
+        const pausedFrom = Date.now();
+        const collected = await alone(gate, () =>
+          collectShadow(shadow, {
+            runner: options.runner,
+            expireBefore,
+            ...(signal === undefined ? {} : { signal }),
+          }),
+        );
+        return {
+          kept: pinned.kept.length,
+          unkeepable: pinned.unkeepable,
+          before: collected.before,
+          after: collected.after,
+          quietMs: pausedFrom - quietFrom,
+          pausedMs: Date.now() - pausedFrom,
+          durationMs: Date.now() - startedAt,
+        };
       } finally {
-        gate.collecting = null;
-        release();
+        finished();
       }
     },
 
@@ -189,17 +261,52 @@ export interface ShadowCollectorOptions {
    * a commit the verdict names can be.
    */
   readonly marginMs: number;
+  /**
+   * Settles when no check is queued or running — the scheduler's `idle`. A
+   * collection holds the repository's checks off while it repacks, so it
+   * starts in a lull where there is one, and edits in a burst are not the ones
+   * kept waiting. Waited for {@link COLLECTION_QUIET_WAIT_MS} at most.
+   */
+  readonly quiet?: () => Promise<void>;
+  /** {@link COLLECTION_QUIET_WAIT_MS} unless given, so a test need not wait it out. */
+  readonly quietWaitMs?: number;
   readonly logger: Logger;
   readonly now?: () => number;
 }
+
+/**
+ * The longest a collection waits for a lull before holding the checks off
+ * anyway: under edits that never pause, waiting longer only lets the shadow
+ * grow, and the checks wait the same once it starts.
+ */
+export const COLLECTION_QUIET_WAIT_MS = 5 * 60_000;
 
 /** The wait after a first failure, doubling with each one after it. */
 export const COLLECTION_BACKOFF_MS = 60 * 60_000;
 /** The longest wait: a repository that recovers is collected again within a day. */
 export const COLLECTION_BACKOFF_MAX_MS = 24 * 60 * 60_000;
 
+/** `quiet`, or the wait's end, or the signal: whichever comes first. */
+function lull(
+  quiet: () => Promise<void>,
+  waitMs: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, waitMs);
+    signal?.addEventListener('abort', done, { once: true });
+    quiet().then(done, done);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+  });
+}
+
 export function createShadowCollector(options: ShadowCollectorOptions): ShadowCollector {
-  const { shadows, store, runner, heldTrees, marginMs } = options;
+  const { shadows, store, runner, heldTrees, marginMs, quiet } = options;
+  const quietWaitMs = options.quietWaitMs ?? COLLECTION_QUIET_WAIT_MS;
   const log = options.logger.child('shadow-collection');
   const now = options.now ?? Date.now;
   const failing = new Map<RepoId, { failures: number; retryAt: number }>();
@@ -238,6 +345,7 @@ export function createShadowCollector(options: ShadowCollectorOptions): ShadowCo
       const report = await shadows.collect(handle, repo.id, {
         expireBefore,
         keep: () => keepFor(repo.id),
+        ...(quiet === undefined ? {} : { quiet: () => lull(quiet, quietWaitMs, signal) }),
         ...(signal === undefined ? {} : { signal }),
       });
       failing.delete(repo.id);

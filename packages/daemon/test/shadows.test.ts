@@ -134,9 +134,23 @@ describe('shadow registry', () => {
       expect(order).toEqual(['run started', 'run done', 'collected']);
     });
 
-    it('holds off a run that asks while a collection waits, so runs cannot starve it', async () => {
-      const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
+    it('holds off a run that asks once the collection wants the shadow, so runs cannot starve it', async () => {
       const order: string[] = [];
+      // The collection's end, as its repack and prune finish, whichever runs
+      // last: its own promise settles a few turns after the gate is released,
+      // and a run woken by that release can log before it.
+      const done = new Set<string>();
+      const marking: GitRunner = {
+        run: async (target, args, options) => {
+          const result = await runner.run(target, args, options);
+          if (args[0] === 'prune' || args[0] === 'repack') {
+            done.add(args[0]);
+            if (done.size === 2) order.push('collected');
+          }
+          return result;
+        },
+      };
+      const shadows = createShadowRegistry({ runner: marking, dataDir: join(base, 'data') });
       const holding = deferred();
       const started = deferred();
       const first = shadows.use(repo, repoId, () => {
@@ -144,9 +158,16 @@ describe('shadow registry', () => {
         return holding.promise;
       });
       await started.promise;
-      const collection = shadows.collect(repo, repoId, collectNow).then(() => {
-        order.push('collected');
+      const wantsIt = deferred();
+      const collection = shadows.collect(repo, repoId, {
+        ...collectNow,
+        quiet: () => {
+          wantsIt.resolve();
+          return Promise.resolve();
+        },
       });
+
+      await wantsIt.promise;
       await settle();
 
       const second = shadows.use(repo, repoId, () => {
@@ -161,29 +182,53 @@ describe('shadow registry', () => {
       expect(order).toEqual(['collected', 'second run']);
     });
 
-    it('reads what to keep once the runs are done, not when it was asked', async () => {
+    it('pins what to keep beside a running check, holding it off only to repack and prune', async () => {
       const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
       const holding = deferred();
-      let done = false;
       const started = deferred();
       const run = shadows.use(repo, repoId, async () => {
         started.resolve();
         await holding.promise;
-        done = true;
       });
       await started.promise;
-      let readAfterRun: boolean | null = null;
+      const keepRead = deferred();
       const collection = shadows.collect(repo, repoId, {
         expireBefore: new Date(),
         keep: () => {
-          readAfterRun = done;
+          keepRead.resolve();
           return Promise.resolve([]);
         },
       });
-      await settle();
+
+      // Read while the run still holds the shadow, and another check goes
+      // ahead meanwhile: nothing the pin does can take an object from under it.
+      await keepRead.promise;
+      await expect(shadows.use(repo, repoId, () => Promise.resolve('ran'))).resolves.toBe('ran');
+
       holding.resolve();
       await Promise.all([run, collection]);
-      expect(readAfterRun).toBe(true);
+    });
+
+    it('waits for a quiet moment with the checks still running, and says how long each wait was', async () => {
+      const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
+      const lull = deferred();
+      const asked = deferred();
+      const collection = shadows.collect(repo, repoId, {
+        ...collectNow,
+        quiet: () => {
+          asked.resolve();
+          return lull.promise;
+        },
+      });
+      await asked.promise;
+      await expect(shadows.use(repo, repoId, () => Promise.resolve('ran'))).resolves.toBe('ran');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      lull.resolve();
+      const report = await collection;
+
+      expect(report.quietMs).toBeGreaterThanOrEqual(50);
+      expect(report.durationMs).toBeGreaterThanOrEqual(report.quietMs + report.pausedMs);
     });
 
     it('lets a run go on after a collection that failed', async () => {
@@ -253,6 +298,15 @@ describe('shadow registry', () => {
       });
 
     const messages = (): string[] => logs.filter((l) => l.level !== 'debug').map((l) => l.msg);
+
+    /** Turns of the event loop until `probe` holds, for a callback git has yet to reach. */
+    const until = async (probe: () => boolean): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (!probe()) {
+        if (Date.now() > deadline) throw new Error('timed out');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
 
     beforeEach(async () => {
       store = await openStore({ path: join(base, 'interlock.db') });
@@ -369,6 +423,75 @@ describe('shadow registry', () => {
 
       expect(prunes).toBe(0);
       expect(messages()).toEqual([]);
+    });
+
+    it('waits for the checks to go quiet before collecting', async () => {
+      let settleQuiet: (() => void) | undefined;
+      const collecting = createShadowCollector({
+        shadows: createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') }),
+        store,
+        runner: pruning,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        quiet: () =>
+          new Promise((resolve) => {
+            settleQuiet = resolve;
+          }),
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      const passing = collecting.pass(new Date(clock).toISOString());
+      await until(() => settleQuiet !== undefined);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(prunes).toBe(0);
+
+      settleQuiet!();
+      await passing;
+      expect(prunes).toBe(1);
+      expect(logs.find((l) => l.msg === 'collected the shadow')!.quietMs).toBeGreaterThanOrEqual(
+        50,
+      );
+    });
+
+    it('collects anyway once the checks have not gone quiet for the whole wait', async () => {
+      const collecting = createShadowCollector({
+        shadows: createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') }),
+        store,
+        runner: pruning,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        quiet: () => new Promise(() => undefined),
+        quietWaitMs: 50,
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      await collecting.pass(new Date(clock).toISOString());
+
+      expect(prunes).toBe(1);
+    });
+
+    it('stops waiting for quiet when stopped, and collects nothing', async () => {
+      const controller = new AbortController();
+      const collecting = createShadowCollector({
+        shadows: createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') }),
+        store,
+        runner: pruning,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        quiet: () => {
+          controller.abort();
+          return new Promise(() => undefined);
+        },
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      await collecting.pass(new Date(clock).toISOString(), controller.signal);
+
+      expect(prunes).toBe(0);
+      expect(messages()).toContain('stopped collecting a shadow');
     });
 
     it('waits a day at most between attempts', async () => {

@@ -32,7 +32,6 @@ import { cpus, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createGitRunner } from '../packages/core/src/index.js';
-import type { CollectReport } from '../packages/core/src/index.js';
 import { createLogger, resolveConfig, silentLogger } from '../packages/shared/src/index.js';
 import type { MergeConflictEvidence } from '../packages/shared/src/index.js';
 import { EventBus } from '../packages/daemon/src/bus/index.js';
@@ -42,6 +41,7 @@ import { createRunPipeline } from '../packages/daemon/src/scheduler/run-pipeline
 import { createRetention } from '../packages/daemon/src/retention.js';
 import type { Retention } from '../packages/daemon/src/retention.js';
 import { createShadowCollector, createShadowRegistry } from '../packages/daemon/src/shadows.js';
+import type { ShadowCollection } from '../packages/daemon/src/shadows.js';
 import { openStore } from '../packages/daemon/src/store/index.js';
 import type { PruneReport } from '../packages/daemon/src/store/index.js';
 import { createWatcher } from '../packages/daemon/src/watcher/index.js';
@@ -154,7 +154,7 @@ interface System {
   /** Every retention pass's report, in order. */
   readonly passes: PruneReport[];
   /** Every shadow collection's report, in order. */
-  readonly collections: CollectReport[];
+  readonly collections: ShadowCollection[];
   /** Edit-to-Finding, per planted conflict. */
   readonly latencies: number[];
   readonly planted: () => number;
@@ -175,7 +175,7 @@ async function startSystem(
   // largest table a busy store has, and a bench without it measures the rest.
   let appends: Promise<void> = Promise.resolve();
   const passes: PruneReport[] = [];
-  const collections: CollectReport[] = [];
+  const collections: ShadowCollection[] = [];
   let retention: Retention | null = null;
   const bus = new EventBus({
     logger: silentLogger,
@@ -232,18 +232,20 @@ async function startSystem(
       sink: (record) => {
         if (record.msg === 'pruned the store') passes.push(record as unknown as PruneReport);
         if (record.msg === 'collected the shadow') {
-          collections.push(record as unknown as CollectReport);
+          collections.push(record as unknown as ShadowCollection);
         }
         if (record.level === 'warn') console.error(JSON.stringify(record));
       },
     });
     const runs = pipeline;
+    const scheduling = scheduler;
     const collector = createShadowCollector({
       shadows,
       store,
       runner,
       heldTrees: (repoId) => runs?.heldTrees(repoId) ?? [],
       marginMs: commitReuseMs!,
+      ...(scheduling === null ? {} : { quiet: () => scheduling.idle() }),
       logger,
     });
     retention = createRetention({
@@ -539,6 +541,9 @@ async function retentionMain(): Promise<void> {
           collections: system.collections.length,
           largestPackKib: Math.max(...system.collections.map((report) => report.after.kib)),
           longestCollectionMs: Math.max(...system.collections.map((report) => report.durationMs)),
+          // What an edit can meet: checks of the repository held off.
+          longestPauseMs: Math.max(...system.collections.map((report) => report.pausedMs)),
+          longestQuietWaitMs: Math.max(...system.collections.map((report) => report.quietMs)),
           longestBatchMs: Math.max(...system.passes.map((pass) => pass.longestBatchMs)),
           longestPassMs: Math.max(...system.passes.map((pass) => pass.durationMs)),
           samples,
