@@ -1,12 +1,16 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createGitRunner } from '../../packages/core/src/index.js';
+import type { Analyzer } from '../../packages/core/src/index.js';
+import { InterlockError } from '../../packages/shared/src/index.js';
 import type { AnalyzerKind } from '../../packages/shared/src/index.js';
 import { describe, expect, it } from 'vitest';
 import { FIXTURE_CASES } from './format.js';
 import type { Fixture, Span } from './format.js';
 import { FIXTURES } from './index.js';
 import { renderJson, renderMarkdown } from './report.js';
+import { ANALYZERS, runFixture } from './runner.js';
 import { containsIdentifier } from './score.js';
 import { runSuite } from './suite.js';
 
@@ -161,6 +165,35 @@ describe('the golden set', () => {
       );
     }
   }, 180_000);
+
+  describe('an analyzer that throws', () => {
+    const throwing = (error: Error): Analyzer => ({
+      ...ANALYZERS[0]!,
+      appliesTo: () => true,
+      analyze: () => Promise.reject(error),
+    });
+    const conflict = FIXTURES.find((fixture) => fixture.id === 'overlap-uncommitted')!;
+
+    it('reports an infrastructure failure apart, naming the analyzer', async () => {
+      const failed = new InterlockError('GIT_COMMAND_FAILED', 'git did not finish', {
+        infra: true,
+      });
+
+      const run = await runFixture(conflict, createGitRunner(), [throwing(failed)]);
+
+      expect(run).toMatchObject({
+        kind: 'infra-failure',
+        analyzer: 'textual',
+        message: 'git did not finish',
+      });
+    });
+
+    it('stops the suite for anything else, which is a fault in the analyzer or the runner', async () => {
+      await expect(
+        runFixture(conflict, createGitRunner(), [throwing(new Error('a bug'))]),
+      ).rejects.toThrow('a bug');
+    });
+  });
 
   it('is never imported by anything in packages/', () => {
     const offenders: string[] = [];

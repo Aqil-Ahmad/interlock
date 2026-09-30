@@ -69,16 +69,22 @@ export type FixtureRun =
 export async function runFixture(
   fixture: Fixture,
   runner: GitRunner = createGitRunner(),
+  analyzers: readonly Analyzer[] = ANALYZERS,
 ): Promise<FixtureRun> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'interlock-eval-')));
   try {
-    return await inside(dir, fixture, runner);
+    return await inside(dir, fixture, runner, analyzers);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-async function inside(dir: string, fixture: Fixture, runner: GitRunner): Promise<FixtureRun> {
+async function inside(
+  dir: string,
+  fixture: Fixture,
+  runner: GitRunner,
+  analyzers: readonly Analyzer[],
+): Promise<FixtureRun> {
   const built = generate(fixture, dir);
   const repoId = '01JBQ0000000000000000EVAL' as RepoId;
   let context: AnalyzerContext;
@@ -141,9 +147,20 @@ async function inside(dir: string, fixture: Fixture, runner: GitRunner): Promise
   }
 
   const findings: Finding[] = [];
-  for (const analyzer of ANALYZERS) {
+  for (const analyzer of analyzers) {
     if (!analyzer.appliesTo(context)) continue;
-    const outcome = await analyzer.analyze(context);
+    let outcome;
+    try {
+      outcome = await analyzer.analyze(context);
+    } catch (error) {
+      // The contract is to return an infrastructure failure, but one thrown
+      // from under an analyzer — git timing out, a sandbox gone — is the
+      // environment all the same, and one fixture's is not the whole suite's.
+      if (isInterlockError(error) && error.infra) {
+        return { kind: 'infra-failure', fixture, analyzer: analyzer.kind, message: error.message };
+      }
+      throw error;
+    }
     if (outcome.verdict === 'infra-failure' || outcome.verdict === 'timeout') {
       return {
         kind: 'infra-failure',
