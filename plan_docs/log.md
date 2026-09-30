@@ -4,6 +4,16 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-30 — second review of shadow collection: the pause shrunk and scheduled, backlog made to converge
+
+- **Valid — checks wait while a shadow is collected.** Measured on a tenth-scale probe (124k loose objects over 25 hours): an hour's pass held the shadow 4.2 s; a never-collected backlog, 70 s. So only `repack` and `prune` now hold the shadow alone. The refresh, the keep candidates' check and the keep refs move refs and delete nothing, and anything a check writes meanwhile is younger than the expiry, so they run beside checks (`pinKeep`). The collection then waits for the scheduler to go idle, five minutes at most, before taking the shadow. Each collection logs `quietMs` and `pausedMs`, and the bench reports the longest of each.
+- **Tried and dropped — pre-packing loose objects beside checks.** It would move the file-heavy part of a backlog out of the pause (70 s held became 17 s shared plus 25 s held), but a probe showed it loses a freshly written object: `pack-objects --unpacked` skips an object already in a cruft pack, and `prune-packed` deletes its fresh loose copy. In steady state it saved nothing anyway: 4.19 s held against 4.16 s.
+- **Taken, differently — a large backlog.** No release shipped a shadow without collection, so none reaches a user; a backlog forms only on a development machine or after collections fail for days. A shadow with no cruft pack now prunes before it packs, which the rewrite hazard cannot touch (writing an object in a regular pack freshens the pack). A prune stopped by the timeout keeps what it deleted, so an oversized backlog shrinks with each attempt rather than repeating the same lost hour.
+- **Taken — one walk for every keep candidate,** falling back to one each only to find a broken one. Hundreds of live Findings were hundreds of `rev-list` calls. `update-ref --stdin` was not taken: the runner closes stdin by design, and only changed refs are written, so steady state is a few calls, now outside the pause.
+- **Not valid — kept trees never forgotten.** `branch.disappeared` deletes the branch's entry from the announced map, so a deleted branch's tree stops being held.
+- **Deferred — a collection shown in `interlock status`.** A task in the milestone, to size against the bench's pause at the default window.
+- **Pending, long runs:** the compressed bench (about 16 minutes) for `longestPauseMs`, and mutation testing over this change.
+
 ## 2026-09-30 — review of shadow collection: packing taken, shutdown taken, pool noted
 
 - **Valid, and worse than the review estimated — the default window was unmeasured.** A synthetic shadow at the default's scale (25 hours of the bench's load: 1,147,000 loose objects built the way the bench writes them) is 4.4 GiB on disk for 1.3 GiB of content, since each small object takes a whole block. One hourly prune over it took 548 s, most of it system time listing files, and the collection timeout was 10 minutes.

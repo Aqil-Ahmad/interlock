@@ -335,7 +335,10 @@ merge-tree` over the two commits reports the conflict — with neither side
   **Revised after review:** collection also packs every pass (`repack --cruft
 -d -l`, before the prune), since a day of loose objects at the default window
   measured 4.4 GiB and a nine-minute prune; a shutdown stops a collection in
-  progress rather than waiting for it.
+  progress rather than waiting for it. **Second review:** only `repack` and
+  `prune` hold the shadow alone; the refresh and the keep refs run beside
+  checks, the collection waits for the scheduler to go idle first (five minutes
+  at most), and a never-collected shadow prunes before packing.
 
   **Done when:** only old, unreachable objects go — a fresh capture, a pool slot's
   current commit and every kept object survive, a slot's previous commit and
@@ -534,6 +537,12 @@ merge-tree` over the two commits reports the conflict — with neither side
       **What:** count findings raised, findings delivered, and findings later dismissed or resolved as wrong. Expose the ratio.
       **Done when:** the daemon can report its own false-positive rate for a time window, and `interlock status` shows it.
       **Constraints:** the design rule is **when unsure, say nothing**. A tool that catches 60% of conflicts and never lies is a product; one that catches 95% and cries wolf twice a day is uninstalled within a week. Every false positive is a bug with an issue, not a tuning parameter. Decide what a dismissal means before counting one: reconciliation matches open Findings only, so today a dismissed conflict is raised again as a new Finding on the pair's next run — or cache hit, which reconciles the same way — and a dismissal lasts one run.
+
+- [ ] **Show a shadow collection in `interlock status`**
+      **Files:** `packages/daemon/src/api/`, `packages/cli/src/commands/status.ts`, `packages/cli/src/render.ts`
+      **What:** while a repository's shadow is repacked its checks are held off, and today only the daemon's log says why an edit's warning is late. Surface a collection in progress, and the last one's pause, per repository.
+      **Done when:** `interlock status` names a repository whose checks are held for a collection, with how long it has been; `--json` carries the same; the API carries it without a store migration, since it is live state.
+      **Constraints:** read the pause from the registry's own measure (`pausedMs`), not a guess. Worth doing once the bench records the pause at the default window: under realistic load it measured about a second.
 
 - [ ] **`interlock check A B`**
       **Files:** `packages/cli/src/commands/`
