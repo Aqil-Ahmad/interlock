@@ -12,7 +12,8 @@ Short entries: done, decided, blocked. Newest first.
 - **Taken — one walk for every keep candidate,** falling back to one each only to find a broken one. Hundreds of live Findings were hundreds of `rev-list` calls. `update-ref --stdin` was not taken: the runner closes stdin by design, and only changed refs are written, so steady state is a few calls, now outside the pause.
 - **Not valid — kept trees never forgotten.** `branch.disappeared` deletes the branch's entry from the announced map, so a deleted branch's tree stops being held.
 - **Deferred — a collection shown in `interlock status`.** A task in the milestone, to size against the bench's pause at the default window.
-- **Pending, long runs:** the compressed bench (about 16 minutes) for `longestPauseMs`, and mutation testing over this change.
+- **Measured** with `INTERLOCK_BENCH_MODE=retention`, as before: over 30 collections the longest pause of a repository's checks was 1.15 s, and the longest wait for the scheduler to go idle 70 ms. The shadow holds at 86–114 loose objects and a 319–338 KiB pack from the first window on. No collection warned.
+- **Mutation: 39, 39 caught,** after the one survivor — two collections of one repository overlapping — was pinned.
 
 ## 2026-09-30 — review of shadow collection: packing taken, shutdown taken, pool noted
 
