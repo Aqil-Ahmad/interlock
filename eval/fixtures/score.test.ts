@@ -140,6 +140,9 @@ describe('scoring', () => {
     it('counts an empty span as its first line', () => {
       const empty = finding({ evidence: [span(sides.a, 4, 3), span(sides.b, 3, 3)] });
       expect(matches(expectation, empty, sides)).toBe(true);
+      // An empty span at the label's first line, which its end sits before.
+      const atStart = finding({ evidence: [span(sides.a, 3, 2), span(sides.b, 3, 3)] });
+      expect(matches(expectation, atStart, sides)).toBe(true);
       const past = finding({ evidence: [span(sides.a, 5, 4), span(sides.b, 3, 3)] });
       expect(matches(expectation, past, sides)).toBe(false);
     });
@@ -171,18 +174,25 @@ describe('scoring', () => {
     });
 
     it('pairs to match the most, not the first that fits', () => {
-      // The broad finding fits both labels and sorts first; given the first
-      // label it would leave the narrow finding with nothing.
+      // The broad finding fits both labels and sorts first — its span key is
+      // `3-8`, the narrow one's `4-4` — so a first-come pairing hands it the
+      // first label and leaves the narrow finding with nothing.
       const narrowLabel = { ...expectation, spanA: { ...expectation.spanA!, start: 8, end: 8 } };
-      const broad = finding({
-        title: 'a',
-        evidence: [span(sides.a, 3, 8), span(sides.b, 3, 3)],
-      });
-      const narrow = finding({ title: 'b', evidence: [span(sides.a, 3, 3), span(sides.b, 3, 3)] });
+      const broad = finding({ evidence: [span(sides.a, 3, 8), span(sides.b, 3, 3)] });
+      const narrow = finding({ evidence: [span(sides.a, 4, 4), span(sides.b, 3, 3)] });
       const scored = score(fixture([expectation, narrowLabel]), [narrow, broad], sides);
       expect(scored.matched).toHaveLength(2);
       expect(scored.falsePositives).toEqual([]);
       expect(scored.falseNegatives).toEqual([]);
+    });
+
+    it('scores the same whatever order the findings arrive in', () => {
+      const one = finding({ rule: 'adjacent-addition' });
+      const two = finding({ rule: 'add-add' });
+      const forward = score(fixture([]), [one, two], sides);
+      const backward = score(fixture([]), [two, one], sides);
+      expect(backward.falsePositives).toEqual(forward.falsePositives);
+      expect(forward.falsePositives.map((f) => f.rule)).toEqual(['add-add', 'adjacent-addition']);
     });
   });
 
@@ -196,19 +206,23 @@ describe('scoring', () => {
         sides,
       );
 
-      const totals = total([labelled, twin, missed]);
+      const again = score(fixture([expectation]), [finding()], sides);
 
-      expect(totals.byAnalyzer.get('textual')).toEqual({ tp: 1, fp: 1, fn: 0 });
+      const totals = total([labelled, twin, missed, again]);
+
+      expect(totals.byAnalyzer.get('textual')).toEqual({ tp: 2, fp: 1, fn: 0 });
       expect(totals.byAnalyzer.get('typecheck')).toEqual({ tp: 0, fp: 0, fn: 1 });
-      expect(totals.byClass.get('textual/overlapping-edit')).toEqual({ tp: 1, fp: 0, fn: 0 });
+      expect(totals.byClass.get('textual/overlapping-edit')).toEqual({ tp: 2, fp: 0, fn: 0 });
       expect(totals.byClass.get('textual/adjacent-addition')).toEqual({ tp: 0, fp: 1, fn: 0 });
       expect(totals.byClass.get('typecheck/x')).toEqual({ tp: 0, fp: 0, fn: 1 });
-      expect(totals.combined).toEqual({ tp: 1, fp: 1, fn: 1 });
+      expect(totals.combined).toEqual({ tp: 2, fp: 1, fn: 1 });
     });
 
     it('leaves precision and recall blank when their denominator is 0', () => {
       expect(precision({ tp: 0, fp: 0, fn: 3 })).toBeNull();
       expect(recall({ tp: 0, fp: 2, fn: 0 })).toBeNull();
+      // Found something and matched nothing: that is a precision of 0, not a blank.
+      expect(precision({ tp: 0, fp: 2, fn: 0 })).toBe(0);
       expect(precision({ tp: 3, fp: 1, fn: 0 })).toBe(0.75);
       expect(recall({ tp: 1, fp: 0, fn: 3 })).toBe(0.25);
       expect(recall({ tp: 0, fp: 0, fn: 3 })).toBe(0);
