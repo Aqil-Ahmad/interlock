@@ -4,6 +4,12 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-30 — second review of the fixture suite
+
+- **Taken — a thrown infrastructure error stopped the whole suite.** The runner turned one into an infrastructure failure on the path to the merge but not inside an analyzer, although the contract only says an analyzer _returns_ one. An analyzer that throws an infra `InterlockError` now fails its fixture alone, reported apart and naming the analyzer; anything else still stops the suite, being a fault. Both are tested with an analyzer that throws.
+- **Taken — the labels set conventions for analyzers not yet written.** M3's attribution engine now says rule names and span sides follow `eval/fixtures/semantic.ts`: `rename-vs-callsite`, `signature-vs-caller` and `moved-export-vs-import`, never a compiler code. The declaration's branch is spanned on the declaration, the stale reference's branch on the reference.
+- **Premise corrected, and flagged for a decision — there is no AST detector task.** The review pointed at "M4's AST task", but M4 made the AST layer a pre-filter, so the two cases labelled `ast-semantic` have no planned detector, while `evaluation.md` still sets an AST-layer precision target. Recorded on M4's pre-filter task as open, to decide before M8 freezes the metrics. The labels stay: they are what the protocol lists, and until something catches those cases, recall 0 is the honest number.
+
 ## 2026-09-30 — review of the fixture suite: three taken
 
 - **Taken — the eval copied the analyzer list.** `runner.ts` had its own `[textualAnalyzer]` beside core's `ANALYZER_PIPELINE`, so an analyzer added to the pipeline would have kept reporting recall 0. It reads `ANALYZER_PIPELINE` now. The daemon's `run-pipeline.ts` names `textualAnalyzer` directly as well, in the run and the fingerprint; folding that in is recorded on M3's typecheck task, where the second analyzer lands.
