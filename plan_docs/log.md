@@ -4,6 +4,12 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-30 — review of the fixture suite: three taken
+
+- **Taken — the eval copied the analyzer list.** `runner.ts` had its own `[textualAnalyzer]` beside core's `ANALYZER_PIPELINE`, so an analyzer added to the pipeline would have kept reporting recall 0. It reads `ANALYZER_PIPELINE` now. The daemon's `run-pipeline.ts` names `textualAnalyzer` directly as well, in the run and the fingerprint; folding that in is recorded on M3's typecheck task, where the second analyzer lands.
+- **Taken — nothing caught a drop in the numbers.** A test now runs all 25 fixtures, about 10 s, and holds each analyzer that runs to a floor: textual at precision 1 and recall 1. An analyzer that runs without a floor fails the test, and so does a floor for an analyzer that no longer runs. Floors only rise. Checked both ways: textual misclassifying `rename-delete` fails it, naming the fixture; an empty `ANALYZER_PIPELINE` fails it.
+- **Taken as documentation — "real pipeline" was generous.** The runner makes the daemon's core calls in the daemon's order, but not through `run-pipeline.ts`, so the verdict cache, Finding reconciliation and recapture are not measured. The runner's comment and `eval/README.md` say so.
+
 ## 2026-09-30 — golden fixture suite
 
 - **Task rewritten before starting.** It named the fixtures but not the runner, the report, the format or the scoring, and all four freeze the moment `eval/` is written. The rewrite fixes them in the milestone.
