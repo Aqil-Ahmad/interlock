@@ -38,6 +38,9 @@ export default defineConfig({
           include: [
             'packages/{shared,core,daemon,mcp-server,cli}/src/**/*.test.ts',
             'packages/{shared,core,daemon,mcp-server,cli}/test/**/*.test.ts',
+            // Outside the workspace, so nothing else would notice the runner or
+            // the scorer breaking until a report was due.
+            'eval/**/*.test.ts',
           ],
           // Integration tests spin up real git repos; give them room.
           testTimeout: 30_000,

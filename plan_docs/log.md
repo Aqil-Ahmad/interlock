@@ -4,6 +4,41 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-30 — the two ast-semantic cases decided (ADR-0006)
+
+- **Decided, approved by the owner before the set merged:** the same-symbol dual edit is a behavioural conflict for the targeted tests, rule `merge-breaks-test`; the duplicate implementation is kept as not detected by design; the AST layer is measured as a pre-filter, and `evaluation.md` drops its AST precision target.
+- **Found — the first dual-edit fixture was no conflict.** Rejecting a discount over 100% and rounding the result are correct together; only a "both touched one function" matcher would have flagged them. The fixture now fixes one function in contradictory ways, each branch with a test; built by the generator, each branch passes `node --test` and the merge fails one. A new twin makes two compatible edits whose tests pass merged.
+- **Format — `notDetected`,** a reason on a case the set keeps and no analyzer is meant to catch: it expects nothing, a finding on it is a false positive, and the report lists it apart.
+
+## 2026-09-30 — the two ast-semantic cases get a decision task
+
+- **Added — M4 task "Decide what catches the two `ast-semantic` cases".** The open question sat inside the pre-filter's constraints with no checkbox. Its labels also disagree with M4's own exit criterion, which gives behavioural conflicts like `same-symbol-dual-edit` to the targeted-test analyzer; `duplicate-implementation` breaks nothing any analyzer here can see. M8's metric freeze now depends on it.
+
+## 2026-09-30 — second review of the fixture suite
+
+- **Taken — a thrown infrastructure error stopped the whole suite.** The runner turned one into an infrastructure failure on the path to the merge but not inside an analyzer, although the contract only says an analyzer _returns_ one. An analyzer that throws an infra `InterlockError` now fails its fixture alone, reported apart and naming the analyzer; anything else still stops the suite, being a fault. Both are tested with an analyzer that throws.
+- **Taken — the labels set conventions for analyzers not yet written.** M3's attribution engine now says rule names and span sides follow `eval/fixtures/semantic.ts`: `rename-vs-callsite`, `signature-vs-caller` and `moved-export-vs-import`, never a compiler code. The declaration's branch is spanned on the declaration, the stale reference's branch on the reference.
+- **Premise corrected, and flagged for a decision — there is no AST detector task.** The review pointed at "M4's AST task", but M4 made the AST layer a pre-filter, so the two cases labelled `ast-semantic` have no planned detector, while `evaluation.md` still sets an AST-layer precision target. Recorded on M4's pre-filter task as open, to decide before M8 freezes the metrics. The labels stay: they are what the protocol lists, and until something catches those cases, recall 0 is the honest number.
+
+## 2026-09-30 — review of the fixture suite: three taken
+
+- **Taken — the eval copied the analyzer list.** `runner.ts` had its own `[textualAnalyzer]` beside core's `ANALYZER_PIPELINE`, so an analyzer added to the pipeline would have kept reporting recall 0. It reads `ANALYZER_PIPELINE` now. The daemon's `run-pipeline.ts` names `textualAnalyzer` directly as well, in the run and the fingerprint; folding that in is recorded on M3's typecheck task, where the second analyzer lands.
+- **Taken — nothing caught a drop in the numbers.** A test now runs all 25 fixtures, about 10 s, and holds each analyzer that runs to a floor: textual at precision 1 and recall 1. An analyzer that runs without a floor fails the test, and so does a floor for an analyzer that no longer runs. Floors only rise. Checked both ways: textual misclassifying `rename-delete` fails it, naming the fixture; an empty `ANALYZER_PIPELINE` fails it.
+- **Taken as documentation — "real pipeline" was generous.** The runner makes the daemon's core calls in the daemon's order, but not through `run-pipeline.ts`, so the verdict cache, Finding reconciliation and recapture are not measured. The runner's comment and `eval/README.md` say so.
+
+## 2026-09-30 — golden fixture suite
+
+- **Task rewritten before starting.** It named the fixtures but not the runner, the report, the format or the scoring, and all four freeze the moment `eval/` is written. The rewrite fixes them in the milestone.
+- **Decided — the format is data.** Each fixture has base files and each branch's write, delete and rename operations, split into committed and left uncommitted in the branch's worktree. Its expected outcome is a list of expectations, empty for a twin. One generator builds every fixture. The shape follows the core textual fixtures, but none of their code is imported, so the set can't move when a unit test's support file does.
+- **Decided — semantic rules are named by the set first:** `rename-vs-callsite`, `signature-vs-caller` and `moved-export-vs-import` for `typecheck`; `same-symbol-dual-edit` and `duplicate-implementation` for `ast-semantic`. A later analyzer is scored against labels that predate it.
+- **Decided — maximum matching, not first-come.** One broad finding must not take the expectation a narrower finding needed, which would score one hit as a false positive plus a miss. The rule is printed at the head of every report.
+- **Decided — the report holds no timings and no ids.** Two full runs wrote byte-identical `fixtures.md` and `fixtures.json`. Fixture git runs with no global or system config and fixed dates.
+- **Checked — the semantic labels against `tsc`.** Every branch of every semantic fixture compiles alone. Each `typecheck` conflict fails on merge inside its labelled lines: TS2305 at `support.ts:1`, TS2554 at `invoice.ts:4`, TS2305 at `tag.ts:1`. Every twin compiles, and the two `ast-semantic` cases compile, which is why they need an analyzer other than the compiler.
+- **Caught before freezing — one label named its symbol nowhere in its lines.** `same-symbol-dual-edit` labelled the two edited lines, which do not contain `applyDiscount`. It now labels the whole function on each side, and the static test requires every expectation's symbol to appear in its labelled lines.
+- **First report** (git 2.55.0, Node 26.4.0, macOS arm64): 25 fixtures, 12 conflicts and 13 twins. `textual` scored 7 TP, 0 FP, 0 FN, precision and recall 1.000. `typecheck` (3 FN) and `ast-semantic` (2 FN) did not run; their recall is 0. Combined precision is 1.000 and recall 0.583. No twin raised a finding.
+- **Mutation: 27 mutations, 27 caught,** after five survivors were each traced to a missing test, none equivalent: an empty span on the label's first line; maximum matching, which the first test's ordering let greedy pass; precision 0 when only false positives exist; order-independence of the pairing; and per-class totals accumulating.
+- **Noted — M8's "Golden fixture run"** stays: it is the run under frozen metric definitions, on this set.
+
 ## 2026-09-30 — second review of shadow collection: the pause shrunk and scheduled, backlog made to converge
 
 - **Valid — checks wait while a shadow is collected.** Measured on a tenth-scale probe (124k loose objects over 25 hours): an hour's pass held the shadow 4.2 s; a never-collected backlog, 70 s. So only `repack` and `prune` now hold the shadow alone. The refresh, the keep candidates' check and the keep refs move refs and delete nothing, and anything a check writes meanwhile is younger than the expiry, so they run beside checks (`pinKeep`). The collection then waits for the scheduler to go idle, five minutes at most, before taking the shadow. Each collection logs `quietMs` and `pausedMs`, and the bench reports the longest of each.

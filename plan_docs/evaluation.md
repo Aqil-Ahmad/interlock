@@ -15,7 +15,7 @@ How detection quality, latency and overhead are measured. Metric definitions are
 | **Golden fixtures** (`eval/fixtures/`) | small synthetic repos with planted conflicts                    | exact, by construction             | precision/recall per analyzer and per matcher; regression suite |
 | **OSS replay** (`eval/replay/`)        | concurrent branch histories replayed from real TypeScript repos | whether the real merge or CI broke | realism; false-positive rate on genuinely independent work      |
 
-Fixtures cover at minimum: textual overlap; adjacent additions; rename vs call site; signature change vs caller; moved export vs import; same-symbol dual edit; duplicate implementation; and near-miss negatives — pairs that look conflicting but are independent. Precision is only interesting against hard negatives.
+Fixtures cover at minimum: textual overlap; adjacent additions; rename vs call site; signature change vs caller; moved export vs import; same-symbol dual edit, a behavioural conflict the targeted tests catch; duplicate implementation, kept as a case no analyzer is meant to catch (ADR-0006); and near-miss negatives — pairs that look conflicting but are independent. Precision is only interesting against hard negatives.
 
 ## Metrics
 
@@ -27,7 +27,7 @@ Per analyzer, per matcher, and combined:
 - **Recall** = TP / (TP + FN)
 - A **true positive** names the right pair _and_ the right location. Naming the pair for the wrong reason is not a hit.
 
-Targets: AST-layer precision ≥ 0.9; combined recall ≥ 0.8, reported honestly whatever it is.
+Targets: combined recall ≥ 0.8, reported honestly whatever it is. The AST layer is a pre-filter, not a detector (ADR-0006), so it has no precision of its own: it must filter out none of the labelled semantic conflicts, and its escalation rate — the share of clean merges it sends to the compiler — is reported.
 
 ### Lead time
 
@@ -48,7 +48,7 @@ From the replay timeline: `t_introduced` is when the second half of the conflict
 
 ### Ablations
 
-Textual only → + typecheck → + AST → full pipeline. The question is what each layer adds in recall and what it costs in latency and false positives.
+Textual only → + typecheck → + targeted tests → full pipeline with the AST pre-filter. The question is what each detecting layer adds in recall and what it costs in latency and false positives, and what the pre-filter saves in compiler runs without losing a conflict.
 
 ## Baselines
 

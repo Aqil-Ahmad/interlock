@@ -18,6 +18,7 @@
       **Files:** `plan_docs/evaluation.md`
       **What:** fix precision, recall, lead time, false-positive rate and overhead before running anything.
       **Done when:** written down and dated. Defining metrics after seeing results is how numbers stop meaning anything.
+      **Depends on:** ADR-0006, which sets what the AST layer is measured on: as a pre-filter, with no precision of its own.
 
 - [ ] **Golden fixture run**
       **Files:** `eval/fixtures/`, `eval/run.ts`
