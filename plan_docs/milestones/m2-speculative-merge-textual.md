@@ -550,10 +550,56 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Done when:** it reports a planted conflict in a fixture repo with usable output.
 
 - [ ] **Fixture suite**
-      **Files:** `eval/fixtures/`
-      **What:** small synthetic repos with planted, labelled conflicts, built programmatically in temp dirs.
-      **Done when:** each fixture states which pair conflicts, which analyzer should catch it, and which file and symbol. Include negative twins — pairs that look similar and are genuinely independent.
-      **Constraints:** the fixture lands before the rule it exercises. Once written, `eval/` is read-only to coding sessions.
+      **Files:** `eval/fixtures/`, `eval/run.ts`, `eval/reports/`, `eval/README.md`, `vitest.config.ts`
+      **What:** the golden evaluation set — small synthetic repositories with planted, labelled conflicts and their negative twins — and a runner that pushes each through the real pipeline and reports precision and recall per analyzer.
+
+  Rewritten before starting: the task named the fixtures but not the runner,
+  the report, the format or the scoring, and each of those is frozen the moment
+  `eval/` is written. **The format** is a declarative spec, data and no code:
+  the base files; each branch's operations — write, delete, rename — split into
+  committed and left uncommitted in the branch's worktree, since the watcher's
+  dirty snapshots are what Interlock merges; and the expected outcome as a list
+  of expectations, empty for a twin. An expectation names the analyzer, the
+  class (the Finding's `rule`), the path the finding is about, the symbol, and
+  a span on each side in that branch's own file, null on a side that has no
+  lines. One shared generator turns a spec into a repository; the pair is the
+  spec's two branches, each checked out in its own worktree. The shape follows
+  `packages/core/test/support/textual-fixtures.ts`, the file is not shared: the
+  set must not move when a unit test's support file does. **Semantic rules are
+  named here first** — `rename-vs-callsite`, `signature-vs-caller`,
+  `moved-export-vs-import` for `typecheck`, `same-symbol-dual-edit` and
+  `duplicate-implementation` for `ast-semantic` — so an analyzer written later
+  is scored against labels that predate it. **Matching:** a finding matches an
+  unmatched expectation when the analyzer, the class and the path agree, the
+  symbol appears in the finding's evidence, and on each side the expectation
+  has a span for, the finding has a span on that branch, in that path, that
+  overlaps it. Each expectation is matched once. An unmatched finding is a false
+  positive, every finding on a twin included; an unmatched expectation is a
+  false negative. An infrastructure failure is reported apart and counted as
+  neither. The rule is written into every report's header.
+
+  **Done when:** `pnpm eval --suite fixtures` builds every fixture in a
+  temporary directory, runs it through discovery, the watcher's capture into
+  the shadow, `speculativeMerge` and every analyzer that exists, and writes
+  `eval/reports/fixtures.md` and `fixtures.json`: per analyzer, per class and
+  combined — true positives, false positives, false negatives, precision,
+  recall — plus each fixture's outcome and the environment (OS, CPU, Node, git
+  version, Interlock commit and whether the tree was dirty). Every conflicting
+  fixture has at least one twin; the set covers every case in
+  `plan_docs/evaluation.md` — textual overlap, adjacent additions, add/add,
+  edit/delete, rename/edit, rename/delete, rename versus call site, signature
+  change versus caller, moved export versus import, same-symbol dual edit,
+  duplicate implementation — with the semantic ones labelled for the analyzer
+  that should catch them, not left out, so the report shows their recall as 0;
+  two runs write byte-identical reports; a test runs the suite on a conflict
+  and its twin and checks the whole set statically; and nothing in `packages/`
+  imports from `eval/`.
+  **Constraints:** the fixture lands before the rule it exercises. Once written,
+  `eval/` is read-only to coding sessions, so the format has to be right the
+  first time. Evaluation code never edits a fixture or a label to look better.
+  Repositories and data dirs live under `mkdtemp`, are removed on failure, and
+  git runs with no global or system config, so neither the user's repository
+  nor their configuration shapes a result.
 
 - [ ] **Turn the coverage gate on**
       **Files:** `vitest.config.ts`, `.github/workflows/ci.yml`
