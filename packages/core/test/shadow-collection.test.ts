@@ -16,7 +16,8 @@ import type { BranchRefId, RepoId } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createGitRunner } from '../src/git/repo-handle.js';
 import type { GitResult, GitRunner, ShadowRepo, UserRepo } from '../src/git/repo-handle.js';
-import { collectShadow, ensureShadow, KEEP_REFS_PREFIX } from '../src/git/shadow.js';
+import { collectShadow, ensureShadow, KEEP_REFS_PREFIX, pinKeep } from '../src/git/shadow.js';
+import type { CollectReport, KeepReport } from '../src/git/shadow.js';
 import { createWorktreePool } from '../src/git/worktree-pool.js';
 import { captureDirtyState, commitSnapshotInShadow } from '../src/git/worktree.js';
 import { speculativeMerge } from '../src/merge/speculative-merge.js';
@@ -114,6 +115,23 @@ describe('collectShadow', () => {
       .split('\n')
       .filter(Boolean);
 
+  /** Pin, then collect: the two steps as the daemon runs them, the first beside checks. */
+  const collect = async (options: {
+    readonly runner: GitRunner;
+    readonly expireBefore: Date;
+    readonly keep: readonly string[];
+    readonly signal?: AbortSignal;
+  }): Promise<Omit<KeepReport, 'kept'> & CollectReport & { readonly kept: number }> => {
+    const signal = options.signal === undefined ? {} : { signal: options.signal };
+    const pinned = await pinKeep(shadow, { runner: options.runner, keep: options.keep, ...signal });
+    const collected = await collectShadow(shadow, {
+      runner: options.runner,
+      expireBefore: options.expireBefore,
+      ...signal,
+    });
+    return { ...collected, unkeepable: pinned.unkeepable, kept: pinned.kept.length };
+  };
+
   const anHourAgo = (): Date => new Date(Date.now() - HOUR);
   const twoHoursAgo = (): Date => new Date(Date.now() - 2 * HOUR);
 
@@ -147,7 +165,7 @@ describe('collectShadow', () => {
     age(2 * HOUR);
     const fresh = await snapshot('fresh\n');
 
-    const report = await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    const report = await collect({ runner, expireBefore: anHourAgo(), keep: [] });
 
     expect(readable(spent.commitSha)).toBe(false);
     expect(readable(spent.treeOid)).toBe(false);
@@ -164,7 +182,7 @@ describe('collectShadow', () => {
     await refresh();
     await snapshot('own\n');
 
-    const report = await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    const report = await collect({ runner, expireBefore: anHourAgo(), keep: [] });
 
     // Without `-l` the repack would copy in every object the user's history
     // reaches: the shadow would hold its own copy of the repository.
@@ -176,10 +194,10 @@ describe('collectShadow', () => {
     // Packed at an age inside the first expiry and past the second: the cruft
     // pack records each object's own time, which is all that can age it now.
     age(90 * 60_000);
-    await collectShadow(shadow, { runner, expireBefore: twoHoursAgo(), keep: [] });
+    await collect({ runner, expireBefore: twoHoursAgo(), keep: [] });
     expect(readable(spent.commitSha)).toBe(true);
 
-    const report = await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    const report = await collect({ runner, expireBefore: anHourAgo(), keep: [] });
 
     expect(readable(spent.commitSha)).toBe(false);
     expect(report.before).toMatchObject({ loose: 0, packed: 3 });
@@ -192,13 +210,13 @@ describe('collectShadow', () => {
     // prune ahead of the repack would delete it for being packed.
     const reverted = await snapshot('reverted\n');
     age(90 * 60_000);
-    await collectShadow(shadow, { runner, expireBefore: twoHoursAgo(), keep: [] });
+    await collect({ runner, expireBefore: twoHoursAgo(), keep: [] });
     write('a.txt', 'reverted\n');
     const again = await captureDirtyState(dir, repo, { runner, objectStore: shadow });
     git('checkout', '-q', '--', 'a.txt');
     expect(again.treeOid).toBe(reverted.treeOid);
 
-    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    await collect({ runner, expireBefore: anHourAgo(), keep: [] });
 
     expect(readable(reverted.treeOid)).toBe(true);
     expect(readable(`${reverted.treeOid}:a.txt`)).toBe(true);
@@ -215,7 +233,7 @@ describe('collectShadow', () => {
     age(30 * 24 * HOUR);
     const recent = await commitSnapshotInShadow(shadow, captured, { runner });
 
-    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    await collect({ runner, expireBefore: anHourAgo(), keep: [] });
 
     expect(readable(recent.commitSha)).toBe(true);
     expect(readable(captured.treeOid)).toBe(true);
@@ -227,7 +245,7 @@ describe('collectShadow', () => {
     const dropped = await snapshot('dropped\n');
     age(30 * 24 * HOUR);
 
-    const report = await collectShadow(shadow, {
+    const report = await collect({
       runner,
       expireBefore: anHourAgo(),
       keep: [commit.commitSha, tree, commit.commitSha],
@@ -245,12 +263,12 @@ describe('collectShadow', () => {
 
   it('rewrites the keep refs each pass, so an object no longer kept is collected', async () => {
     const once = await snapshot('once kept\n');
-    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [once.commitSha] });
+    await collect({ runner, expireBefore: anHourAgo(), keep: [once.commitSha] });
     // Kept, it was packed with everything reachable, and once released it is
     // aged from that pack's time: the last pass that kept it.
     agePacks(2 * HOUR);
 
-    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    await collect({ runner, expireBefore: anHourAgo(), keep: [] });
 
     expect(keepRefs()).toEqual([]);
     expect(readable(once.commitSha)).toBe(false);
@@ -258,10 +276,10 @@ describe('collectShadow', () => {
 
   it('gives an object released since the last pass a full expiry from then', async () => {
     const once = await snapshot('once kept\n');
-    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [once.commitSha] });
+    await collect({ runner, expireBefore: anHourAgo(), keep: [once.commitSha] });
     agePacks(30 * 60_000);
 
-    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    await collect({ runner, expireBefore: anHourAgo(), keep: [] });
 
     expect(readable(once.commitSha)).toBe(true);
   });
@@ -291,7 +309,7 @@ describe('collectShadow', () => {
     const current = await check(a2);
     age(2 * HOUR);
 
-    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    await collect({ runner, expireBefore: anHourAgo(), keep: [] });
 
     expect(readable(current)).toBe(true);
     expect(readable(previous)).toBe(false);
@@ -316,9 +334,7 @@ describe('collectShadow', () => {
     it('fails on a shadow not refreshed since, which is why a refresh comes first', async () => {
       await orphaned();
 
-      const error = await rejection(
-        collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] }),
-      );
+      const error = await rejection(collect({ runner, expireBefore: anHourAgo(), keep: [] }));
 
       expect(error.code).toBe('GIT_COMMAND_FAILED');
     });
@@ -328,7 +344,7 @@ describe('collectShadow', () => {
       const other = await snapshot('still whole\n');
       await refresh();
 
-      const report = await collectShadow(shadow, {
+      const report = await collect({
         runner,
         expireBefore: anHourAgo(),
         keep: [kept, other.commitSha],
@@ -346,7 +362,7 @@ describe('collectShadow', () => {
       mkdirSync(refDir, { recursive: true });
       writeFileSync(join(refDir, lost), `${lost}\n`);
 
-      const report = await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+      const report = await collect({ runner, expireBefore: anHourAgo(), keep: [] });
 
       expect(report.kept).toBe(0);
       expect(existsSync(join(refDir, lost))).toBe(false);
@@ -365,7 +381,7 @@ describe('collectShadow', () => {
     const before = looseFiles(userObjects).sort();
     age(2 * HOUR);
 
-    await collectShadow(shadow, { runner, expireBefore: new Date(Date.now() + HOUR), keep: [] });
+    await collect({ runner, expireBefore: new Date(Date.now() + HOUR), keep: [] });
 
     expect(looseFiles(userObjects).sort()).toEqual(before);
   });
@@ -384,7 +400,7 @@ describe('collectShadow', () => {
     };
 
     const error = await rejection(
-      collectShadow(shadow, {
+      collect({
         runner: stopping,
         expireBefore: anHourAgo(),
         keep: [],
@@ -393,8 +409,60 @@ describe('collectShadow', () => {
     );
     expect(error.details.stopped).toBe(true);
 
-    await collectShadow(shadow, { runner, expireBefore: anHourAgo(), keep: [] });
+    await collect({ runner, expireBefore: anHourAgo(), keep: [] });
     expect(readable(spent.commitSha)).toBe(false);
+  });
+
+  describe('the order and the cost of a pass', () => {
+    /** The real runner, recording the verb of each command it runs. */
+    const verbs = (): { runner: GitRunner; seen: string[] } => {
+      const seen: string[] = [];
+      return {
+        seen,
+        runner: {
+          run: (target, args, options): Promise<GitResult> => {
+            seen.push(args[0]!);
+            return runner.run(target, args, options);
+          },
+        },
+      };
+    };
+
+    it('checks every keep candidate in one walk when all are whole', async () => {
+      const kept: string[] = [];
+      for (const content of ['one\n', 'two\n', 'three\n']) {
+        kept.push((await snapshot(content)).commitSha);
+      }
+      const spy = verbs();
+
+      const report = await pinKeep(shadow, {
+        runner: spy.runner,
+        keep: kept,
+      });
+
+      expect(report.kept).toHaveLength(3);
+      expect(spy.seen.filter((verb) => verb === 'rev-list')).toHaveLength(1);
+    });
+
+    it('prunes before packing a shadow never packed, and packs before pruning after', async () => {
+      await snapshot('first\n');
+      const first = verbs();
+      await collectShadow(shadow, { runner: first.runner, expireBefore: anHourAgo() });
+      // Nothing is in a cruft pack yet, so no object can lose a fresh copy to
+      // the prune — and a prune stopped part way keeps what it deleted.
+      expect(first.seen.filter((verb) => verb === 'prune' || verb === 'repack')).toEqual([
+        'prune',
+        'repack',
+      ]);
+
+      await snapshot('second\n');
+      const second = verbs();
+      await collectShadow(shadow, { runner: second.runner, expireBefore: anHourAgo() });
+      expect(second.seen.filter((verb) => verb === 'prune' || verb === 'repack')).toEqual([
+        'repack',
+        'prune',
+      ]);
+    });
   });
 
   describe('refuses input before running anything', () => {
@@ -414,7 +482,7 @@ describe('collectShadow', () => {
     it('an expiry that is no date', async () => {
       const spy = recording();
       const error = await rejection(
-        collectShadow(shadow, { runner: spy.runner, expireBefore: new Date(Number.NaN), keep: [] }),
+        collectShadow(shadow, { runner: spy.runner, expireBefore: new Date(Number.NaN) }),
       );
       expect(error.code).toBe('CONFIG_INVALID');
       expect(spy.calls).toEqual([]);
@@ -423,7 +491,7 @@ describe('collectShadow', () => {
     it('a keep entry that is no object id', async () => {
       const spy = recording();
       const error = await rejection(
-        collectShadow(shadow, {
+        collect({
           runner: spy.runner,
           expireBefore: anHourAgo(),
           keep: ['--all'],

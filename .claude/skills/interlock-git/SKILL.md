@@ -250,11 +250,19 @@ without touching them; `gc` runs the maintenance the shadow switches off.
   still works once packed. An object that was reachable is stamped with the
   time of the pack it was in, so a released keep lives one expiry past the last
   pass that kept it.
-- **Repack before prune.** Writing an object that exists only in a cruft pack
-  leaves a fresh loose copy, and `prune` deletes loose copies of packed objects.
-  Pruning first loses the fresh time, and the repack after it drops the object
-  as old. Repack first: it reads the loose time, and leaves loose only what is
-  past the expiry, for the prune to delete.
+- **Repack before prune, once a cruft pack exists.** Writing an object that
+  exists only in a cruft pack leaves a fresh loose copy, and `prune` deletes
+  loose copies of packed objects. Pruning first loses the fresh time, and the
+  repack after it drops the object as old. Repack first: it reads the loose
+  time, and leaves loose only what is past the expiry, for the prune to delete.
+  Before there is a cruft pack the hazard cannot arise (writing an object in a
+  regular pack freshens the pack), so a never-collected shadow prunes first: a
+  prune stopped part way keeps what it deleted, a repack keeps nothing.
+- **Never pack loose objects outside the exclusive hold.** `pack-objects
+--unpacked` skips an object already in a pack, and `prune-packed` then
+  deletes its fresh loose copy — the same hazard, measured. Only refs may move
+  beside running checks: the refresh and the keep refs (`pinKeep`) run while
+  checks write; `repack` and `prune` (`collectShadow`) hold the shadow alone.
 - Pass `--no-write-bitmap-index`. A bare repository writes a bitmap by default,
   which needs every reachable object in one pack, and the user's are not.
 

@@ -28,7 +28,7 @@ import {
   speculativeMerge,
 } from '../src/index.js';
 import type { GitRunner, UserRepo } from '../src/index.js';
-import { collectShadow, ensureShadow } from '../src/git/shadow.js';
+import { collectShadow, ensureShadow, pinKeep } from '../src/git/shadow.js';
 import { createWorktreePool } from '../src/git/worktree-pool.js';
 import { captureState, describeDiff, diffState, isClean } from './support/repo-state.js';
 import type { RepoState } from './support/repo-state.js';
@@ -219,12 +219,12 @@ describe('user repositories are never modified', () => {
     // the shadow holds is old enough: the widest `prune` there can be, walking
     // the user's history through alternates while this repository is hashed.
     await ensureShadow(handle, { runner, dataDir, repoId: repo.id });
-    const collected = await collectShadow(shadow, {
-      runner,
-      expireBefore: new Date(Date.now() + 60 * 60_000),
-      keep: kept,
-    });
-    expect(collected.unkeepable).toEqual([]);
+    const pinned = await pinKeep(shadow, { runner, keep: kept });
+    expect(pinned.unkeepable).toEqual([]);
+    // Twice, so the second runs over what the first packed.
+    for (let pass = 0; pass < 2; pass++) {
+      await collectShadow(shadow, { runner, expireBefore: new Date(Date.now() + 60 * 60_000) });
+    }
 
     return { diffed, excused, findings, pooled };
   };

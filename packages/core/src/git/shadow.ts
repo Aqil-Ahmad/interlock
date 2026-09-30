@@ -1,4 +1,12 @@
-import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { InterlockError, ulid } from '@interlock/shared';
 import type { RepoId } from '@interlock/shared';
@@ -318,15 +326,62 @@ export const KEEP_REFS_PREFIX = 'refs/interlock/keep/';
  */
 const COLLECT_TIMEOUT_MS = 60 * 60_000;
 
-export interface CollectOptions {
+export interface KeepOptions {
   readonly runner: GitRunner;
-  /** Unreachable objects last written before this go; anything younger stays. */
-  readonly expireBefore: Date;
   /**
    * Objects kept however old — commits or trees — with everything they reach.
    * Each is checked first, and one whose history cannot be walked is left out.
    */
   readonly keep: readonly string[];
+  readonly signal?: AbortSignal;
+}
+
+export interface KeepReport {
+  /** What the keep refs now name. */
+  readonly kept: readonly string[];
+  /**
+   * Candidates left unkept: missing, or reaching an object that is missing —
+   * a snapshot commit whose parent the user's `gc` removed. One such ref would
+   * stop the collection walking at all.
+   */
+  readonly unkeepable: readonly string[];
+}
+
+/**
+ * Make the keep refs name exactly the candidates that can be kept whole.
+ *
+ * Safe while checks write to the shadow, so it runs before a collection takes
+ * the shadow to itself: it reads objects and moves refs under
+ * `refs/interlock/keep/`, which nothing else writes, and deletes nothing. What
+ * a check writes after this is younger than any expiry, and kept by its age.
+ */
+export async function pinKeep(shadow: ShadowRepo, options: KeepOptions): Promise<KeepReport> {
+  const { runner } = options;
+  const run: GitRunOptions = options.signal === undefined ? {} : { signal: options.signal };
+  for (const oid of options.keep) assertObjectId(oid, 'keep');
+  const candidates = [...new Set(options.keep)];
+
+  // One walk for all of them, the answer nearly every time; one each only to
+  // find which failed. A pass with hundreds of live Findings is otherwise
+  // hundreds of git calls.
+  const kept: string[] = [];
+  const unkeepable: string[] = [];
+  if (candidates.length > 0 && (await walkable(shadow, runner, candidates, run))) {
+    kept.push(...candidates);
+  } else {
+    for (const oid of candidates) {
+      if (await walkable(shadow, runner, [oid], run)) kept.push(oid);
+      else unkeepable.push(oid);
+    }
+  }
+  await rewriteKeepRefs(shadow, runner, kept, run);
+  return { kept, unkeepable };
+}
+
+export interface CollectOptions {
+  readonly runner: GitRunner;
+  /** Unreachable objects last written before this go; anything younger stays. */
+  readonly expireBefore: Date;
   /**
    * Stops the collection at its next git command, and the one running: a walk
    * of a large history must not hold up a daemon shutting down. What it
@@ -336,14 +391,6 @@ export interface CollectOptions {
 }
 
 export interface CollectReport {
-  /** Keep refs in place once the pass had rewritten them. */
-  readonly kept: number;
-  /**
-   * Candidates left unkept: missing, or reaching an object that is missing —
-   * a snapshot commit whose parent the user's `gc` removed. One such ref would
-   * stop `prune` walking at all.
-   */
-  readonly unkeepable: readonly string[];
   /** The shadow's own store before and after: borrowed objects are not counted. */
   readonly before: ShadowStoreSize;
   readonly after: ShadowStoreSize;
@@ -361,6 +408,11 @@ export interface ShadowStoreSize {
  * Collect the objects Interlock wrote into a shadow and no longer needs, and
  * pack the rest.
  *
+ * Nothing may write to the shadow while this runs: an object it has judged
+ * unreachable and old, written again by a check, is still deleted, from under
+ * whatever the check made from it. The caller holds the shadow; {@link pinKeep}
+ * is the part that does not need to.
+ *
  * Nearly everything Interlock writes is loose and unreferenced: a capture's
  * blobs and trees, snapshot commits, merge trees. Left loose for a day of
  * continuous checks that is a million files, 4.4 GiB on disk for 1.3 GiB of
@@ -374,14 +426,18 @@ export interface ShadowStoreSize {
  * objects: without it every object borrowed from the user's store through
  * alternates is copied in. The user's objects are read to decide reachability
  * and never touched; `gc` would run the maintenance the shadow switches off.
- * Roots are the shadow's refs — the user's branches, the keep refs rewritten
- * here — and each pool slot's `HEAD` and index.
+ * Roots are the shadow's refs — the user's branches, the keep refs — and each
+ * pool slot's `HEAD` and index.
  *
- * Repack first, prune after. An object in an old cruft pack that is written
- * again gets a fresh loose copy; `prune` deletes a loose copy of anything
- * packed, and a repack after it sees only the old time and drops the object.
- * Repacking first reads the fresh copy. What the repack leaves loose is what
- * is past the expiry, which the prune then deletes.
+ * Repack first, prune after, once there is a cruft pack. An object in a cruft
+ * pack that is written again gets a fresh loose copy; `prune` deletes a loose
+ * copy of anything packed, and a repack after it sees only the old time and
+ * drops the object. Repacking first reads the fresh copy, and what it leaves
+ * loose is what is past the expiry, for the prune to delete. Before there is a
+ * cruft pack the hazard cannot arise, and a shadow never collected is where a
+ * backlog is: prune first there, since a prune stopped part way keeps what it
+ * deleted and a repack stopped part way keeps nothing, so a backlog too large
+ * for one attempt still shrinks with each.
  *
  * Refresh the shadow first: a ref naming an object the user's `gc` has since
  * removed stops both walking, and a refresh is what drops such a ref.
@@ -390,7 +446,7 @@ export async function collectShadow(
   shadow: ShadowRepo,
   options: CollectOptions,
 ): Promise<CollectReport> {
-  const { runner, keep } = options;
+  const { runner } = options;
   const run: GitRunOptions = options.signal === undefined ? {} : { signal: options.signal };
   const expire = options.expireBefore.getTime();
   if (!Number.isFinite(expire)) {
@@ -398,52 +454,57 @@ export async function collectShadow(
       remedy: 'Pass a valid Date.',
     });
   }
-  for (const oid of keep) assertObjectId(oid, 'keep');
   const startedAt = Date.now();
   const before = await storeSize(shadow, runner, run);
-
-  const kept: string[] = [];
-  const unkeepable: string[] = [];
-  for (const oid of new Set(keep)) {
-    if (await walkable(shadow, runner, oid, run)) kept.push(oid);
-    else unkeepable.push(oid);
-  }
-  await rewriteKeepRefs(shadow, runner, kept, run);
 
   // Whole seconds since the epoch: exact, where git's date parser reads an
   // ISO string with a `Z` as some other date and prunes nothing.
   const expiry = `@${String(Math.floor(expire / 1000))}`;
   const long: GitRunOptions = { ...run, timeoutMs: COLLECT_TIMEOUT_MS };
-  await runRequired(
-    runner,
-    shadow,
-    [
-      'repack',
-      '--cruft',
-      `--cruft-expiration=${expiry}`,
-      '-d',
-      '-l',
-      '-q',
-      // A bare repository writes a bitmap by default, which needs every
-      // reachable object in the pack — and the user's history is not.
-      '--no-write-bitmap-index',
-    ],
-    long,
-  );
-  await runRequired(runner, shadow, ['prune', `--expire=${expiry}`], long);
+  const prune = (): Promise<unknown> =>
+    runRequired(runner, shadow, ['prune', `--expire=${expiry}`], long);
+  const repack = (): Promise<unknown> =>
+    runRequired(
+      runner,
+      shadow,
+      [
+        'repack',
+        '--cruft',
+        `--cruft-expiration=${expiry}`,
+        '-d',
+        '-l',
+        '-q',
+        // A bare repository writes a bitmap by default, which needs every
+        // reachable object in the pack — and the user's history is not.
+        '--no-write-bitmap-index',
+      ],
+      long,
+    );
+  if (hasCruftPack(shadow)) {
+    await repack();
+    await prune();
+  } else {
+    await prune();
+    await repack();
+  }
   const after = await storeSize(shadow, runner, run);
 
-  return {
-    kept: kept.length,
-    unkeepable,
-    before,
-    after,
-    durationMs: Date.now() - startedAt,
-  };
+  return { before, after, durationMs: Date.now() - startedAt };
+}
+
+/** Whether the shadow holds a cruft pack: one with a `.mtimes` table of per-object times. */
+function hasCruftPack(shadow: ShadowRepo): boolean {
+  try {
+    return readdirSync(join(shadow.gitDir, 'objects', 'pack')).some((name) =>
+      name.endsWith('.mtimes'),
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Whether everything an object reaches can be read.
+ * Whether everything the objects reach can be read.
  *
  * Scoped to stop at the user's branches, whose history is theirs to keep whole:
  * what is walked is what Interlock wrote on top of it — a snapshot commit, its
@@ -454,12 +515,12 @@ export async function collectShadow(
 async function walkable(
   shadow: ShadowRepo,
   runner: GitRunner,
-  oid: string,
+  oids: readonly string[],
   run: GitRunOptions,
 ): Promise<boolean> {
   const walk = await runner.run(
     shadow,
-    ['rev-list', '--objects', '--quiet', oid, '--not', '--remotes=user'],
+    ['rev-list', '--objects', '--quiet', ...oids, '--not', '--remotes=user'],
     run,
   );
   return walk.exitCode === 0;
