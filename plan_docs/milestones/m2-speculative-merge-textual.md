@@ -549,7 +549,7 @@ merge-tree` over the two commits reports the conflict — with neither side
       **What:** force an immediate merge of a named pair and print the findings.
       **Done when:** it reports a planted conflict in a fixture repo with usable output.
 
-- [ ] **Fixture suite**
+- [x] **Fixture suite**
       **Files:** `eval/fixtures/`, `eval/run.ts`, `eval/reports/`, `eval/README.md`, `vitest.config.ts`
       **What:** the golden evaluation set — small synthetic repositories with planted, labelled conflicts and their negative twins — and a runner that pushes each through the real pipeline and reports precision and recall per analyzer.
 
