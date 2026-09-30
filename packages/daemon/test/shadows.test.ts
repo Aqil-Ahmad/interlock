@@ -4,9 +4,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGitRunner } from '@interlock/core';
 import type { GitRunner, UserRepo } from '@interlock/core';
-import type { RepoId } from '@interlock/shared';
+import { createLogger } from '@interlock/shared';
+import type { LogRecord, Repo, RepoId } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createShadowRegistry } from '../src/shadows.js';
+import {
+  COLLECTION_BACKOFF_MAX_MS,
+  COLLECTION_BACKOFF_MS,
+  createShadowCollector,
+  createShadowRegistry,
+} from '../src/shadows.js';
+import type { ShadowCollector } from '../src/shadows.js';
+import { openStore } from '../src/store/index.js';
+import type { Store } from '../src/store/index.js';
 
 /**
  * The registry resolves each repository's shadow once. `ensureShadow` fetches
@@ -82,5 +91,486 @@ describe('shadow registry', () => {
     await shadows.get(repo, repoId);
 
     expect(fetches).toBe(2);
+  });
+
+  describe('the collection gate', () => {
+    /** A promise and the function that settles it, for holding a run open. */
+    const deferred = (): { promise: Promise<void>; resolve: () => void } => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((settle) => {
+        resolve = settle;
+      });
+      return { promise, resolve };
+    };
+
+    /** Turns of the event loop, enough for anything unblocked to have moved. */
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+    };
+
+    const collectNow = { expireBefore: new Date(), keep: () => Promise.resolve([]) };
+
+    it('holds a collection until every run holding the shadow is done', async () => {
+      const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
+      const order: string[] = [];
+      const holding = deferred();
+      const started = deferred();
+      const run = shadows.use(repo, repoId, async () => {
+        order.push('run started');
+        started.resolve();
+        await holding.promise;
+        order.push('run done');
+      });
+      await started.promise;
+
+      const collection = shadows.collect(repo, repoId, collectNow).then(() => {
+        order.push('collected');
+      });
+      await settle();
+      expect(order).toEqual(['run started']);
+
+      holding.resolve();
+      await Promise.all([run, collection]);
+      expect(order).toEqual(['run started', 'run done', 'collected']);
+    });
+
+    it('holds off a run that asks once the collection wants the shadow, so runs cannot starve it', async () => {
+      const order: string[] = [];
+      // The collection's end, as its repack and prune finish, whichever runs
+      // last: its own promise settles a few turns after the gate is released,
+      // and a run woken by that release can log before it.
+      const done = new Set<string>();
+      const marking: GitRunner = {
+        run: async (target, args, options) => {
+          const result = await runner.run(target, args, options);
+          if (args[0] === 'prune' || args[0] === 'repack') {
+            done.add(args[0]);
+            if (done.size === 2) order.push('collected');
+          }
+          return result;
+        },
+      };
+      const shadows = createShadowRegistry({ runner: marking, dataDir: join(base, 'data') });
+      const holding = deferred();
+      const started = deferred();
+      const first = shadows.use(repo, repoId, () => {
+        started.resolve();
+        return holding.promise;
+      });
+      await started.promise;
+      const wantsIt = deferred();
+      const collection = shadows.collect(repo, repoId, {
+        ...collectNow,
+        quiet: () => {
+          wantsIt.resolve();
+          return Promise.resolve();
+        },
+      });
+
+      await wantsIt.promise;
+      await settle();
+
+      const second = shadows.use(repo, repoId, () => {
+        order.push('second run');
+        return Promise.resolve();
+      });
+      await settle();
+      expect(order).toEqual([]);
+
+      holding.resolve();
+      await Promise.all([first, collection, second]);
+      expect(order).toEqual(['collected', 'second run']);
+    });
+
+    it('pins what to keep beside a running check, holding it off only to repack and prune', async () => {
+      const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
+      const holding = deferred();
+      const started = deferred();
+      const run = shadows.use(repo, repoId, async () => {
+        started.resolve();
+        await holding.promise;
+      });
+      await started.promise;
+      const keepRead = deferred();
+      const collection = shadows.collect(repo, repoId, {
+        expireBefore: new Date(),
+        keep: () => {
+          keepRead.resolve();
+          return Promise.resolve([]);
+        },
+      });
+
+      // Read while the run still holds the shadow, and another check goes
+      // ahead meanwhile: nothing the pin does can take an object from under it.
+      await keepRead.promise;
+      await expect(shadows.use(repo, repoId, () => Promise.resolve('ran'))).resolves.toBe('ran');
+
+      holding.resolve();
+      await Promise.all([run, collection]);
+    });
+
+    it('waits for a quiet moment with the checks still running, and says how long each wait was', async () => {
+      const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
+      const lull = deferred();
+      const asked = deferred();
+      const collection = shadows.collect(repo, repoId, {
+        ...collectNow,
+        quiet: () => {
+          asked.resolve();
+          return lull.promise;
+        },
+      });
+      await asked.promise;
+      await expect(shadows.use(repo, repoId, () => Promise.resolve('ran'))).resolves.toBe('ran');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      lull.resolve();
+      const report = await collection;
+
+      expect(report.quietMs).toBeGreaterThanOrEqual(50);
+      expect(report.durationMs).toBeGreaterThanOrEqual(report.quietMs + report.pausedMs);
+    });
+
+    it('runs one collection of a repository at a time, pinning included', async () => {
+      // Every command, in order: a second collection's refresh begins only
+      // once the first has pruned and packed. Overlapped, the second would
+      // rewrite the keep refs under the first's walk.
+      const seen: string[] = [];
+      const recording: GitRunner = {
+        run: (target, args, options) => {
+          seen.push(args.includes('fetch') ? 'fetch' : args[0]!);
+          return runner.run(target, args, options);
+        },
+      };
+      const shadows = createShadowRegistry({ runner: recording, dataDir: join(base, 'data') });
+      await shadows.get(repo, repoId);
+      seen.length = 0;
+
+      await Promise.all([
+        shadows.collect(repo, repoId, collectNow),
+        shadows.collect(repo, repoId, collectNow),
+      ]);
+
+      const fetches = seen.flatMap((verb, index) => (verb === 'fetch' ? [index] : []));
+      expect(fetches).toHaveLength(2);
+      const firstDone = Math.max(seen.indexOf('prune'), seen.indexOf('repack'));
+      expect(firstDone).toBeGreaterThan(fetches[0]!);
+      expect(fetches[1]).toBeGreaterThan(firstDone);
+    });
+
+    it('lets a run go on after a collection that failed', async () => {
+      const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
+      await expect(
+        shadows.collect(repo, repoId, {
+          expireBefore: new Date(),
+          keep: () => Promise.reject(new Error('the store is gone')),
+        }),
+      ).rejects.toThrow('the store is gone');
+
+      await expect(shadows.use(repo, repoId, () => Promise.resolve('ran'))).resolves.toBe('ran');
+    });
+
+    it('refreshes the shadow first, so a ref to a branch the user collected cannot stop it', async () => {
+      const git = (...args: string[]): string =>
+        execFileSync('git', ['-C', repo.rootPath, ...args], { stdio: 'pipe', encoding: 'utf8' });
+      git('checkout', '-qb', 'feature');
+      writeFileSync(join(repo.rootPath, 'f.txt'), 'only on feature\n');
+      git('add', '-A');
+      git('commit', '-qm', 'feature');
+      git('checkout', '-q', 'main');
+      const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
+      await shadows.get(repo, repoId);
+      git('branch', '-D', 'feature');
+      git('reflog', 'expire', '--expire=now', '--all');
+      git('gc', '-q', '--prune=now');
+
+      await expect(shadows.collect(repo, repoId, collectNow)).resolves.toMatchObject({
+        unkeepable: [],
+      });
+      // The refreshed handle is the one handed out after.
+      expect(fetches).toBe(2);
+      await shadows.get(repo, repoId);
+      expect(fetches).toBe(2);
+    });
+  });
+
+  describe('the collector', () => {
+    let store: Store;
+    let stored: Repo;
+    let logs: LogRecord[];
+    let clock: number;
+    let prunes: number;
+    let failPrune: boolean;
+    const HOUR = 60 * 60_000;
+
+    const pruning: GitRunner = {
+      run: (target, args, options) => {
+        if (args[0] === 'prune') {
+          prunes += 1;
+          if (failPrune) return Promise.resolve({ stdout: '', stderr: 'disk full', exitCode: 128 });
+        }
+        return runner.run(target, args, options);
+      },
+    };
+
+    const collector = (heldTrees: readonly string[] = []): ShadowCollector =>
+      createShadowCollector({
+        shadows: createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') }),
+        store,
+        runner: pruning,
+        heldTrees: () => heldTrees,
+        marginMs: HOUR,
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+    const messages = (): string[] => logs.filter((l) => l.level !== 'debug').map((l) => l.msg);
+
+    /** Turns of the event loop until `probe` holds, for a callback git has yet to reach. */
+    const until = async (probe: () => boolean): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (!probe()) {
+        if (Date.now() > deadline) throw new Error('timed out');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    beforeEach(async () => {
+      store = await openStore({ path: join(base, 'interlock.db') });
+      stored = await store.upsertRepo({
+        id: repoId,
+        rootPath: repo.rootPath,
+        defaultBranch: 'main',
+        shadowPath: join(base, 'data', 'shadows', repoId),
+        config: {},
+        discoveredAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
+      });
+      logs = [];
+      clock = Date.now();
+      prunes = 0;
+      failPrune = false;
+    });
+
+    afterEach(async () => {
+      await store.close();
+    });
+
+    it('collects each repository with an expiry the margin below the cutoff', async () => {
+      const before = new Date(clock - 24 * HOUR).toISOString();
+
+      await collector().pass(before);
+
+      expect(prunes).toBe(1);
+      const collected = logs.find((l) => l.msg === 'collected the shadow')!;
+      expect(collected).toMatchObject({
+        repoId: stored.id,
+        expireBefore: new Date(Date.parse(before) - HOUR).toISOString(),
+        kept: 0,
+        unkeepable: [],
+      });
+    });
+
+    it('keeps the trees a queued check would merge', async () => {
+      const tree = execFileSync('git', ['-C', repo.rootPath, 'rev-parse', 'HEAD^{tree}'], {
+        encoding: 'utf8',
+      }).trim();
+
+      await collector([tree]).pass(new Date(clock).toISOString());
+
+      expect(logs.find((l) => l.msg === 'collected the shadow')!).toMatchObject({ kept: 1 });
+    });
+
+    it('backs off a repository whose collection failed, longer after each failure, and never throws', async () => {
+      const collecting = collector();
+      failPrune = true;
+      await expect(collecting.pass(new Date(clock).toISOString())).resolves.toBeUndefined();
+      expect(prunes).toBe(1);
+      expect(logs.find((l) => l.msg === 'collecting a shadow failed')!).toMatchObject({
+        failures: 1,
+        retryAt: new Date(clock + COLLECTION_BACKOFF_MS).toISOString(),
+      });
+
+      clock += COLLECTION_BACKOFF_MS - 1;
+      await collecting.pass(new Date(clock).toISOString());
+      expect(prunes).toBe(1);
+
+      clock += 1;
+      await collecting.pass(new Date(clock).toISOString());
+      expect(prunes).toBe(2);
+      expect(logs.filter((l) => l.msg === 'collecting a shadow failed').at(-1)!).toMatchObject({
+        failures: 2,
+        retryAt: new Date(clock + 2 * COLLECTION_BACKOFF_MS).toISOString(),
+      });
+
+      // Recovered: collected at the next attempt, and the count starts over.
+      failPrune = false;
+      clock += 2 * COLLECTION_BACKOFF_MS;
+      await collecting.pass(new Date(clock).toISOString());
+      expect(prunes).toBe(3);
+      expect(messages().at(-1)).toBe('collected the shadow');
+      failPrune = true;
+      await collecting.pass(new Date(clock).toISOString());
+      expect(logs.filter((l) => l.msg === 'collecting a shadow failed').at(-1)!).toMatchObject({
+        failures: 1,
+      });
+    });
+
+    it('treats a collection stopped on request as no failure, and collects at the next pass', async () => {
+      const controller = new AbortController();
+      let stopAtPrune = true;
+      const stopping: GitRunner = {
+        run: (target, args, options) => {
+          if (args[0] === 'prune' && stopAtPrune) controller.abort();
+          return pruning.run(target, args, options);
+        },
+      };
+      const collecting = createShadowCollector({
+        shadows: createShadowRegistry({ runner: stopping, dataDir: join(base, 'data') }),
+        store,
+        runner: stopping,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      await collecting.pass(new Date(clock).toISOString(), controller.signal);
+
+      expect(messages()).toContain('stopped collecting a shadow');
+      expect(messages()).not.toContain('collecting a shadow failed');
+      // No backoff: the very next pass, at the same instant, collects.
+      stopAtPrune = false;
+      await collecting.pass(new Date(clock).toISOString());
+      expect(messages().at(-1)).toBe('collected the shadow');
+    });
+
+    it('collects no repository once its signal has aborted', async () => {
+      await collector().pass(new Date(clock).toISOString(), AbortSignal.abort());
+
+      expect(prunes).toBe(0);
+      expect(messages()).toEqual([]);
+    });
+
+    it('waits for the checks to go quiet before collecting', async () => {
+      let settleQuiet: (() => void) | undefined;
+      const collecting = createShadowCollector({
+        shadows: createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') }),
+        store,
+        runner: pruning,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        quiet: () =>
+          new Promise((resolve) => {
+            settleQuiet = resolve;
+          }),
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      const passing = collecting.pass(new Date(clock).toISOString());
+      await until(() => settleQuiet !== undefined);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(prunes).toBe(0);
+
+      settleQuiet!();
+      await passing;
+      expect(prunes).toBe(1);
+      expect(logs.find((l) => l.msg === 'collected the shadow')!.quietMs).toBeGreaterThanOrEqual(
+        50,
+      );
+    });
+
+    it('collects anyway once the checks have not gone quiet for the whole wait', async () => {
+      const collecting = createShadowCollector({
+        shadows: createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') }),
+        store,
+        runner: pruning,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        quiet: () => new Promise(() => undefined),
+        quietWaitMs: 50,
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      await collecting.pass(new Date(clock).toISOString());
+
+      expect(prunes).toBe(1);
+    });
+
+    it('stops waiting for quiet when stopped, and collects nothing', async () => {
+      const controller = new AbortController();
+      const collecting = createShadowCollector({
+        shadows: createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') }),
+        store,
+        runner: pruning,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        quiet: () => {
+          controller.abort();
+          return new Promise(() => undefined);
+        },
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      await collecting.pass(new Date(clock).toISOString(), controller.signal);
+
+      expect(prunes).toBe(0);
+      expect(messages()).toContain('stopped collecting a shadow');
+    });
+
+    it('waits a day at most between attempts', async () => {
+      const collecting = collector();
+      failPrune = true;
+      for (let i = 0; i < 8; i++) {
+        await collecting.pass(new Date(clock).toISOString());
+        clock += COLLECTION_BACKOFF_MAX_MS;
+      }
+      // Every attempt a day after the last was due, and every one made: the
+      // eighth failure's doubling would be 128 hours, capped at a day.
+      expect(prunes).toBe(8);
+      const last = logs.filter((l) => l.msg === 'collecting a shadow failed').at(-1)!;
+      expect(last).toMatchObject({ failures: 8, retryAt: new Date(clock).toISOString() });
+    });
+
+    it('backs off a repository that is gone, and goes on to the next', async () => {
+      const other = join(base, 'other');
+      execFileSync('git', ['init', '-q', '-b', 'main', other], { stdio: 'pipe' });
+      await store.upsertRepo({
+        ...stored,
+        id: '01JBQ0000000000000000OTHR' as RepoId,
+        rootPath: other,
+      });
+      rmSync(repo.rootPath, { recursive: true, force: true });
+
+      await collector().pass(new Date(clock).toISOString());
+
+      expect(messages()).toContain('collecting a shadow failed');
+      expect(prunes).toBe(1);
+    });
+
+    it('warns of a kept object it could not keep, and collects anyway', async () => {
+      const missing = 'dead'.repeat(10);
+      const collecting = createShadowCollector({
+        shadows: createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') }),
+        store,
+        runner: pruning,
+        heldTrees: () => [missing, 'not an object id'],
+        marginMs: HOUR,
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      await collecting.pass(new Date(clock).toISOString());
+
+      expect(prunes).toBe(1);
+      expect(
+        logs.find((l) => l.msg === 'could not keep objects a Finding or a queued check names'),
+      ).toMatchObject({
+        unkeepable: [missing],
+      });
+    });
   });
 });

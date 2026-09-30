@@ -12,8 +12,8 @@
  *
  * `INTERLOCK_BENCH_MODE=retention` runs the same edits against a store on disk,
  * with the retention window compressed to minutes, and samples row counts and
- * file size: growth per hour before anything ages out, and whether both go
- * flat once it does. `INTERLOCK_BENCH_MODE=large-prune` times one pass over a
+ * file size, and the shadow's own objects, collected in each pass: growth per
+ * hour before anything ages out, and whether all of it goes flat once it does. `INTERLOCK_BENCH_MODE=large-prune` times one pass over a
  * large synthetic backlog, and one over an hour's worth of rows after it.
  */
 import { execFileSync } from 'node:child_process';
@@ -21,6 +21,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -39,7 +40,8 @@ import type { Scheduler, SchedulerStats } from '../packages/daemon/src/scheduler
 import { createRunPipeline } from '../packages/daemon/src/scheduler/run-pipeline.js';
 import { createRetention } from '../packages/daemon/src/retention.js';
 import type { Retention } from '../packages/daemon/src/retention.js';
-import { createShadowRegistry } from '../packages/daemon/src/shadows.js';
+import { createShadowCollector, createShadowRegistry } from '../packages/daemon/src/shadows.js';
+import type { ShadowCollection } from '../packages/daemon/src/shadows.js';
 import { openStore } from '../packages/daemon/src/store/index.js';
 import type { PruneReport } from '../packages/daemon/src/store/index.js';
 import { createWatcher } from '../packages/daemon/src/watcher/index.js';
@@ -151,6 +153,8 @@ interface System {
   readonly scheduler: Scheduler | null;
   /** Every retention pass's report, in order. */
   readonly passes: PruneReport[];
+  /** Every shadow collection's report, in order. */
+  readonly collections: ShadowCollection[];
   /** Edit-to-Finding, per planted conflict. */
   readonly latencies: number[];
   readonly planted: () => number;
@@ -171,21 +175,8 @@ async function startSystem(
   // largest table a busy store has, and a bench without it measures the rest.
   let appends: Promise<void> = Promise.resolve();
   const passes: PruneReport[] = [];
+  const collections: ShadowCollection[] = [];
   let retention: Retention | null = null;
-  if (options.retention !== undefined) {
-    retention = createRetention({
-      store,
-      windowMs: options.retention.windowMs,
-      intervalMs: options.retention.intervalMs,
-      logger: createLogger('bench', {
-        level: 'info',
-        sink: (record) => {
-          if (record.msg === 'pruned the store') passes.push(record as unknown as PruneReport);
-        },
-      }),
-    });
-    retention.start();
-  }
   const bus = new EventBus({
     logger: silentLogger,
     onRecord: (record) => {
@@ -200,8 +191,18 @@ async function startSystem(
 
   let scheduler: Scheduler | null = null;
   let pipeline: ReturnType<typeof createRunPipeline> | null = null;
+  // A day compresses the reuse bound with it, at the ratio the defaults have:
+  // left at an hour, every snapshot commit would outlive a window of minutes.
+  const commitReuseMs =
+    options.retention === undefined ? undefined : Math.round(options.retention.windowMs / 24);
   if (withScheduler) {
-    const runs = createRunPipeline({ store, bus, runner, shadows });
+    const runs = createRunPipeline({
+      store,
+      bus,
+      runner,
+      shadows,
+      ...(commitReuseMs === undefined ? {} : { commitReuseMs }),
+    });
     pipeline = runs;
     runs.attach();
     scheduler = createScheduler({
@@ -225,6 +226,38 @@ async function startSystem(
     });
   }
 
+  if (options.retention !== undefined) {
+    const logger = createLogger('bench', {
+      level: 'info',
+      sink: (record) => {
+        if (record.msg === 'pruned the store') passes.push(record as unknown as PruneReport);
+        if (record.msg === 'collected the shadow') {
+          collections.push(record as unknown as ShadowCollection);
+        }
+        if (record.level === 'warn') console.error(JSON.stringify(record));
+      },
+    });
+    const runs = pipeline;
+    const scheduling = scheduler;
+    const collector = createShadowCollector({
+      shadows,
+      store,
+      runner,
+      heldTrees: (repoId) => runs?.heldTrees(repoId) ?? [],
+      marginMs: commitReuseMs!,
+      ...(scheduling === null ? {} : { quiet: () => scheduling.idle() }),
+      logger,
+    });
+    retention = createRetention({
+      store,
+      windowMs: options.retention.windowMs,
+      intervalMs: options.retention.intervalMs,
+      logger,
+      collect: (before, signal) => collector.pass(before, signal),
+    });
+    retention.start();
+  }
+
   const watcher = createWatcher({ config, store, bus, runner, shadows, logger: silentLogger });
   await watcher.start();
 
@@ -233,6 +266,7 @@ async function startSystem(
   return {
     scheduler,
     passes,
+    collections,
     latencies,
     planted: () => planted,
     plant(): void {
@@ -393,6 +427,37 @@ function sampleStore(path: string): Record<string, number> {
 }
 
 /**
+ * Every shadow's own objects: loose ones by count and bytes, and packs by bytes.
+ * The user's objects, borrowed through alternates, are not the shadow's.
+ */
+function sampleShadows(dataDir: string): Record<string, number> {
+  const counts = { shadowLoose: 0, shadowLooseBytes: 0, shadowPackBytes: 0 };
+  const shadowsDir = join(dataDir, 'shadows');
+  if (!existsSync(shadowsDir)) return counts;
+  for (const shadow of readdirSync(shadowsDir)) {
+    const objects = join(shadowsDir, shadow, 'objects');
+    for (const dir of readdirSync(objects)) {
+      if (/^[0-9a-f]{2}$/u.test(dir)) {
+        for (const file of readdirSync(join(objects, dir))) {
+          // git writes an object as a temporary file and renames it, and a
+          // collection may unlink one between the listing and the stat.
+          if (file.startsWith('tmp_')) continue;
+          const stat = statSync(join(objects, dir, file), { throwIfNoEntry: false });
+          if (stat === undefined) continue;
+          counts.shadowLoose += 1;
+          counts.shadowLooseBytes += stat.size;
+        }
+      } else if (dir === 'pack') {
+        for (const file of readdirSync(join(objects, dir))) {
+          counts.shadowPackBytes += statSync(join(objects, dir, file)).size;
+        }
+      }
+    }
+  }
+  return counts;
+}
+
+/**
  * A day of continuous edits, compressed: the window is minutes rather than
  * days, so the store reaches the steady state a day would put it in — rows
  * aging out as fast as they arrive — within the run.
@@ -424,7 +489,7 @@ async function retentionMain(): Promise<void> {
     while (Date.now() - startedAt < windowMs * windows) {
       await sleep(sampleMs);
       const sample = { minute: Number(((Date.now() - startedAt) / 60_000).toFixed(1)) };
-      const taken = { ...sample, ...sampleStore(storePath) };
+      const taken = { ...sample, ...sampleStore(storePath), ...sampleShadows(dataDir) };
       samples.push(taken);
       log.info('sample', taken);
     }
@@ -458,6 +523,8 @@ async function retentionMain(): Promise<void> {
             changeSets: perHour('change_sets'),
             verdicts: perHour('analyzer_cache'),
             bytes: perHour('bytes'),
+            shadowLoose: perHour('shadowLoose'),
+            shadowLooseBytes: perHour('shadowLooseBytes'),
           },
           atOneWindow: edge,
           afterTwoWindows: {
@@ -466,8 +533,17 @@ async function retentionMain(): Promise<void> {
             changeSets: spread('change_sets'),
             verdicts: spread('analyzer_cache'),
             bytes: spread('bytes'),
+            shadowLoose: spread('shadowLoose'),
+            shadowLooseBytes: spread('shadowLooseBytes'),
+            shadowPackBytes: spread('shadowPackBytes'),
           },
           passes: system.passes.length,
+          collections: system.collections.length,
+          largestPackKib: Math.max(...system.collections.map((report) => report.after.kib)),
+          longestCollectionMs: Math.max(...system.collections.map((report) => report.durationMs)),
+          // What an edit can meet: checks of the repository held off.
+          longestPauseMs: Math.max(...system.collections.map((report) => report.pausedMs)),
+          longestQuietWaitMs: Math.max(...system.collections.map((report) => report.quietMs)),
           longestBatchMs: Math.max(...system.passes.map((pass) => pass.longestBatchMs)),
           longestPassMs: Math.max(...system.passes.map((pass) => pass.durationMs)),
           samples,

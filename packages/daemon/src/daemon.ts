@@ -14,9 +14,9 @@ import type { Retention } from './retention.js';
 import { publishRuntime, unpublishRuntime } from './runtime-file.js';
 import { createScheduler } from './scheduler/index.js';
 import type { Scheduler } from './scheduler/index.js';
-import { createRunPipeline } from './scheduler/run-pipeline.js';
+import { createRunPipeline, SNAPSHOT_COMMIT_REUSE_MS } from './scheduler/run-pipeline.js';
 import type { RunPipeline } from './scheduler/run-pipeline.js';
-import { createShadowRegistry } from './shadows.js';
+import { createShadowCollector, createShadowRegistry } from './shadows.js';
 import { openStore } from './store/index.js';
 import type { Store } from './store/index.js';
 import { createWatcher } from './watcher/index.js';
@@ -199,14 +199,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
       const runs = createRunPipeline({ store, bus, runner, shadows, logger: options.logger });
       pipeline = runs;
       runs.attach();
-      scheduler = createScheduler({
+      const scheduling = createScheduler({
         config,
         bus,
         logger: options.logger,
         plan: (repoId, branchRefId) => runs.plan(repoId, branchRefId),
         runPair: (request, signal) => runs.runPair(request, signal),
       });
-      scheduler.start();
+      scheduler = scheduling;
+      scheduling.start();
 
       watcher = createWatcher({
         config,
@@ -236,6 +237,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
       // After the daemon is up, never before: a store that has not been pruned
       // in a while holds a backlog, and the first pass clears it in the
       // background, a batch at a time.
+      const collector = createShadowCollector({
+        shadows,
+        store,
+        runner,
+        heldTrees: (repoId) => runs.heldTrees(repoId),
+        marginMs: SNAPSHOT_COMMIT_REUSE_MS,
+        quiet: () => scheduling.idle(),
+        logger: options.logger,
+      });
       retention = createRetention({
         store,
         windowMs: config.retention.windowMs,
@@ -243,6 +253,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // Every run this daemon starts is later than this, so an unfinished one
         // started before it was left by a process that is gone.
         abandonedBefore: startedAt,
+        // In the same pass, after the store: a verdict is pruned before the
+        // objects it names, so none can be served naming what is gone.
+        collect: (before, signal) => collector.pass(before, signal),
         ...(options.retentionIntervalMs === undefined
           ? {}
           : { intervalMs: options.retentionIntervalMs }),

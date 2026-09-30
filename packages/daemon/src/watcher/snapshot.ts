@@ -305,11 +305,13 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
         return;
       }
 
-      const changeSet = await extractChangeSet(handle, branch, base, {
-        runner,
-        snapshot: { id: snapshotId, treeOid: snapshot.treeOid },
-        objectStore: await shadows.get(handle, repo.id),
-      });
+      const changeSet = await shadows.use(handle, repo.id, (objectStore) =>
+        extractChangeSet(handle, branch, base, {
+          runner,
+          snapshot: { id: snapshotId, treeOid: snapshot.treeOid },
+          objectStore,
+        }),
+      );
       await store.upsertChangeSet(changeSet);
       lastSeen.set(branch.worktreePath, {
         kind: 'tree',
@@ -388,15 +390,16 @@ export function createSnapshotPipeline(options: SnapshotPipelineOptions): Snapsh
     repo: Repo,
     worktreePath: string,
   ): Promise<WorktreeSnapshot> {
-    const shadow = await shadows.get(handle, repo.id);
-    try {
-      return await captureDirtyState(worktreePath, handle, { runner, objectStore: shadow });
-    } catch (error) {
-      // A shadow removed or rebuilt underneath the handle refuses every capture
-      // until something asks `ensureShadow` again.
-      shadows.forget(repo.id);
-      throw error;
-    }
+    return shadows.use(handle, repo.id, async (shadow) => {
+      try {
+        return await captureDirtyState(worktreePath, handle, { runner, objectStore: shadow });
+      } catch (error) {
+        // A shadow removed or rebuilt underneath the handle refuses every
+        // capture until something asks `ensureShadow` again.
+        shadows.forget(repo.id);
+        throw error;
+      }
+    });
   }
 
   async function publish(

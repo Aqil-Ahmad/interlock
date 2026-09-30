@@ -200,6 +200,36 @@ describe('git runner against a real repository', () => {
     }
   });
 
+  it('stops a command when its signal aborts, and says it was stopped rather than timed out', async () => {
+    const scriptDir = mkdtempSync(join(tmpdir(), 'interlock-slow-'));
+    const fakeGit = join(scriptDir, 'git');
+    writeFileSync(fakeGit, '#!/bin/sh\nsleep 30\n');
+    chmodSync(fakeGit, 0o755);
+
+    try {
+      const slow = createGitRunner({ gitPath: fakeGit });
+      const controller = new AbortController();
+      const startedAt = Date.now();
+      const running = rejection(slow.run(repo, ['status'], { signal: controller.signal }));
+      setTimeout(() => {
+        controller.abort();
+      }, 100);
+      const error = await running;
+      expect(error.code).toBe('GIT_COMMAND_FAILED');
+      expect(error.infra).toBe(true);
+      expect(error.details.stopped).toBe(true);
+      expect(error.message).not.toContain('did not finish within');
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a signal aborted before the command started as stopped', async () => {
+    const error = await rejection(runner.run(repo, ['status'], { signal: AbortSignal.abort() }));
+    expect(error.details.stopped).toBe(true);
+  });
+
   it('refuses to stage a user repo through its own index', async () => {
     const before = readFileSync(join(dir, '.git', 'index'));
     const error = await rejection(

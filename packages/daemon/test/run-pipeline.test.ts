@@ -1,10 +1,19 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { createGitRunner, textualAnalyzer } from '@interlock/core';
-import type { GitResult, GitRunner } from '@interlock/core';
+import type { GitResult, GitRunner, UserRepo } from '@interlock/core';
 import { createLogger, makePairKey, silentLogger, ulid } from '@interlock/shared';
 import type {
   BranchRef,
@@ -12,6 +21,7 @@ import type {
   ChangeSetId,
   EventId,
   EventRecord,
+  Finding,
   LogRecord,
   Repo,
   RepoId,
@@ -20,10 +30,10 @@ import type {
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventBus } from '../src/bus/index.js';
 import type { PairCandidate, PairRunRequest, PairRunResult } from '../src/scheduler/index.js';
-import { createRunPipeline } from '../src/scheduler/run-pipeline.js';
+import { createRunPipeline, SNAPSHOT_COMMIT_REUSE_MS } from '../src/scheduler/run-pipeline.js';
 import type { RunPipeline } from '../src/scheduler/run-pipeline.js';
-import { createShadowRegistry } from '../src/shadows.js';
-import type { ShadowRegistry } from '../src/shadows.js';
+import { createShadowCollector, createShadowRegistry } from '../src/shadows.js';
+import type { ShadowCollector, ShadowRegistry } from '../src/shadows.js';
 import { openStore } from '../src/store/index.js';
 import type { Store } from '../src/store/index.js';
 import { createSweep } from '../src/watcher/sweep.js';
@@ -1347,6 +1357,275 @@ describe('run pipeline', () => {
           reason: 'branch-gone',
         },
       );
+    });
+  });
+
+  describe('shadow collection', () => {
+    const HOUR = 60 * 60_000;
+
+    const collector = (): ShadowCollector =>
+      createShadowCollector({
+        shadows,
+        store,
+        runner,
+        heldTrees: (repoId) => pipeline.heldTrees(repoId),
+        marginMs: SNAPSHOT_COMMIT_REUSE_MS,
+        logger: createLogger('test', { level: 'warn', sink: (record) => warnings.push(record) }),
+      });
+
+    const shadowPath = async (): Promise<string> =>
+      (
+        await shadows.get(
+          { kind: 'user', rootPath: root, gitDir: join(root, '.git') },
+          (await repo()).id,
+        )
+      ).rootPath;
+
+    /**
+     * Everything the shadow wrote so far, last written `ms` ago: a day passing,
+     * for collection. Packs too, for what a pack's time speaks for.
+     */
+    const age = async (ms: number): Promise<void> => {
+      const objects = join(await shadowPath(), 'objects');
+      const at = new Date(Date.now() - ms);
+      const packs = join(objects, 'pack');
+      if (existsSync(packs)) {
+        for (const file of readdirSync(packs)) utimesSync(join(packs, file), at, at);
+      }
+      for (const dir of readdirSync(objects).filter((name) => /^[0-9a-f]{2}$/u.test(name))) {
+        for (const file of readdirSync(join(objects, dir)))
+          utimesSync(join(objects, dir, file), at, at);
+      }
+    };
+
+    const readable = async (oid: string): Promise<boolean> => {
+      try {
+        git(await shadowPath(), 'cat-file', '-e', oid);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const branchSnapshot = async (name: string): Promise<BranchSnapshotPayload> => {
+      const branch = await branchNamed(name);
+      return published('branch.snapshot')
+        .map((record) => record.payload as unknown as BranchSnapshotPayload)
+        .filter((payload) => payload.branchRefId === branch.id)
+        .at(-1)!;
+    };
+
+    const evidenceCommits = (finding: Finding): string[] =>
+      finding.evidence.flatMap((evidence) =>
+        evidence.type === 'merge-conflict' ? [evidence.commitA, evidence.commitB] : [],
+      );
+
+    beforeEach(async () => {
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      writeFileSync(join(base, 'b', 'total.ts'), body('2'));
+      await observe();
+    });
+
+    /**
+     * The real runner, stopping at the first `verb` until released: what is
+     * running then is mid-write to the shadow.
+     */
+    const pausing = (
+      verb: string,
+    ): { runner: GitRunner; reached: Promise<void>; release: () => void } => {
+      let reach!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((resolve) => {
+        reach = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let paused = false;
+      return {
+        reached,
+        release,
+        runner: {
+          run: async (target, args, options): Promise<GitResult> => {
+            // `includes`: a merge runs as `git --attr-source=<commit> merge-tree`.
+            if (args.includes(verb) && !paused) {
+              paused = true;
+              reach();
+              await released;
+            }
+            return runner.run(target, args, options);
+          },
+        },
+      };
+    };
+
+    const handle = (): UserRepo => ({ kind: 'user', rootPath: root, gitDir: join(root, '.git') });
+
+    it('waits for a run writing to the shadow before collecting it', async () => {
+      const pause = pausing('merge-tree');
+      const using = build(pause.runner);
+      const order: string[] = [];
+      const running = runWith('b', undefined, using).then(() => order.push('run'));
+      await pause.reached;
+
+      const collecting = shadows
+        .collect(handle(), (await repo()).id, {
+          // An hour back, as a real expiry is at least: what the paused writer
+          // wrote is fresh, and only the gate is under test.
+          expireBefore: new Date(Date.now() - HOUR),
+          keep: () => Promise.resolve([]),
+        })
+        .then(() => order.push('collected'));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(order).toEqual([]);
+
+      pause.release();
+      await Promise.all([running, collecting]);
+      using.detach();
+      expect(order).toEqual(['run', 'collected']);
+    });
+
+    it('waits for a capture writing to the shadow before collecting it', async () => {
+      const pause = pausing('write-tree');
+      const capturing = createSweep({
+        store,
+        bus,
+        runner: pause.runner,
+        dataDir: join(base, 'data'),
+        shadows,
+      });
+      writeFileSync(join(base, 'a', 'total.ts'), body('4'));
+      capturing.markChanged(join(base, 'a'));
+      const order: string[] = [];
+      const reconciling = capturing.reconcile(root).then(() => order.push('captured'));
+      await pause.reached;
+
+      const collecting = shadows
+        .collect(handle(), (await repo()).id, {
+          // An hour back, as a real expiry is at least: what the paused writer
+          // wrote is fresh, and only the gate is under test.
+          expireBefore: new Date(Date.now() - HOUR),
+          keep: () => Promise.resolve([]),
+        })
+        .then(() => order.push('collected'));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(order).toEqual([]);
+
+      pause.release();
+      await Promise.all([reconciling, collecting]);
+      // Either order after that: the change set is a second hold of its own,
+      // and a waiting collection goes ahead of it.
+      expect([...order].sort()).toEqual(['captured', 'collected']);
+    });
+
+    it('keeps an open Finding’s commits however old, and lets them go once it resolves', async () => {
+      await run();
+      const [finding] = await store.listOpenFindings((await repo()).id);
+      const commits = evidenceCommits(finding!);
+      // Snapshot commits, made in the shadow: nothing but a keep ref holds them.
+      expect(commits).toHaveLength(2);
+      await age(30 * 24 * HOUR);
+
+      await collector().pass(new Date().toISOString());
+
+      for (const commit of commits) expect(await readable(commit)).toBe(true);
+      expect(warnings).toEqual([]);
+
+      writeFileSync(join(base, 'b', 'total.ts'), body('items.length'));
+      await observe();
+      expect(await run()).toMatchObject({ kind: 'analysed', clean: true });
+      expect(await store.getFinding(finding!.id)).toMatchObject({ status: 'resolved' });
+      // Kept, the commits were packed; released, they age from that pack's
+      // time, the last pass that kept them.
+      await age(30 * 24 * HOUR);
+
+      await collector().pass(new Date().toISOString());
+
+      for (const commit of commits) expect(await readable(commit)).toBe(false);
+    });
+
+    it('keeps a stale Finding’s commits, which a re-verification may still confirm', async () => {
+      await run();
+      const [finding] = await store.listOpenFindings((await repo()).id);
+      await store.upsertFinding({ ...finding!, status: 'stale' });
+      await age(30 * 24 * HOUR);
+
+      await collector().pass(new Date().toISOString());
+
+      for (const commit of evidenceCommits(finding!)) expect(await readable(commit)).toBe(true);
+    });
+
+    it('keeps the trees an idle branch was last seen at, which its next check merges', async () => {
+      const trees = published('branch.snapshot').map(
+        (record) => (record.payload as unknown as BranchSnapshotPayload).treeOid,
+      );
+      await age(30 * 24 * HOUR);
+
+      await collector().pass(new Date().toISOString());
+
+      for (const tree of trees) expect(await readable(tree)).toBe(true);
+      // And the check runs on them, rather than failing on a tree that is gone.
+      expect(await run()).toMatchObject({ kind: 'analysed', clean: false });
+    });
+
+    it('holds each repository’s trees for that repository alone', async () => {
+      const own = (await branchSnapshot('a')).treeOid;
+      const elsewhere = 'beef'.repeat(10);
+      await bus.publish({
+        type: 'branch.snapshot',
+        repoId: ulid<RepoId>(),
+        at: new Date().toISOString(),
+        branchRefId: ulid<BranchRefId>(),
+        treeOid: elsewhere,
+        headSha: 'cafe'.repeat(10),
+        changeSetId: null,
+        fileCount: 1,
+      });
+
+      const held = pipeline.heldTrees((await repo()).id);
+
+      // Another repository's tree is not in this shadow, and asking to keep
+      // it would only report it unkeepable on every pass.
+      expect(held).toContain(own);
+      expect(held).not.toContain(elsewhere);
+    });
+
+    it('makes a new snapshot commit for a tree once the one it had is past its reuse bound', async () => {
+      /** The tree of every commit made, in order. */
+      const committed: string[] = [];
+      const counting: GitRunner = {
+        run: (target, args, options): Promise<GitResult> => {
+          if (args[0] === 'commit-tree') committed.push(args.at(-1)!);
+          return runner.run(target, args, options);
+        },
+      };
+      const using = build(counting);
+      const treeOfA = (await branchSnapshot('a')).treeOid;
+      const madeForA = (): number => committed.filter((tree) => tree === treeOfA).length;
+      await runWith('b', undefined, using);
+      expect(madeForA()).toBe(1);
+
+      // The same side of `a` against another branch: its commit is reused.
+      await runWith('main', undefined, using);
+      expect(madeForA()).toBe(1);
+
+      const realNow = Date.now;
+      const later = realNow() + SNAPSHOT_COMMIT_REUSE_MS + 1;
+      Date.now = () => later;
+      try {
+        // New content on the other side, so the pair is merged rather than
+        // answered from the verdict cache.
+        writeFileSync(join(root, 'other.ts'), lines('main moved'));
+        await observe();
+        await runWith('main', undefined, using);
+      } finally {
+        Date.now = realNow;
+        using.detach();
+      }
+      // `a` did not change, and still got a fresh commit: one as old as its
+      // first run would be older than a verdict written now by more than the
+      // margin collection leaves.
+      expect(madeForA()).toBe(2);
     });
   });
 });
