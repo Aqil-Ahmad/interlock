@@ -4,15 +4,19 @@ import type { Fixture } from './format.js';
  * Semantic conflicts: pairs that merge cleanly and are broken together.
  *
  * No analyzer catches these yet. They are labelled for the one that should —
- * the compiler for a stale reference, `ast-semantic` for what compiles and is
- * still wrong — so the report shows that analyzer's recall as 0 until it
- * exists, and it is written against labels that were here first.
+ * the compiler for a stale reference, the targeted tests for what compiles and
+ * behaves wrongly — so the report shows that analyzer's recall as 0 until it
+ * exists, and it is written against labels that were here first. One case the
+ * protocol lists, a duplicated implementation, breaks nothing any analyzer
+ * here can see; it is kept, labelled as not detected by design.
  *
- * Each branch compiles on its own; only the merge does not. Every fixture
- * carries a `package.json` and `tsconfig.json` so a compiler can be run on it
- * as it stands. Spans are the lines of each branch's half: the changed
- * declaration on one side, the stale reference on the other — or, where the
- * conflict is a symbol both changed, that symbol on each.
+ * Each branch compiles on its own; only the merge does not, or, for the
+ * behavioural case, only the merge fails a test. Every fixture carries a
+ * `package.json` and `tsconfig.json` so a compiler can be run on it as it
+ * stands, and the behavioural ones a `test` script Node runs with no install.
+ * Spans are the lines of each branch's half: the changed declaration on one
+ * side, the stale reference on the other — or, where the conflict is a symbol
+ * both changed, that symbol on each.
  */
 
 const project = {
@@ -128,6 +132,50 @@ const discount = lines(
   '  return price + tax;',
   '}',
 );
+
+/**
+ * The project for a behavioural fixture: `node --test` runs its TypeScript
+ * tests as they stand, stripping types, so a test analyzer needs nothing
+ * installed to run them.
+ */
+const tested = {
+  ...project,
+  'package.json': [
+    '{',
+    '  "name": "fixture",',
+    '  "private": true,',
+    '  "type": "module",',
+    '  "scripts": { "test": "node --test" }',
+    '}',
+    '',
+  ].join('\n'),
+};
+
+/** A test of `applyDiscount`: one `assert.equal` of a call against its answer. */
+const discountTest = (name: string, call: string, expected: string): string =>
+  lines(
+    "import assert from 'node:assert/strict';",
+    "import { test } from 'node:test';",
+    "import { applyDiscount } from '../src/discount.ts';",
+    '',
+    `test('${name}', () => {`,
+    `  assert.equal(${call}, ${expected});`,
+    '});',
+  );
+
+/** Branch `a` of both behavioural fixtures: an invalid discount is ignored. */
+const ignoresInvalid = [
+  {
+    op: 'write',
+    path: 'src/discount.ts',
+    content: discount.replace('percent < 0)', 'percent < 0 || percent > 100)'),
+  },
+  {
+    op: 'write',
+    path: 'test/discount-invalid.test.ts',
+    content: discountTest('a discount over 100% is ignored', 'applyDiscount(200, 150)', '200'),
+  },
+] as const;
 
 const slug = lines(
   'export function toSlug(text: string): string {',
@@ -301,19 +349,51 @@ export const SEMANTIC: readonly Fixture[] = [
   },
   {
     id: 'same-symbol-dual-edit',
-    title: 'both branches change one function, at lines far enough apart to merge',
+    title: 'both branches fix one function for the same input, in ways that contradict',
     covers: 'same-symbol-dual-edit',
-    base: { ...project, 'src/discount.ts': discount },
-    a: {
-      committed: [
+    base: { ...tested, 'src/discount.ts': discount },
+    a: { committed: [...ignoresInvalid], uncommitted: [] },
+    b: {
+      committed: [],
+      uncommitted: [
         {
           op: 'write',
           path: 'src/discount.ts',
-          content: discount.replace('percent < 0)', 'percent < 0 || percent > 100)'),
+          content: discount.replace('return price - cut;', 'return Math.max(price - cut, 0);'),
+        },
+        {
+          op: 'write',
+          path: 'test/discount-floor.test.ts',
+          content: discountTest(
+            'a discount never takes the price below zero',
+            'applyDiscount(200, 150)',
+            '0',
+          ),
         },
       ],
-      uncommitted: [],
     },
+    // Each branch's test passes on its branch; merged, `a`'s guard returns the
+    // price before `b`'s floor is reached, and `b`'s test fails. It compiles
+    // and merges cleanly, so only a test can see it.
+    expected: [
+      {
+        analyzer: 'test',
+        class: 'merge-breaks-test',
+        path: 'src/discount.ts',
+        symbol: 'applyDiscount',
+        // The whole function on each side: neither edit is wrong alone.
+        spanA: { path: 'src/discount.ts', start: 1, end: 7 },
+        spanB: { path: 'src/discount.ts', start: 1, end: 7 },
+      },
+    ],
+    twinOf: null,
+  },
+  {
+    id: 'same-symbol-dual-edit-twin-compatible-fixes',
+    title: 'both branches change one function, and both their tests pass merged',
+    covers: 'same-symbol-dual-edit',
+    base: { ...tested, 'src/discount.ts': discount },
+    a: { committed: [...ignoresInvalid], uncommitted: [] },
     b: {
       committed: [],
       uncommitted: [
@@ -325,21 +405,21 @@ export const SEMANTIC: readonly Fixture[] = [
             'return Math.round((price - cut) * 100) / 100;',
           ),
         },
+        {
+          op: 'write',
+          path: 'test/discount-rounding.test.ts',
+          content: discountTest(
+            'a discounted price is rounded to cents',
+            'applyDiscount(10, 33)',
+            '6.7',
+          ),
+        },
       ],
     },
-    expected: [
-      {
-        analyzer: 'ast-semantic',
-        class: 'same-symbol-dual-edit',
-        path: 'src/discount.ts',
-        symbol: 'applyDiscount',
-        // The whole function on each side: the conflict is the symbol, not
-        // either edit alone, and each edit on its own is harmless.
-        spanA: { path: 'src/discount.ts', start: 1, end: 7 },
-        spanB: { path: 'src/discount.ts', start: 1, end: 7 },
-      },
-    ],
-    twinOf: null,
+    // The same symbol changed on both sides, and nothing wrong with it: what a
+    // matcher flagging every function both branches touch would call a conflict.
+    expected: [],
+    twinOf: 'same-symbol-dual-edit',
   },
   {
     id: 'same-symbol-dual-edit-twin-two-functions',
@@ -389,16 +469,9 @@ export const SEMANTIC: readonly Fixture[] = [
         },
       ],
     },
-    expected: [
-      {
-        analyzer: 'ast-semantic',
-        class: 'duplicate-implementation',
-        path: 'src/slug.ts',
-        symbol: 'toSlug',
-        spanA: { path: 'src/slug.ts', start: 1, end: 3 },
-        spanB: { path: 'src/urls.ts', start: 1, end: 3 },
-      },
-    ],
+    expected: [],
+    notDetected:
+      'Two helpers doing the same thing under different names break nothing: no compiler error, failing test or failed build follows, and a detector would be a similarity matcher, which this design does not build.',
     twinOf: null,
   },
   {

@@ -74,6 +74,8 @@ interface FixtureRow {
   readonly id: string;
   readonly covers: string;
   readonly twinOf: string | null;
+  /** Why no analyzer is meant to catch this case, for one the set keeps anyway. */
+  readonly notDetected: string | null;
   readonly status: 'scored' | 'infra-failure';
   readonly tp: number;
   readonly fp: number;
@@ -95,6 +97,7 @@ export function buildReport(runs: readonly FixtureRun[], env: Environment): Repo
         id: fixture.id,
         covers: fixture.covers,
         twinOf: fixture.twinOf,
+        notDetected: fixture.notDetected ?? null,
         status: 'infra-failure',
         tp: 0,
         fp: 0,
@@ -111,6 +114,7 @@ export function buildReport(runs: readonly FixtureRun[], env: Environment): Repo
       id: fixture.id,
       covers: fixture.covers,
       twinOf: fixture.twinOf,
+      notDetected: fixture.notDetected ?? null,
       status: 'scored',
       tp: scored.matched.length,
       fp: scored.falsePositives.length,
@@ -226,6 +230,7 @@ export function renderMarkdown(report: Report): string {
       ]),
     ),
     '',
+    ...notDetectedSection(report.fixtures),
   ];
   return lines.join('\n');
 }
@@ -258,4 +263,19 @@ function describeFinding(finding: Finding): string {
 
 function describeExpectation(expectation: Expectation): string {
   return `${classKey(expectation.analyzer, expectation.class)} in ${expectation.path}`;
+}
+
+/**
+ * The cases the set keeps that no analyzer is meant to catch, with why: listed
+ * so a case the protocol names is visibly out of scope rather than missing.
+ */
+function notDetectedSection(fixtures: readonly FixtureRow[]): string[] {
+  const rows = fixtures.filter((f) => f.notDetected !== null);
+  if (rows.length === 0) return [];
+  return [
+    '## Not detected by design',
+    '',
+    ...rows.map((f) => `- \`${f.id}\`: ${f.notDetected ?? ''}`),
+    '',
+  ];
 }

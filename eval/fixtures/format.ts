@@ -30,6 +30,13 @@ export interface Fixture {
   readonly expected: readonly Expectation[];
   /** For a twin, the conflicting fixture it mirrors; null for a conflict. */
   readonly twinOf: string | null;
+  /**
+   * For a case the protocol lists that no analyzer in this design is meant to
+   * catch, why not. Its `expected` is empty, and anything found on it is a
+   * false positive, as on a twin; the report lists it with this reason, so the
+   * case stays visible rather than dropped. Absent everywhere else.
+   */
+  readonly notDetected?: string;
 }
 
 /**

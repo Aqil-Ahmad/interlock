@@ -67,13 +67,20 @@ describe('the golden set', () => {
     const byId = new Map(FIXTURES.map((fixture) => [fixture.id, fixture]));
     for (const fixture of FIXTURES) {
       if (fixture.twinOf === null) {
-        expect(fixture.expected.length, fixture.id).toBeGreaterThan(0);
+        // A case no analyzer is meant to catch expects nothing, and says why.
+        if (fixture.notDetected === undefined) {
+          expect(fixture.expected.length, fixture.id).toBeGreaterThan(0);
+        } else {
+          expect(fixture.notDetected, fixture.id).not.toBe('');
+          expect(fixture.expected, fixture.id).toEqual([]);
+        }
         expect(
           FIXTURES.some((twin) => twin.twinOf === fixture.id),
           `${fixture.id} has no twin`,
         ).toBe(true);
       } else {
         expect(fixture.expected, fixture.id).toEqual([]);
+        expect(fixture.notDetected, `${fixture.id} is a twin`).toBeUndefined();
         const conflict = byId.get(fixture.twinOf);
         expect(conflict?.twinOf, `${fixture.id} mirrors no conflict`).toBeNull();
         expect(conflict?.covers).toBe(fixture.covers);
@@ -137,6 +144,16 @@ describe('the golden set', () => {
 
   it('holds every analyzer that runs to its floor across the whole set', async () => {
     const report = await runSuite(FIXTURES, REPO_ROOT);
+
+    // A case kept that no analyzer is meant to catch is listed, with its reason.
+    expect(
+      report.fixtures
+        .filter((fixture) => fixture.notDetected !== null)
+        .map((fixture) => fixture.id),
+    ).toEqual(['duplicate-implementation']);
+    expect(renderMarkdown(report)).toMatch(
+      /## Not detected by design\n\n- `duplicate-implementation`: \S/u,
+    );
 
     const unscored = report.fixtures.filter((fixture) => fixture.status !== 'scored');
     expect(unscored.map((fixture) => `${fixture.id}: ${fixture.failure?.message ?? ''}`)).toEqual(
