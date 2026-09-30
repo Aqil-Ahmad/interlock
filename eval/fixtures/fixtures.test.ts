@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { AnalyzerKind } from '../../packages/shared/src/index.js';
 import { describe, expect, it } from 'vitest';
 import { FIXTURE_CASES } from './format.js';
 import type { Fixture, Span } from './format.js';
@@ -10,6 +11,18 @@ import { containsIdentifier } from './score.js';
 import { runSuite } from './suite.js';
 
 const EVAL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * What each analyzer that runs scores on the whole set today, as a floor.
+ *
+ * A regression check, not a target: raised when an analyzer improves, never
+ * lowered to let a change through — the same rule as the coverage floors. An
+ * analyzer that runs with no floor here fails the test, so the one that lands
+ * next is held to its numbers from the day it does.
+ */
+const FLOORS: Partial<
+  Record<AnalyzerKind, { readonly precision: number; readonly recall: number }>
+> = { textual: { precision: 1, recall: 1 } };
 const REPO_ROOT = join(EVAL_DIR, '..');
 
 /** A branch's files once its committed and uncommitted operations are applied, in memory. */
@@ -98,7 +111,7 @@ describe('the golden set', () => {
     }
   });
 
-  it('runs a conflict and its twin through the real pipeline, the same way twice', async () => {
+  it('runs a conflict and its twin through the runner, the same way twice', async () => {
     const pair = FIXTURES.filter(
       (fixture) => fixture.id === 'overlap-uncommitted' || fixture.twinOf === 'overlap-uncommitted',
     );
@@ -117,6 +130,37 @@ describe('the golden set', () => {
     expect(renderJson(second)).toBe(renderJson(first));
     expect(renderMarkdown(second)).toBe(renderMarkdown(first));
   }, 60_000);
+
+  it('holds every analyzer that runs to its floor across the whole set', async () => {
+    const report = await runSuite(FIXTURES, REPO_ROOT);
+
+    const unscored = report.fixtures.filter((fixture) => fixture.status !== 'scored');
+    expect(unscored.map((fixture) => `${fixture.id}: ${fixture.failure?.message ?? ''}`)).toEqual(
+      [],
+    );
+    // Named on failure: which fixture a lost hit or a new false positive came from.
+    const wrong = report.fixtures
+      .filter((fixture) => fixture.fp > 0 || fixture.fn > 0)
+      .map(
+        (fixture) =>
+          `${fixture.id}: ${[...fixture.unmatchedFindings, ...fixture.missed].join('; ')}`,
+      );
+    // A floor for an analyzer that no longer runs would pass on nothing.
+    const ran = report.analyzers.filter((each) => each.ran).map((each) => each.analyzer);
+    expect(ran).toEqual(expect.arrayContaining(Object.keys(FLOORS)));
+    for (const row of report.analyzers.filter((each) => each.ran)) {
+      const floor = FLOORS[row.analyzer];
+      expect(floor, `${row.analyzer} runs and has no floor here`).toBeDefined();
+      // Blank precision is nothing found at all, which recall catches.
+      expect(
+        row.precision ?? 1,
+        `${row.analyzer} precision\n${wrong.join('\n')}`,
+      ).toBeGreaterThanOrEqual(floor!.precision);
+      expect(row.recall ?? 0, `${row.analyzer} recall\n${wrong.join('\n')}`).toBeGreaterThanOrEqual(
+        floor!.recall,
+      );
+    }
+  }, 180_000);
 
   it('is never imported by anything in packages/', () => {
     const offenders: string[] = [];

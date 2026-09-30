@@ -2,6 +2,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  ANALYZER_PIPELINE,
   captureDirtyState,
   commitSnapshotInShadow,
   createGitRunner,
@@ -11,7 +12,6 @@ import {
   mergeBase,
   openUserRepo,
   speculativeMerge,
-  textualAnalyzer,
 } from '../../packages/core/src/index.js';
 import type { Analyzer, AnalyzerContext, GitRunner } from '../../packages/core/src/index.js';
 import { isInterlockError, silentLogger, ulid } from '../../packages/shared/src/index.js';
@@ -28,11 +28,12 @@ import { generate } from './generate.js';
 import type { Sides } from './score.js';
 
 /**
- * Every analyzer that exists, in the order the pipeline runs them. An analyzer
- * the set has labels for and this list does not hold is reported as not run,
- * and its expectations count as missed: that is its recall today.
+ * Every analyzer that exists, in the order the pipeline runs them: core's own
+ * list, never a copy, so an analyzer added to the pipeline is scored the day
+ * it lands. One the set has labels for and this list does not hold is reported
+ * as not run, and its expectations count as missed: that is its recall today.
  */
-export const ANALYZERS: readonly Analyzer[] = [textualAnalyzer];
+export const ANALYZERS: readonly Analyzer[] = ANALYZER_PIPELINE;
 
 /** A fixture's findings, or why it produced none it could be scored on. */
 export type FixtureRun =
@@ -55,6 +56,12 @@ export type FixtureRun =
  * daemon takes: discover its branches, capture each worktree into the shadow
  * the way the watcher does, commit both captures there, merge them from their
  * merge base, and hand the merge to every analyzer.
+ *
+ * The same core calls in the same order, not the daemon itself: what lives
+ * only in its run pipeline — the verdict cache, reconciling Findings across
+ * runs, recapturing a side whose tree the shadow lost — is not exercised here.
+ * That is what scoring analyzers needs; the two can drift, and a change to the
+ * order there belongs here too.
  *
  * The directory is removed whatever happens. Nothing is written anywhere else:
  * the repository, its shadow and the shadow's data dir all live under it.

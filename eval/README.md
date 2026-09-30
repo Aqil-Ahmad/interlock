@@ -33,7 +33,10 @@ in the format `fixtures/format.ts` defines: the base files, each branch's
 operations — committed, and left uncommitted in its worktree — and the expected
 outcome. `fixtures/generate.ts` is the one generator that turns any spec into a
 repository; `fixtures/runner.ts` takes it through discovery, the watcher's
-capture into the shadow, the speculative merge and every analyzer; and
+capture into the shadow, the speculative merge and every analyzer in core's
+`ANALYZER_PIPELINE` — the calls the daemon makes, in its order, but not the
+daemon's run pipeline itself, so its verdict cache and Finding reconciliation
+are not measured here; and
 `fixtures/score.ts` matches what was found against the labels, by the rule
 printed at the head of every report.
 
