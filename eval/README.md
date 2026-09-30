@@ -26,9 +26,26 @@ pnpm eval --suite fixtures
 pnpm bench                     # overhead benchmarks
 ```
 
+## The fixture suite
+
+A fixture is a declarative spec in `fixtures/textual.ts` or `fixtures/semantic.ts`,
+in the format `fixtures/format.ts` defines: the base files, each branch's
+operations — committed, and left uncommitted in its worktree — and the expected
+outcome. `fixtures/generate.ts` is the one generator that turns any spec into a
+repository; `fixtures/runner.ts` takes it through discovery, the watcher's
+capture into the shadow, the speculative merge and every analyzer; and
+`fixtures/score.ts` matches what was found against the labels, by the rule
+printed at the head of every report.
+
+The report is `reports/fixtures.md`, with the same data in `fixtures.json`.
+Two runs on the same machine write the same bytes.
+
 ## Adding a fixture
 
-1. Create the repo generator under `fixtures/<name>/`.
-2. Label the expected outcome exactly: which pair, which analyzer should catch it, which file and symbol.
-3. Add the negative twin where it makes sense — a pair that looks similar and is genuinely independent.
-4. Add the fixture before tuning the detector it exercises.
+1. Write the spec. Label the expected outcome exactly: the analyzer and class
+   that should catch it, the path it is about, the symbol, and the lines on each
+   branch, in that branch's own copy of the file.
+2. Add its negative twin — a pair that looks the same and is genuinely
+   independent. Precision is measured only against twins.
+3. Add the fixture before the analyzer or rule it exercises, and never change a
+   label or a fixture to improve a number: add a new one instead.
