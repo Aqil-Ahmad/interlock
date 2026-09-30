@@ -567,9 +567,10 @@ merge-tree` over the two commits reports the conflict — with neither side
   `packages/core/test/support/textual-fixtures.ts`, the file is not shared: the
   set must not move when a unit test's support file does. **Semantic rules are
   named here first** — `rename-vs-callsite`, `signature-vs-caller`,
-  `moved-export-vs-import` for `typecheck`, `same-symbol-dual-edit` and
-  `duplicate-implementation` for `ast-semantic` — so an analyzer written later
-  is scored against labels that predate it. **Matching:** a finding matches an
+  `moved-export-vs-import` for `typecheck`, `merge-breaks-test` for the
+  targeted tests on the same-symbol dual edit — so an analyzer written later is
+  scored against labels that predate it. The duplicate implementation is kept
+  as not detected by design (ADR-0006). **Matching:** a finding matches an
   unmatched expectation when the analyzer, the class and the path agree, the
   symbol appears in the finding's evidence, and on each side the expectation
   has a span for, the finding has a span on that branch, in that path, that

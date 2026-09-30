@@ -4,6 +4,12 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-09-30 — the two ast-semantic cases decided (ADR-0006)
+
+- **Decided, approved by the owner before the set merged:** the same-symbol dual edit is a behavioural conflict for the targeted tests, rule `merge-breaks-test`; the duplicate implementation is kept as not detected by design; the AST layer is measured as a pre-filter, and `evaluation.md` drops its AST precision target.
+- **Found — the first dual-edit fixture was no conflict.** Rejecting a discount over 100% and rounding the result are correct together; only a "both touched one function" matcher would have flagged them. The fixture now fixes one function in contradictory ways, each branch with a test; built by the generator, each branch passes `node --test` and the merge fails one. A new twin makes two compatible edits whose tests pass merged.
+- **Format — `notDetected`,** a reason on a case the set keeps and no analyzer is meant to catch: it expects nothing, a finding on it is a false positive, and the report lists it apart.
+
 ## 2026-09-30 — the two ast-semantic cases get a decision task
 
 - **Added — M4 task "Decide what catches the two `ast-semantic` cases".** The open question sat inside the pre-filter's constraints with no checkbox. Its labels also disagree with M4's own exit criterion, which gives behavioural conflicts like `same-symbol-dual-edit` to the targeted-test analyzer; `duplicate-implementation` breaks nothing any analyzer here can see. M8's metric freeze now depends on it.
