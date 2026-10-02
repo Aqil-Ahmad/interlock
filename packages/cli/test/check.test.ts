@@ -228,6 +228,34 @@ describe('interlock check', () => {
     });
   });
 
+  describe('with one watched repository inside another', () => {
+    it('checks the innermost repository the directory is in', async () => {
+      // Its own repository, ignored by the outer one, the way a vendored
+      // checkout sits inside a project.
+      const inner = join(root, 'vendor');
+      execFileSync('git', ['init', '-q', '-b', 'trunk', inner], { stdio: 'pipe' });
+      git(inner, 'config', 'user.name', 'Interlock Test');
+      git(inner, 'config', 'user.email', 'test@example.invalid');
+      writeFileSync(join(inner, 'lib.ts'), 'export const lib = 1;\n');
+      git(inner, 'add', '-A');
+      git(inner, 'commit', '-qm', 'lib');
+      git(inner, 'branch', 'patch');
+      writeFileSync(join(root, '.gitignore'), 'vendor/\n');
+      daemon = createDaemon({
+        config: resolveConfig({ dataDir, repos: [root, inner], daemon: { port: 0 } }),
+        logger: createLogger('test', { level: 'error', sink: () => undefined }),
+        sweepIntervalMs: 60 * 60_000,
+        watchFactory: silent,
+      });
+      await daemon.start();
+      io = { ...io, cwd: () => inner };
+
+      // `patch` and `trunk` exist only in the inner repository.
+      expect(await check('patch')).toBe(0);
+      expect(stdout()).toContain('patch and trunk merge cleanly');
+    });
+  });
+
   describe('without a daemon', () => {
     it('says none is running, and exits 69', async () => {
       expect(await check('one', 'two')).toBe(69);

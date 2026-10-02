@@ -256,8 +256,19 @@ describe('a check', () => {
 
   it('stops waiting when the caller goes, without calling it a timeout', async () => {
     const caller = new AbortController();
-    const { checks } = harness([() => new Promise<CheckOutcome>(() => undefined)]);
-    const asking = ask(checks, {}, caller.signal);
+    let waiting: () => void = () => undefined;
+    const reached = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    const { checks } = harness([
+      () => {
+        waiting();
+        return new Promise<CheckOutcome>(() => undefined);
+      },
+    ]);
+    const asking = ask(checks, { timeoutMs: 60_000 }, caller.signal);
+    // Hung up while the check waits on its run, not before it started.
+    await reached;
     caller.abort();
     const error = await asking.catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(InterlockError);
