@@ -15,10 +15,11 @@ import { Agent, request } from 'node:http';
 import type { IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createLogger, resolveConfig, tokenPath, ulid } from '@interlock/shared';
+import { InterlockError, createLogger, resolveConfig, tokenPath, ulid } from '@interlock/shared';
 import type { BranchRefId, InterlockConfig, LogRecord, RepoId } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApiServer, ensureToken } from '../src/api/index.js';
+import type { CheckRequest, Checks } from '../src/check.js';
 import type { ApiServer, Bound } from '../src/api/index.js';
 import { EventBus } from '../src/bus/index.js';
 import { createSessionRegistry } from '../src/hooks/index.js';
@@ -35,7 +36,13 @@ import { rejection } from './support/rejection.js';
  */
 
 /** Paths that exist, plus one that does not — every one of them needs a token. */
-const ROUTES = ['/api/health', '/api/repos', '/api/repos/x/branches', '/api/nope'] as const;
+const ROUTES = [
+  '/api/health',
+  '/api/repos',
+  '/api/repos/x/branches',
+  '/api/repos/x/check',
+  '/api/nope',
+] as const;
 
 describe('localhost API', () => {
   let dataDir: string;
@@ -46,6 +53,9 @@ describe('localhost API', () => {
   let sessions: SessionRegistry;
   let logs: LogRecord[];
   let agent: Agent;
+  /** What the check route runs, or null for a daemon still starting. */
+  let checks: Checks | null;
+  let asked: { repoId: RepoId; request: CheckRequest; signal: AbortSignal }[];
 
   /**
    * Driven through `node:http` rather than `fetch`, because `Host` is a
@@ -130,7 +140,21 @@ describe('localhost API', () => {
     const logger = createLogger('test', { level: 'trace', sink: (record) => logs.push(record) });
     const bus = new EventBus({ logger });
     sessions = createSessionRegistry({ store, bus, logger, staleAfterMs: 60_000 });
-    api = createApiServer({ config, store, sessions, logger });
+    asked = [];
+    checks = {
+      run: (repoId, request, signal) => {
+        asked.push({ repoId, request, signal });
+        return Promise.resolve({
+          repoId,
+          a: { id: ulid<BranchRefId>(), name: request.a },
+          b: { id: ulid<BranchRefId>(), name: request.b ?? 'main' },
+          mergeBaseSha: 'a'.repeat(40),
+          clean: true,
+          findings: [],
+        });
+      },
+    };
+    api = createApiServer({ config, store, sessions, checks: () => checks, logger });
     bound = await api.start();
   });
 
@@ -301,12 +325,128 @@ describe('localhost API', () => {
     expect(logs.filter((record) => record.level === 'error')).toStrictEqual([]);
   });
 
-  it('serves one POST route, and only for the session hook', async () => {
+  it('serves two POST routes, the session hook and a check, and nothing else', async () => {
     // Everything else stays GET-only, so nothing becomes writable by accident.
     expect((await call('/api/repos', { token: bound.token, method: 'POST' })).status).toBe(405);
-    const get = await call('/api/sessions', { token: bound.token });
-    expect(get.status).toBe(405);
-    expect(get.headers.allow).toBe('POST');
+    for (const path of ['/api/sessions', '/api/repos/x/check']) {
+      const get = await call(path, { token: bound.token });
+      expect(get.status).toBe(405);
+      expect(get.headers.allow).toBe('POST');
+    }
+    expect(asked).toEqual([]);
+  });
+
+  describe('the check route', () => {
+    const post = (body: unknown, raw?: string) =>
+      call('/api/repos/01JBQ0000000000000000REPO/check', {
+        token: bound.token,
+        method: 'POST',
+        ...(raw === undefined ? { body } : { raw }),
+      });
+
+    it('runs the named pair for the repository in the path, and answers with its state', async () => {
+      const response = await post({ a: 'one', b: 'two', timeoutMs: 5_000 });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        check: { a: { name: 'one' }, b: { name: 'two' }, clean: true, findings: [] },
+      });
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toMatchObject({
+        repoId: '01JBQ0000000000000000REPO',
+        request: { a: 'one', b: 'two', timeoutMs: 5_000 },
+      });
+    });
+
+    it('takes one name, for a check against the default branch, and a default deadline', async () => {
+      expect((await post({ a: 'one' })).status).toBe(200);
+      expect(asked[0]!.request).toEqual({ a: 'one', b: null, timeoutMs: 60_000 });
+    });
+
+    it('needs the token like every route, before reading the body', async () => {
+      const response = await call('/api/repos/x/check', {
+        token: null,
+        method: 'POST',
+        body: { a: 'one' },
+      });
+      expect(response.status).toBe(401);
+      expect(asked).toEqual([]);
+    });
+
+    it.each([
+      [{}, 'a must be a branch name'],
+      [{ a: '' }, 'a must be a branch name'],
+      [{ a: 1 }, 'a must be a branch name'],
+      [{ a: 'one', b: 2 }, 'b must be a branch name'],
+      [{ a: 'x'.repeat(1_025) }, 'longer than 1024'],
+      [{ a: 'one', timeoutMs: 500 }, 'timeoutMs must be'],
+      [{ a: 'one', timeoutMs: 1.5e3 + 0.5 }, 'timeoutMs must be'],
+      [{ a: 'one', timeoutMs: 600_001 }, 'timeoutMs must be'],
+      [{ a: 'one', cwd: '/' }, 'unknown field "cwd"'],
+      [[], 'must be a JSON object'],
+    ])('refuses %j, and runs nothing', async (body, problem) => {
+      const response = await post(body);
+      expect(response.status).toBe(400);
+      expect(response.body).toMatchObject({ error: { code: 'API_REQUEST_INVALID' } });
+      const { problems } = (response.body as { error: { details: { problems: string[] } } }).error
+        .details;
+      expect(problems.join('; ')).toContain(problem);
+      expect(asked).toEqual([]);
+    });
+
+    it("refuses a body past its cap, which is far below the hook route's", async () => {
+      const response = await post(undefined, JSON.stringify({ a: 'x'.repeat(5_000) }));
+      expect([0, 400]).toContain(response.status);
+      expect(asked).toEqual([]);
+    });
+
+    it('answers a daemon still starting as unavailable, not as a missing route', async () => {
+      checks = null;
+      const response = await post({ a: 'one' });
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({ error: { code: 'DAEMON_UNREACHABLE' } });
+    });
+
+    it.each([
+      ['BRANCH_NOT_FOUND', false, 404],
+      ['BRANCHES_UNRELATED', false, 409],
+      ['CHECK_TIMEOUT', true, 503],
+    ] as const)('answers %s with %i', async (code, infra, status) => {
+      checks = { run: () => Promise.reject(new InterlockError(code, 'no', { infra })) };
+      const response = await post({ a: 'one' });
+      expect(response.status).toBe(status);
+      expect(response.body).toMatchObject({ error: { code } });
+    });
+
+    it('stops waiting when the caller hangs up', async () => {
+      let aborted: () => void = () => undefined;
+      const stopped = new Promise<void>((resolve) => {
+        aborted = resolve;
+      });
+      checks = {
+        run: (_repoId, _request, signal) =>
+          new Promise((_, reject) => {
+            signal.addEventListener('abort', () => {
+              aborted();
+              reject(new InterlockError('API_REQUEST_INVALID', 'gone', { infra: true }));
+            });
+          }),
+      };
+      const outgoing = request({
+        agent: false,
+        host: '127.0.0.1',
+        port: bound.port,
+        path: '/api/repos/x/check',
+        method: 'POST',
+        headers: { Authorization: `Bearer ${bound.token}`, 'Content-Type': 'application/json' },
+      });
+      outgoing.on('error', () => undefined);
+      outgoing.end(JSON.stringify({ a: 'one' }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      outgoing.destroy();
+
+      await stopped;
+    });
   });
 
   it('registers a session from a hook payload and lists it back', async () => {

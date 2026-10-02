@@ -31,6 +31,10 @@ export const INTERLOCK_ERROR_CODES = [
   'REPO_NOT_FOUND',
   'REPO_NOT_GIT',
   'REPO_BARE',
+  /** A branch name that names no branch of the repository. */
+  'BRANCH_NOT_FOUND',
+  /** Two branches with no commit in common: there is no merge to speculate about. */
+  'BRANCHES_UNRELATED',
   'GIT_COMMAND_FAILED',
   'GIT_COMMAND_REFUSED',
   'SHADOW_UNAVAILABLE',
@@ -40,6 +44,8 @@ export const INTERLOCK_ERROR_CODES = [
   'SANDBOX_TIMEOUT',
   'TOOLCHAIN_UNSUPPORTED',
   'ANALYZER_INFRA_FAILURE',
+  /** A check that did not land before its deadline: the daemon is busy, not the pair clean. */
+  'CHECK_TIMEOUT',
   'STORE_UNAVAILABLE',
   'STORE_MIGRATION_FAILED',
   'DAEMON_UNREACHABLE',

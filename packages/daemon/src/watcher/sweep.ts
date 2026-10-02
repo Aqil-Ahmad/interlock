@@ -58,6 +58,12 @@ export interface Sweep {
    * what contains that.
    */
   reconcile(rootPath: string): Promise<void>;
+  /**
+   * A pass that begins after this call, for a caller that must see what is on
+   * disk now: one already running may have read a worktree before the edit
+   * that matters, so it is waited out rather than joined.
+   */
+  reconcileFresh(rootPath: string): Promise<void>;
   /** Reconcile every repository, containing a failure to the one it came from. */
   all(rootPaths: readonly string[]): Promise<SweepOutcome>;
   /**
@@ -272,6 +278,14 @@ export function createSweep(options: SweepOptions): Sweep {
     reconcile(rootPath: string): Promise<void> {
       // Joined rather than queued: a second pass asked for while one is running
       // would read the same git state and find nothing new to say.
+      return inFlight.get(rootPath) ?? start(rootPath);
+    },
+
+    async reconcileFresh(rootPath: string): Promise<void> {
+      // Its outcome is that pass's caller's to report; this one only needs it
+      // finished before starting its own.
+      await inFlight.get(rootPath)?.catch(() => undefined);
+      // Joining here is safe: anything in flight now started after this call.
       return inFlight.get(rootPath) ?? start(rootPath);
     },
 

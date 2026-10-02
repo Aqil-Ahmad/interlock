@@ -4,6 +4,8 @@ import type { GitRunner } from '@interlock/core';
 import { INTERLOCK_PROTOCOL_VERSION, notImplemented } from '@interlock/shared';
 import type { DaemonRuntime, EventRecord, InterlockConfig, Logger } from '@interlock/shared';
 import { createApiServer } from './api/index.js';
+import { createChecks } from './check.js';
+import type { Checks } from './check.js';
 import { holdDataDir, refuseDataDirInRepos } from './data-dir.js';
 import type { DataDirHold } from './data-dir.js';
 import type { ApiServer } from './api/index.js';
@@ -181,7 +183,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
         logger: options.logger,
         staleAfterMs: config.sessions.staleAfterMs,
       });
-      api = createApiServer({ config, store, sessions, logger: options.logger });
+      let checks: Checks | null = null;
+      api = createApiServer({
+        config,
+        store,
+        sessions,
+        checks: () => checks,
+        logger: options.logger,
+      });
       const bound = await api.start();
 
       const cadence = options.sweepIntervalMs ?? DEFAULT_REAP_INTERVAL_MS;
@@ -222,6 +231,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
         ...(options.watchFactory === undefined ? {} : { watchFactory: options.watchFactory }),
       });
       await watcher.start();
+      const watching = watcher;
+      checks = createChecks({
+        store,
+        refreshRepo: (rootPath) => watching.refreshRepo(rootPath),
+        planPair: (repoId, a, b) => runs.planPair(repoId, a, b),
+        check: (candidate) => scheduling.check(candidate),
+        logger: options.logger,
+      });
 
       // Published last, so the file appearing means the daemon can answer
       // about the repositories it watches rather than merely accept a socket.

@@ -1,5 +1,5 @@
 import { DEFAULT_POOL_SIZE } from '@interlock/core';
-import { isInterlockError } from '@interlock/shared';
+import { InterlockError, isInterlockError } from '@interlock/shared';
 import type {
   BranchRefId,
   EventId,
@@ -85,6 +85,11 @@ export type PairRunResult =
   /** An analyzer could not run. Never a Finding; backed off like any infrastructure. */
   | { readonly kind: 'infra-failure'; readonly component: string; readonly message: string };
 
+/** What one run of a checked pair came to: a result, or the error it threw. */
+export type CheckOutcome =
+  | { readonly kind: 'landed'; readonly result: PairRunResult }
+  | { readonly kind: 'failed'; readonly error: unknown };
+
 /** The time source, injectable so ordering is testable without waiting. */
 export interface Clock {
   now(): number;
@@ -137,8 +142,16 @@ export interface Scheduler {
   start(): void;
   /** Unsubscribe, cancel timers, and wait for runs in flight to land. */
   stop(): Promise<void>;
-  /** Queue a pair immediately, bypassing debounce (used by `interlock check`). */
-  enqueueNow(candidate: PairCandidate): Promise<void>;
+  /**
+   * Run a pair now, whatever its overlap, and hand back what that run did.
+   *
+   * What `interlock check` waits on. The outcome is the run launched from the
+   * queue entry this call made or joined — never a run of the pair already in
+   * flight, which began before the caller asked and judged older content. A
+   * manual entry starts ahead of the queue and ignores the pair's backoff: a
+   * person waiting is the reason it exists. Rejects once the scheduler stops.
+   */
+  check(candidate: PairCandidate): Promise<CheckOutcome>;
   /** Resolves once nothing is running and nothing queued can start yet. */
   idle(): Promise<void>;
   readonly queueDepth: number;
@@ -201,12 +214,22 @@ interface QueueEntry {
   candidate: PairCandidate;
   cause: EventId;
   readonly enqueuedAt: number;
+  /** Asked for by a person: started first, and never held back by a backoff. */
+  manual: boolean;
+  /** Checks waiting on the run this entry becomes. */
+  readonly waiters: Waiter[];
+}
+
+interface Waiter {
+  resolve(outcome: CheckOutcome): void;
+  reject(error: unknown): void;
 }
 
 interface Running {
   readonly candidate: PairCandidate;
   readonly controller: AbortController;
   readonly done: Promise<void>;
+  readonly waiters: readonly Waiter[];
 }
 
 interface HotPair {
@@ -344,16 +367,17 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
     candidate: PairCandidate,
     reason: 'branch-moved' | 'manual' | 'retry',
     cause: EventId | null,
-  ): Promise<void> => {
+    waiter?: Waiter,
+  ): Promise<boolean> => {
     // A run landing after `stop` would otherwise queue its retry, and publish
     // it, into a scheduler nothing will ever pump again.
-    if (!active) return;
+    if (!active) return false;
     // Never merged: git conflicts only where both sides changed a path or its
     // parent, so a pair with nothing in common cannot conflict textually, and
     // without an overlap reason it is not a semantic candidate either.
     if (!mustRun(candidate) && reason !== 'manual') {
       counts.noOverlap += 1;
-      return;
+      return false;
     }
     const key = candidate.pair.key;
     const scheduled = await bus.publish(
@@ -367,15 +391,22 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
       },
       cause === null ? {} : { causedBy: cause },
     );
-    const queued = queue.get(key);
+    const manual = reason === 'manual';
+    let queued = queue.get(key);
     if (queued === undefined) {
-      queue.set(key, { candidate, cause: scheduled, enqueuedAt: clock.now() });
+      queued = { candidate, cause: scheduled, enqueuedAt: clock.now(), manual, waiters: [] };
+      queue.set(key, queued);
     } else {
       // Keeps its place in line: re-asking must not reset a pair's age.
       queued.candidate = candidate;
       queued.cause = scheduled;
+      queued.manual ||= manual;
     }
+    // In the same turn as the entry, so no pump in between can launch it
+    // without the check that asked for it.
+    if (waiter !== undefined) queued.waiters.push(waiter);
     counts.maxQueueDepth = Math.max(counts.maxQueueDepth, queue.size);
+    return true;
   };
 
   /** Start what can start, and arrange to be woken when a backoff ends. */
@@ -385,14 +416,18 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
     while (running.size < config.scheduler.concurrency) {
       let best: [MergePairKey, QueueEntry] | null = null;
       let bestPriority = -Infinity;
+      let bestManual = false;
       for (const [key, entry] of queue) {
         // One run per pair at a time; the queued request waits for it.
         if (running.has(key)) continue;
-        if ((backoff.get(key)?.until ?? 0) > now) continue;
+        if (!entry.manual && (backoff.get(key)?.until ?? 0) > now) continue;
         const priority = effectivePriority(entry, now);
-        if (priority > bestPriority) {
+        // A manual entry outranks every other, in the order they were asked.
+        const ahead = entry.manual ? !bestManual : !bestManual && priority > bestPriority;
+        if (ahead) {
           best = [key, entry];
           bestPriority = priority;
+          bestManual = entry.manual;
         }
       }
       if (best === null) break;
@@ -408,7 +443,9 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
     let soonest = Infinity;
     for (const key of queue.keys()) {
       const until = backoff.get(key)?.until ?? 0;
-      if (until > now && !running.has(key)) soonest = Math.min(soonest, until);
+      if (until > now && !running.has(key) && queue.get(key)?.manual !== true) {
+        soonest = Math.min(soonest, until);
+      }
     }
     if (soonest !== Infinity) {
       wake = clock.setTimeout(() => {
@@ -419,7 +456,7 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
   };
 
   const launch = (entry: QueueEntry, priority: number): void => {
-    const { candidate, cause } = entry;
+    const { candidate, cause, waiters } = entry;
     const key = candidate.pair.key;
     const controller = new AbortController();
     counts.started += 1;
@@ -435,8 +472,16 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
       resolve(options.runPair(request, controller.signal));
     })
       .then(
-        (result) => land(candidate, result, cause),
-        (error: unknown) => fail(candidate, error, cause),
+        async (result) => {
+          // Told before the outcome is handled: a retry it queues is a new
+          // entry, and a check that wants another run asks for its own.
+          for (const waiter of waiters) waiter.resolve({ kind: 'landed', result });
+          await land(candidate, result, cause);
+        },
+        async (error: unknown) => {
+          for (const waiter of waiters) waiter.resolve({ kind: 'failed', error });
+          await fail(candidate, error, cause);
+        },
       )
       .catch((error: unknown) => {
         log.error('handling a run outcome failed', { reason: reasonOf(error) });
@@ -445,7 +490,7 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
         running.delete(key);
         pump();
       });
-    running.set(key, { candidate, controller, done });
+    running.set(key, { candidate, controller, done, waiters });
   };
 
   /** `cause` is the `pair.scheduled` the run answered, which a retry follows from. */
@@ -669,15 +714,23 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
       pending.clear();
       if (wake !== null) clock.clearTimeout(wake);
       wake = null;
+      for (const entry of queue.values()) {
+        for (const waiter of entry.waiters) waiter.reject(stopping());
+      }
       queue.clear();
       for (const run of running.values()) run.controller.abort();
       await idle();
       log.info('scheduler stopped', { ...statsOf() });
     },
 
-    async enqueueNow(candidate: PairCandidate): Promise<void> {
-      await enqueue(candidate, 'manual', null);
+    async check(candidate: PairCandidate): Promise<CheckOutcome> {
+      let waiter!: Waiter;
+      const outcome = new Promise<CheckOutcome>((resolve, reject) => {
+        waiter = { resolve, reject };
+      });
+      if (!(await enqueue(candidate, 'manual', null, waiter))) throw stopping();
       pump();
+      return outcome;
     },
 
     idle,
@@ -700,6 +753,14 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
       evictionRate: counts.escalations === 0 ? null : counts.evictions / counts.escalations,
     };
   }
+}
+
+/** What a check is told when the scheduler stops under it, or was never running. */
+function stopping(): InterlockError {
+  return new InterlockError('DAEMON_UNREACHABLE', 'The daemon is stopping', {
+    remedy: 'Start the daemon again and repeat the check.',
+    infra: true,
+  });
 }
 
 function reasonOf(error: unknown): string {

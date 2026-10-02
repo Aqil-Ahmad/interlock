@@ -4,6 +4,8 @@ import { INTERLOCK_PROTOCOL_VERSION, InterlockError, isInterlockError } from '@i
 import type { InterlockConfig, Logger, RepoId } from '@interlock/shared';
 import { parseSessionRegistration } from '../hooks/index.js';
 import type { SessionRegistry } from '../hooks/index.js';
+import { parseCheckRequest } from '../check.js';
+import type { Checks } from '../check.js';
 import type { Store } from '../store/index.js';
 import { bearerToken, ensureToken, tokenMatches } from './token.js';
 
@@ -38,6 +40,12 @@ export interface ApiOptions {
   readonly config: InterlockConfig;
   readonly store: Store;
   readonly sessions: SessionRegistry;
+  /**
+   * What runs a check, once there is one. The listener is up before the
+   * scheduler and the watcher it needs, so it is asked for per request; until
+   * then a check is refused as the daemon still starting.
+   */
+  readonly checks?: () => Checks | null;
   readonly logger: Logger;
 }
 
@@ -62,6 +70,9 @@ const REQUEST_TIMEOUT_MS = 30_000;
  * exists to prevent.
  */
 const MAX_BODY_BYTES = 16 * 1024;
+
+/** A check request is two branch names and a deadline. */
+const MAX_CHECK_BODY_BYTES = 4 * 1024;
 
 /** Hostnames a loopback listener may legitimately be addressed by. */
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['127.0.0.1', 'localhost']);
@@ -146,8 +157,38 @@ export function createApiServer(options: ApiOptions): ApiServer {
       });
     }
 
-    // The one route that writes, and the one that reads a body. Everything
+    // The two routes that write, and the only two that read a body. Everything
     // else answers `GET` alone, so nothing else becomes writable by accident.
+    if (
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'repos' &&
+      segments[3] === 'check'
+    ) {
+      if (request.method !== 'POST') {
+        methodNotAllowed(request, response, 'POST');
+        return;
+      }
+      const body = await readJsonBody(request, MAX_CHECK_BODY_BYTES);
+      const parsed = parseCheckRequest(body);
+      const checks = options.checks?.() ?? null;
+      if (checks === null) {
+        throw new InterlockError('DAEMON_UNREACHABLE', 'The daemon is still starting', {
+          remedy: 'Check again in a moment.',
+          infra: true,
+        });
+      }
+      // A caller that hangs up stops the wait; the run it started finishes and
+      // is recorded all the same.
+      const gone = new AbortController();
+      response.on('close', () => {
+        if (!response.writableEnded) gone.abort();
+      });
+      const check = await checks.run(segments[2] as RepoId, parsed, gone.signal);
+      send(response, 200, { check });
+      return;
+    }
+
     if (matches(segments, ['api', 'sessions'])) {
       if (request.method !== 'POST') {
         methodNotAllowed(request, response, 'POST');
@@ -437,7 +478,10 @@ function statusFor(error: InterlockError): number {
     case 'UNAUTHORIZED':
       return 401;
     case 'REPO_NOT_FOUND':
+    case 'BRANCH_NOT_FOUND':
       return 404;
+    case 'BRANCHES_UNRELATED':
+      return 409;
     case 'CONFIG_INVALID':
     case 'API_REQUEST_INVALID':
       return 400;

@@ -13,6 +13,7 @@ import { EventBus } from '../bus/index.js';
 import { createScheduler } from './index.js';
 import type {
   Clock,
+  CheckOutcome,
   PairCandidate,
   PairPlan,
   PairRunRequest,
@@ -1055,13 +1056,104 @@ describe('scheduler', () => {
   });
 
   describe('lifecycle', () => {
-    it('queues a manual request at once, whatever its overlap', async () => {
+    it('runs a checked pair at once, whatever its overlap, and hands back what it did', async () => {
       make();
       answer = (request) => analysed(request);
-      await scheduler.enqueueNow(candidate(branch(), branch(), 'none'));
-      await settle();
-      expect(scheduler.stats.analysed).toBe(1);
+
+      const outcome = await scheduler.check(candidate(branch(), branch(), 'none'));
+
+      expect(outcome).toMatchObject({ kind: 'landed', result: { kind: 'analysed' } });
       expect(published('pair.scheduled')[0]!.payload).toMatchObject({ reason: 'manual' });
+    });
+
+    it('answers a check with the run it asked for, not one already in flight', async () => {
+      make();
+      const [x, y] = [branch(), branch()];
+      const pair = candidate(x, y, 'file');
+      plans.set(x, { candidates: [pair], declined: 0 });
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+      expect(held).toHaveLength(1);
+
+      let told: CheckOutcome | null = null;
+      const checking = scheduler.check(pair).then((outcome) => {
+        told = outcome;
+      });
+      held[0]!.resolve({ kind: 'superseded' });
+      await settle();
+      // The run in flight began before the check and judged older content.
+      expect(told).toBeNull();
+      expect(held).toHaveLength(2);
+
+      held[1]!.resolve(analysed(held[1]!.request, 'fresh'));
+      await checking;
+      expect(told).toMatchObject({ kind: 'landed', result: { contentKey: 'fresh' } });
+    });
+
+    it('tells a check about a run that threw', async () => {
+      make();
+      const checking = scheduler.check(candidate(branch(), branch(), 'file'));
+      await settle();
+      held[0]!.reject(new Error('a bug'));
+
+      expect(await checking).toMatchObject({ kind: 'failed', error: { message: 'a bug' } });
+    });
+
+    it('starts a checked pair ahead of the queue', async () => {
+      make();
+      const [x, y, z] = [branch(), branch(), branch()];
+      const blocking = candidate(x, y, 'file');
+      const waiting = candidate(x, z, 'file');
+      plans.set(x, { candidates: [blocking, waiting], declined: 0 });
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+      expect(held).toHaveLength(1);
+
+      const checked = candidate(y, z, 'none');
+      const checking = scheduler.check(checked);
+      await settle();
+      held[0]!.resolve(analysed(held[0]!.request));
+      await settle();
+
+      // Concurrency one: the next to start is the check, though the file-tier
+      // pair waiting was queued first and ranks higher.
+      expect(held[1]!.request.candidate.pair.key).toBe(checked.pair.key);
+      held[1]!.resolve(analysed(held[1]!.request));
+      await checking;
+    });
+
+    it('runs a checked pair without waiting out its backoff', async () => {
+      make();
+      const pair = candidate(branch(), branch(), 'file');
+      answer = () => ({ kind: 'infra-failure', component: 'test', message: 'down' });
+      await scheduler.check(pair);
+      await settle();
+      // Backed off now, and retried on its own only once the backoff ends.
+      answer = (request) => analysed(request);
+
+      const outcome = await scheduler.check(pair);
+
+      expect(outcome).toMatchObject({ kind: 'landed', result: { kind: 'analysed' } });
+    });
+
+    it('rejects a check still queued when it stops, and any asked for after', async () => {
+      make();
+      const blocking = scheduler.check(candidate(branch(), branch(), 'file'));
+      await settle();
+      const queued = scheduler.check(candidate(branch(), branch(), 'file'));
+      await settle();
+
+      const stopping = scheduler.stop();
+      held[0]!.resolve({ kind: 'superseded' });
+      await stopping;
+
+      await expect(queued).rejects.toMatchObject({ code: 'DAEMON_UNREACHABLE' });
+      expect(await blocking).toMatchObject({ result: { kind: 'superseded' } });
+      await expect(scheduler.check(candidate(branch(), branch(), 'file'))).rejects.toMatchObject({
+        code: 'DAEMON_UNREACHABLE',
+      });
     });
 
     it('stops listening, cancels debounces, and waits for runs in flight', async () => {

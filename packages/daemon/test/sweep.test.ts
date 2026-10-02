@@ -477,6 +477,23 @@ describe('reconciliation sweep', () => {
     expect(of('branch.appeared')).toHaveLength(1);
   });
 
+  it('runs a fresh pass after one in flight rather than joining it', async () => {
+    await sweep.reconcile(root);
+    const { sweep: guarded, passes, atGate, release } = countingSweep();
+
+    const running = guarded.reconcile(root);
+    await atGate;
+    // Joined, it would hand back the pass that is held at the gate, which
+    // may have read the repository before whatever the caller is about to
+    // ask about. A second pass, begun after the first, cannot have.
+    const fresh = guarded.reconcileFresh(root);
+    expect(fresh).not.toBe(running);
+    release();
+    await Promise.all([running, fresh]);
+
+    expect(passes()).toBe(2);
+  });
+
   it('reports a branch that moved to another worktree', async () => {
     git(root, 'branch', 'feature');
     await sweep.reconcile(root);
