@@ -544,7 +544,7 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Done when:** `interlock status` names a repository whose checks are held for a collection, with how long it has been; `--json` carries the same; the API carries it without a store migration, since it is live state.
       **Constraints:** read the pause from the registry's own measure (`pausedMs`), not a guess. Worth doing once the bench records the pause at the default window: under realistic load it measured about a second.
 
-- [ ] **`interlock check A B`**
+- [x] **`interlock check A B`**
       **Files:** `packages/cli/src/commands/`, `packages/cli/src/client/`, `packages/cli/src/render.ts`, `packages/daemon/src/api/server.ts`, `packages/daemon/src/scheduler/`, `packages/daemon/src/watcher/`, `packages/daemon/src/check.ts`, `docs/architecture.md`, `docs/threat-model.md`
       **What:** force an immediate merge of a named pair, wait for it, and print the pair's Findings — the manual trigger, a debugging tool and a scriptable pre-merge gate.
 
