@@ -4,6 +4,10 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-04 — copy-on-write and VM snapshots, recorded as deferred
+
+- **Deferred, in M3's new "Deferred" section:** copy-on-write slot fills and dependencies, and forked VM snapshots for the sandbox. Slot clones would save about 1 GB of disk on a large repository and almost no time, since cold fills are rare, at the cost of a second code path CI cannot test and of untracked files — `.env` among them — riding into a slot. VM snapshots need Linux KVM. Each names what would justify building it.
+
 ## 2026-09-30 — the two ast-semantic cases decided (ADR-0006)
 
 - **Decided, approved by the owner before the set merged:** the same-symbol dual edit is a behavioural conflict for the targeted tests, rule `merge-breaks-test`; the duplicate implementation is kept as not detected by design; the AST layer is measured as a pre-filter, and `evaluation.md` drops its AST precision target.
