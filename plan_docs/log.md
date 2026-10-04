@@ -12,6 +12,10 @@ Short entries: done, decided, blocked. Newest first.
 - **Taken as a note — manual checks always start first.** A script checking in a loop holds the automatic pairs back; accepted for a token-protected loopback tool, and written into the scheduler notes with the remedy.
 - **Deferred as a task — excerpts reach agents unwrapped.** Agreed, not blocking: a new M2 task moves `wrapUntrusted` into `shared` and wraps the excerpt blocks in `check`'s human output.
 
+## 2026-10-04 — copy-on-write and VM snapshots, recorded as deferred
+
+- **Deferred, in M3's new "Deferred" section:** copy-on-write slot fills and dependencies, and forked VM snapshots for the sandbox. Slot clones would save about 1 GB of disk on a large repository and almost no time, since cold fills are rare, at the cost of a second code path CI cannot test and of untracked files — `.env` among them — riding into a slot. VM snapshots need Linux KVM. Each names what would justify building it.
+
 ## 2026-10-02 — `interlock check`
 
 - **Task rewritten before starting.** The issue's approach held — through the daemon, one route modelled on sessions, wait on the scheduler, report the pair's state, plan one named pair — with gaps that would have shipped wrong answers. The rewrite is in the milestone.
@@ -22,9 +26,6 @@ Short entries: done, decided, blocked. Newest first.
 - **Decided — deadlines.** Default 60 s, 1 s to 10 min, set with `--timeout`; the client waits 5 s past it so the daemon's own timeout, which says why, arrives first. A client-side timeout on this route is `CHECK_TIMEOUT`, not "nothing is listening", which would have exited 69.
 - **Flagged for a human decision — security posture.** This is the API's second write route: it starts work and writes runs and Findings (threat model T12). And `interlock check` prints repository excerpts, escaped for the terminal, to a terminal an agent running it reads without `wrapUntrusted()`.
 - **Mutation: 38 mutations, 38 caught,** after three survivors, each a missing test: a hang-up while the check waits on its run (the test aborted before it started waiting), the innermost of nested watched repositories, and an escaped excerpt (the harness had not run the render tests).
-## 2026-10-04 — copy-on-write and VM snapshots, recorded as deferred
-
-- **Deferred, in M3's new "Deferred" section:** copy-on-write slot fills and dependencies, and forked VM snapshots for the sandbox. Slot clones would save about 1 GB of disk on a large repository and almost no time, since cold fills are rare, at the cost of a second code path CI cannot test and of untracked files — `.env` among them — riding into a slot. VM snapshots need Linux KVM. Each names what would justify building it.
 
 ## 2026-09-30 — the two ast-semantic cases decided (ADR-0006)
 
