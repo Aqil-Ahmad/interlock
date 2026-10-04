@@ -63,3 +63,29 @@ _which branch caused which half_ of each one.
       **Files:** `packages/core/src/analyzers/analyzer.ts`
       **What:** Docker down, image missing, toolchain unknown, timeout, dependencies unavailable because the lockfile changed.
       **Done when:** each produces `infra-failure` and is never shown to a user as a conflict. An analyzer that cannot run must not report clean.
+
+## Deferred — measure before building
+
+Options considered and not taken, with what would justify them. None is a task:
+each stays here until a measurement shows the problem it solves.
+
+- **Copy-on-write slot fills.** Start a pool slot as a filesystem clone of the
+  user's checkout (`clonefile` on APFS, `cp --reflink` on btrfs and xfs), then
+  `reset --hard` to the merged commit, so only the files that differ are
+  written. Saves disk, not time: four slots of a 276 MB checkout drop from
+  about 1.1 GB to tens of MB, while a cold fill goes from about 1.6 s to about
+  0.2 s — and cold fills are rare, since slots are sticky and updated by delta.
+  Costs two code paths, the clone and an ext4 fallback, with CI on ext4 never
+  testing the clone; and the clone carries the user's untracked files — build
+  output, `.env` — which must be removed or excluded, a new way to run a check
+  on a dirty slot or leak a secret into the sandbox. Revisit when the pool's
+  disk use is a measured complaint on large repositories.
+- **Copy-on-write dependencies.** A clone of `node_modules` per check instead
+  of a mount. Gains nothing while the sandbox mounts dependencies read-only,
+  which costs no disk either; worth it only if a check needs to write them.
+  Credential files are excluded from any copy, as from everything else.
+- **Forked VM snapshots for the sandbox.** Snapshot a booted sandbox with
+  dependencies installed and the compiler warm, and fork it per check: a start
+  in milliseconds, isolation stronger than a container — the residual risk
+  threat-model T2 names — and no port clashes. Needs Linux with KVM, so not
+  macOS, where the daemon runs; a fit for a hosted mode, not the local one.
