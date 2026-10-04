@@ -66,6 +66,15 @@ export interface RunPipeline {
   attach(): void;
   detach(): void;
   plan(repoId: RepoId, branchRefId: BranchRefId): Promise<PairPlan>;
+  /**
+   * Plan one named pair, as `plan` would plan it from either side — but never
+   * declined for having nothing in common, which is the reason a person asks
+   * for a pair by name.
+   *
+   * @throws InterlockError `BRANCH_NOT_FOUND` for a branch the store does not
+   *         hold; `BRANCHES_UNRELATED` for two with no commit in common.
+   */
+  planPair(repoId: RepoId, a: BranchRefId, b: BranchRefId): Promise<PairCandidate>;
   runPair(request: PairRunRequest, signal: AbortSignal): Promise<PairRunResult>;
   /**
    * The trees a queued check of this repository would merge: each branch's
@@ -463,6 +472,57 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
       candidates.push({ pair, overlap, target, openFindings });
     }
     return { candidates, declined };
+  };
+
+  const planPair = async (
+    repoId: RepoId,
+    a: BranchRefId,
+    b: BranchRefId,
+  ): Promise<PairCandidate> => {
+    const repo = await repoOf(repoId);
+    const branches = repo === null ? [] : await store.listBranchRefs(repoId);
+    const [one, two] = [a, b].map((id) => branches.find((branch) => branch.id === id));
+    if (repo === null || one === undefined || two === undefined) {
+      throw new InterlockError('BRANCH_NOT_FOUND', 'A branch of the pair is no longer there', {
+        details: { repoId, a, b },
+        remedy: 'List the branches with `interlock status` and check again.',
+      });
+    }
+    const handle = await handleOf(repo);
+    const base = await baseOf(handle, one.headSha, two.headSha);
+    if (base === null) {
+      throw new InterlockError('BRANCHES_UNRELATED', 'The two branches share no history', {
+        details: { a: one.id, b: two.id },
+        remedy:
+          'There is no merge base, so there is no merge to check. Pick two branches cut from one another.',
+      });
+    }
+    const key = makePairKey(one.id, two.id);
+    const stored = (await store.listMergePairs(repoId)).find((pair) => pair.key === key);
+    const [x, y] = one.id < two.id ? [one.id, two.id] : [two.id, one.id];
+    const pair = await store.upsertMergePair({
+      id: stored?.id ?? ulid<MergePairId>(),
+      repoId,
+      a: x,
+      b: y,
+      key,
+      mergeBaseSha: base,
+      priority: stored?.priority ?? 0,
+      lastRunAt: stored?.lastRunAt ?? null,
+      stale: true,
+    });
+    const openFindings = (await store.listOpenFindings(repoId)).some(
+      (finding) => makePairKey(finding.attribution.branchA, finding.attribution.branchB) === key,
+    );
+    return {
+      pair,
+      overlap: pairOverlap(
+        await changeSetOf(repo, handle, one),
+        await changeSetOf(repo, handle, two),
+      ),
+      target: one.name === repo.defaultBranch || two.name === repo.defaultBranch,
+      openFindings,
+    };
   };
 
   const runPair = async (request: PairRunRequest, signal: AbortSignal): Promise<PairRunResult> => {
@@ -983,6 +1043,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     },
 
     plan,
+    planPair,
     runPair,
   };
 }

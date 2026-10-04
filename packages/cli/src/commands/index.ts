@@ -1,4 +1,5 @@
 import { notImplemented } from '@interlock/shared';
+import { checkCommand } from './check.js';
 import { hookCommand } from './hook.js';
 import { statusCommand } from './status.js';
 import type { Command } from './command.js';
@@ -11,6 +12,8 @@ import type { Command } from './command.js';
  */
 
 export type { Command } from './command.js';
+export { checkCommand, runCheck } from './check.js';
+export type { CheckIo } from './check.js';
 export { MAX_STDIN_BYTES, hookCommand, readBounded, runHook } from './hook.js';
 export type { HookIo } from './hook.js';
 export { runStatus, statusCommand } from './status.js';
@@ -23,15 +26,11 @@ const todo = (name: string): Command['run'] => {
 export const COMMANDS: readonly Command[] = [
   statusCommand,
   hookCommand,
+  checkCommand,
   {
     name: 'watch',
     summary: 'Follow findings live in the terminal',
     run: todo('watch'),
-  },
-  {
-    name: 'check',
-    summary: 'Force an immediate speculative merge of two branches: check <A> <B>',
-    run: todo('check'),
   },
   {
     name: 'order',

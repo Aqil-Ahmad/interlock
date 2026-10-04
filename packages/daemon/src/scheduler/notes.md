@@ -159,6 +159,14 @@ one tier for every 30 s waited. Aging decides the fairness question: a very
 active branch keeps re-queuing its own pairs at high priority, and without aging
 a pair it is not in could wait for ever.
 
+A manual check — `interlock check` — is outside this: it starts ahead of every
+other entry, in the order checks were asked for, and ignores its pair's backoff,
+because someone is waiting on it. Aging does not protect the automatic pairs
+from that, so a script running checks in a tight loop holds them back for as
+long as it runs. Accepted: the route needs the user's token on loopback, and
+each check is one pair. A per-repository limit on checks in flight is the
+remedy if it is ever seen.
+
 ## 5. De-duplicate by content, then ask the verdict cache
 
 A run identifies both sides before anything else: each side's tree — the

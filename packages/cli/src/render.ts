@@ -1,4 +1,12 @@
-import type { AgentSession, BranchRef, Repo } from '@interlock/shared';
+import type {
+  AgentSession,
+  BranchRef,
+  Finding,
+  MergeConflictEvidence,
+  Repo,
+  SpanEvidence,
+} from '@interlock/shared';
+import type { CheckReport } from './client/index.js';
 
 /**
  * Turning what the daemon reports into something a terminal can show.
@@ -267,4 +275,145 @@ function escapeControls(json: string): string {
     out += escape ? `\\u${point.toString(16).padStart(4, '0')}` : character;
   }
   return out;
+}
+
+/** One branch's half of a Finding: where it sits in that branch's own copy. */
+export interface FindingSide {
+  readonly branch: string;
+  /** The path on that branch, which differs from the other's after a rename; null if unknown. */
+  readonly path: string | null;
+  /** The branch deleted the file. */
+  readonly deleted: boolean;
+  readonly spans: readonly {
+    readonly startLine: number;
+    readonly endLine: number;
+    readonly excerpt: string;
+  }[];
+}
+
+/** A Finding as `check` shows it: what it is, and each side's half. */
+export interface FindingView {
+  readonly id: string;
+  readonly kind: string;
+  readonly rule: string;
+  readonly severity: string;
+  readonly title: string;
+  readonly sides: readonly [FindingSide, FindingSide];
+}
+
+/**
+ * Each side's half of a Finding, in the order the pair was named.
+ *
+ * Spans carry their branch, so they are sorted onto a side by id. The merge
+ * conflict evidence is relative to the Finding's own attribution, which may name
+ * the pair the other way round, so it is read by id too.
+ */
+export function findingView(finding: Finding, report: CheckReport): FindingView {
+  const conflict = finding.evidence.find(
+    (item): item is MergeConflictEvidence => item.type === 'merge-conflict',
+  );
+  const side = (branch: { readonly id: string; readonly name: string }): FindingSide => {
+    const spans = finding.evidence.filter(
+      (item): item is SpanEvidence => item.type === 'span' && item.branchRefId === branch.id,
+    );
+    const recorded =
+      conflict === undefined
+        ? undefined
+        : finding.attribution.branchA === branch.id
+          ? conflict.sideA
+          : finding.attribution.branchB === branch.id
+            ? conflict.sideB
+            : undefined;
+    return {
+      branch: branch.name,
+      path: spans[0]?.path ?? recorded?.path ?? null,
+      deleted: recorded === null,
+      spans: spans.map((span) => ({
+        startLine: span.startLine,
+        endLine: span.endLine,
+        excerpt: span.excerpt,
+      })),
+    };
+  };
+  return {
+    id: finding.id,
+    kind: finding.kind,
+    rule: finding.rule,
+    severity: finding.severity,
+    title: finding.title,
+    sides: [side(report.a), side(report.b)],
+  };
+}
+
+/** Lines, as a person reads them: `12`, `12-14`, or where an empty span would begin. */
+function lineRange(startLine: number, endLine: number): string {
+  if (endLine < startLine) return `${String(startLine)} (no lines)`;
+  return startLine === endLine ? String(startLine) : `${String(startLine)}-${String(endLine)}`;
+}
+
+/**
+ * The human report of a check.
+ *
+ * Everything the repository chose — branch names, paths, excerpts, the merge
+ * base it named — goes through `safeText`, a line at a time, so an excerpt
+ * keeps its shape and no line of it can move the cursor.
+ */
+export function renderCheck(report: CheckReport): string {
+  const a = safeText(report.a.name);
+  const b = safeText(report.b.name);
+  const base = safeText(report.mergeBaseSha.slice(0, 12));
+  if (report.clean) return `${a} and ${b} merge cleanly  (merge base ${base})\n`;
+
+  const count = report.findings.length;
+  const lines = [
+    `${a} and ${b}: ${String(count)} conflict${count === 1 ? '' : 's'}  (merge base ${base})`,
+  ];
+  for (const finding of report.findings) {
+    const view = findingView(finding, report);
+    lines.push('', `${safeText(view.rule)} · ${safeText(view.severity)}  ${safeText(view.title)}`);
+    const width = Math.max(...view.sides.map((side) => safeText(side.branch).length));
+    for (const side of view.sides) {
+      const name = safeText(side.branch).padEnd(width);
+      const path = side.path === null ? 'path unknown' : safeText(side.path);
+      if (side.deleted) {
+        lines.push(`  ${name}  deleted ${path}`);
+        continue;
+      }
+      if (side.spans.length === 0) {
+        lines.push(`  ${name}  ${path}  (lines could not be placed)`);
+        continue;
+      }
+      for (const span of side.spans) {
+        lines.push(`  ${name}  ${path}:${lineRange(span.startLine, span.endLine)}`);
+        for (const text of span.excerpt.split('\n')) {
+          if (span.excerpt === '') break;
+          lines.push(`  ${' '.repeat(width)}    │ ${safeText(text)}`);
+        }
+      }
+    }
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+/**
+ * The same facts as {@link renderCheck}, for a script. Paths and excerpts as
+ * they are, with every control character escaped the way {@link renderJson}
+ * escapes them.
+ */
+export function renderCheckJson(report: CheckReport): string {
+  return `${escapeControls(
+    JSON.stringify(
+      {
+        repoId: report.repoId,
+        a: report.a,
+        b: report.b,
+        mergeBaseSha: report.mergeBaseSha,
+        clean: report.clean,
+        findings: report.findings.map((finding) => findingView(finding, report)),
+      },
+      null,
+      2,
+    ),
+  )}\n`;
 }

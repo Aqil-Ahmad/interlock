@@ -50,6 +50,12 @@ export interface Watcher {
   stop(): Promise<void>;
   /** Force a full reconciliation pass; used at startup and by `interlock status`. */
   refresh(): Promise<void>;
+  /**
+   * One pass over one repository that begins after this call: its branch refs
+   * read again, and every worktree whose probe moved captured. What a check
+   * runs before naming branches and merging, so it judges what is on disk now.
+   */
+  refreshRepo(rootPath: string): Promise<void>;
 }
 
 /**
@@ -261,6 +267,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
     },
 
     refresh,
+    refreshRepo: (rootPath: string) => sweep.reconcileFresh(rootPath),
   };
 }
 

@@ -544,10 +544,58 @@ merge-tree` over the two commits reports the conflict — with neither side
       **Done when:** `interlock status` names a repository whose checks are held for a collection, with how long it has been; `--json` carries the same; the API carries it without a store migration, since it is live state.
       **Constraints:** read the pause from the registry's own measure (`pausedMs`), not a guess. Worth doing once the bench records the pause at the default window: under realistic load it measured about a second.
 
-- [ ] **`interlock check A B`**
-      **Files:** `packages/cli/src/commands/`
-      **What:** force an immediate merge of a named pair and print the findings.
-      **Done when:** it reports a planted conflict in a fixture repo with usable output.
+- [x] **`interlock check A B`**
+      **Files:** `packages/cli/src/commands/`, `packages/cli/src/client/`, `packages/cli/src/render.ts`, `packages/daemon/src/api/server.ts`, `packages/daemon/src/scheduler/`, `packages/daemon/src/watcher/`, `packages/daemon/src/check.ts`, `docs/architecture.md`, `docs/threat-model.md`
+      **What:** force an immediate merge of a named pair, wait for it, and print the pair's Findings — the manual trigger, a debugging tool and a scriptable pre-merge gate.
+
+  Rewritten before starting, from reading the scheduler, the pipeline and the
+  watcher. **Through the daemon**, which holds the data dir and is the only
+  writer of the shadows and the store: one route, `POST /api/repos/:id/check`,
+  modelled on the sessions route — a bounded body, every field validated,
+  unknown keys refused, the same token. **Fresh first:** the pipeline merges
+  what the watcher last captured, up to a sweep interval old when an event was
+  missed, and branch names resolve from the store, where a branch made seconds
+  ago is not yet; so the route runs one watcher pass over the repository (after
+  any already in flight) before it resolves a name. **One pair planned on its
+  own:** merge base and row upsert, the overlap filter skipped — the reason a
+  manual check exists. **Waiting on its own run:** the scheduler hands back the
+  outcome of the run launched from this request's queue entry, not whichever
+  run of the pair lands next, which may have started before the pass. A manual
+  entry runs ahead of the queue and ignores the pair's backoff; a run
+  superseded mid-check is asked for again while the deadline holds; stopping
+  the scheduler rejects every waiter; a client that hangs up stops the wait.
+  **The pair's state, not the run's:** a duplicate or a cache hit merges
+  nothing and is still an answer, so the reply is the pair's open Findings read
+  from the store after the run lands. **Names:** the repository is the one
+  whose root or worktree holds the current directory, longest match, as hook's
+  is; branch names are matched against the store after the pass; one name
+  checks it against the default branch; an unknown name lists the branches that
+  exist. **Output:** the rule and severity, each side's path — which differs
+  after a rename — and each side's span with its excerpt, every piece of
+  repository content through `safeText`, error remedies included.
+
+  **Done when:** `interlock check` in a repository with a planted conflict
+  prints the Finding, and against its twin says the pair is clean, within the
+  scheduler's ordinary run time; `--json` emits the same facts; exits are 0
+  clean, 1 conflicts found (decided: a gate needs it, as `git diff
+--exit-code` does; `status` keeps never failing on Findings), 64 for bad
+  arguments, an unknown branch or a pair with no history in common, 69 for no
+  daemon and 70 for anything else, a timeout included; an unknown branch, an
+  unrelated pair and a stopped daemon each print their own message and code;
+  tested end to end against a real daemon on a temp data dir, with the CLI run
+  as `status`'s tests run it.
+  **Constraints:** loopback only, every route authenticated. This is a second
+  write route — it starts work and writes runs and Findings — which is a
+  security-posture question: flagged in the PR for a human decision, as is the
+  CLI printing repository excerpts to a terminal an agent may be reading
+  without `wrapUntrusted`. Recorded in `docs/architecture.md` and the threat
+  model.
+
+- [ ] **Wrap the excerpts `interlock check` prints**
+      **Files:** `packages/shared/src/`, `packages/mcp-server/src/sanitize.ts`, `packages/cli/src/render.ts`
+      **What:** `check` prints other branches' code, and agents are who will run it as a gate; the excerpts are escaped for the terminal but reach the agent as plain output, not as untrusted data. Move `wrapUntrusted` into `shared` — it depends on nothing — so the CLI and the MCP server use one implementation, and wrap each excerpt block in the human output.
+      **Done when:** an excerpt holding an instruction-shaped line prints neutralised and inside the untrusted-content delimiters; the MCP server's own tests pass unchanged against the moved function; `--json` keeps excerpts as data, unwrapped, since a script parses them; threat model T12's residual risk no longer names this.
+      **Constraints:** hard rule 4. The terminal escaping stays: wrapping is about an agent reading, escaping about a terminal acting.
 
 - [x] **Fixture suite**
       **Files:** `eval/fixtures/`, `eval/run.ts`, `eval/reports/`, `eval/README.md`, `vitest.config.ts`

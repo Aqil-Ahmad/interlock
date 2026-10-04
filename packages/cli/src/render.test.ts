@@ -4,12 +4,23 @@ import type {
   AgentSessionId,
   BranchRef,
   BranchRefId,
+  FindingId,
   Repo,
   RepoId,
   SnapshotId,
+  SpeculativeRunId,
 } from '@interlock/shared';
 import { describe, expect, it } from 'vitest';
-import { branchState, renderJson, renderStatus, safeText } from './render.js';
+import type { CheckReport } from './client/index.js';
+import {
+  branchState,
+  findingView,
+  renderCheck,
+  renderCheckJson,
+  renderJson,
+  renderStatus,
+  safeText,
+} from './render.js';
 import type { RepoView } from './render.js';
 
 /**
@@ -341,5 +352,73 @@ describe('renderJson', () => {
     ) as { repos: { branches: { files: { untracked: string[] } | null }[] }[] };
 
     expect(parsed.repos[0]?.branches[0]?.files?.untracked).toStrictEqual(paths);
+  });
+});
+
+describe('renderCheck', () => {
+  /** ESC, BEL, CSI and a bidi override: each acts on a terminal if it reaches one. */
+  const CONTROLS = ['\u001b', '\u0007', '\u009b', '\u202e'];
+  const a = ulid<BranchRefId>();
+  const b = ulid<BranchRefId>();
+
+  /** A conflict whose every field the repository chose carries an escape. */
+  const report = (): CheckReport => ({
+    repoId: ulid<RepoId>(),
+    a: { id: a, name: 'one\u001b[2J' },
+    b: { id: b, name: 'two' },
+    mergeBaseSha: 'a'.repeat(40),
+    clean: false,
+    findings: [
+      {
+        id: ulid<FindingId>(),
+        runId: ulid<SpeculativeRunId>(),
+        kind: 'textual',
+        rule: 'overlapping-edit',
+        severity: 'medium',
+        confidence: 1,
+        status: 'open',
+        title: 'Both branches changed the same lines',
+        description: '',
+        // Named the other way round from the check, as a Finding may be.
+        attribution: { branchA: b, branchB: a, originBranch: null, rationale: '' },
+        evidence: [
+          {
+            type: 'span',
+            branchRefId: a,
+            path: 'src/\u009b31mx.ts',
+            startLine: 2,
+            endLine: 3,
+            excerpt: 'line \u001b]0;pwned\u0007\n\u202eevil',
+          },
+        ],
+        firstSeenAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        resolvedAt: null,
+      },
+    ],
+  });
+
+  it('escapes every piece of the repository it prints, excerpts a line at a time', () => {
+    const text = renderCheck(report());
+
+    for (const control of CONTROLS) expect(text).not.toContain(control);
+    expect(text).toContain('one\\x1b[2J');
+    expect(text).toContain('src/\\x9b31mx.ts:2-3');
+    expect(text).toContain('│ line \\x1b]0;pwned\\x07\n');
+    expect(text).toContain('│ \\u{202e}evil\n');
+  });
+
+  it('puts each side in the order the pair was named, whatever the Finding says', () => {
+    const view = findingView(report().findings[0]!, report());
+    expect(view.sides.map((side) => side.branch)).toEqual(['one\u001b[2J', 'two']);
+    expect(view.sides[0].spans).toHaveLength(1);
+    expect(view.sides[1].spans).toEqual([]);
+  });
+
+  it('keeps names as they are in JSON, with every control escaped', () => {
+    const json = renderCheckJson(report());
+    for (const control of CONTROLS) expect(json).not.toContain(control);
+    const parsed = JSON.parse(json) as { a: { name: string } };
+    expect(parsed.a.name).toBe('one\u001b[2J');
   });
 });

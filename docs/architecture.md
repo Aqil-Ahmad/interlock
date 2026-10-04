@@ -77,6 +77,8 @@ The path to trace when debugging anything:
 
 Every step publishes an event with a `causedBy` pointer, so a Finding can be walked back to the edit that caused it.
 
+`interlock check` runs this path on demand for one named pair, through the daemon, which is the only writer of the shadows and the store. `POST /api/repos/:id/check` runs a watcher pass over the repository first, so the pair is judged on what is on disk now and a branch made a moment ago can be named; plans the pair whatever its overlap; queues it ahead of everything else, past any backoff; and waits for the run launched from that request, up to a deadline the caller sets, asking again if a side moves under it. It answers with the pair's open Findings read from the store, not with what the run did: a run that merges nothing because the content was already judged is still an answer. It is the API's second write route, beside the session hook, and takes the same token.
+
 ## Where the hard parts live
 
 | Problem                                                    | Lives in                          | Notes                                                  |

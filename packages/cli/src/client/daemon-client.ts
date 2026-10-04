@@ -6,7 +6,7 @@ import {
   runtimePath,
   tokenPath,
 } from '@interlock/shared';
-import type { AgentSession, BranchRef, Repo } from '@interlock/shared';
+import type { AgentSession, BranchRef, BranchRefId, Finding, Repo } from '@interlock/shared';
 
 /**
  * The CLI's half of the localhost API.
@@ -30,9 +30,39 @@ export interface DaemonClient {
   branches(repoId: Repo['id']): Promise<BranchRef[]>;
   /** Agent sessions the daemon believes are live in one repository. */
   sessions(repoId: Repo['id']): Promise<AgentSession[]>;
-  /** Report an agent session event. The one thing a client writes. */
+  /** Report an agent session event. */
   registerSession(registration: unknown): Promise<AgentSession>;
+  /**
+   * Run one pair now and answer with its state. Waits as long as the daemon
+   * is asked to, and a little longer: the daemon's own deadline is the one
+   * that says why it ran out.
+   */
+  check(repoId: Repo['id'], request: CheckRequest): Promise<CheckReport>;
 }
+
+/** What `POST /api/repos/:id/check` takes. */
+export interface CheckRequest {
+  readonly a: string;
+  /** Null to check `a` against the repository's default branch. */
+  readonly b: string | null;
+  readonly timeoutMs: number;
+}
+
+/** What it answers: the pair, and its open Findings once the run landed. */
+export interface CheckReport {
+  readonly repoId: Repo['id'];
+  readonly a: { readonly id: BranchRefId; readonly name: string };
+  readonly b: { readonly id: BranchRefId; readonly name: string };
+  readonly mergeBaseSha: string;
+  readonly clean: boolean;
+  readonly findings: readonly Finding[];
+}
+
+/**
+ * How much longer the client waits than the daemon was asked to: the daemon's
+ * own timeout answers with a reason, and the client's must not beat it to it.
+ */
+const CHECK_GRACE_MS = 5_000;
 
 /**
  * A request that hangs costs the user a terminal that never comes back.
@@ -41,6 +71,13 @@ export interface DaemonClient {
  * anything near this is a daemon in trouble rather than a slow one.
  */
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/** How long one request may take, and what running out of it means for that route. */
+interface Wait {
+  readonly timeoutMs: number;
+  /** Null where a timeout means what any lost connection does. */
+  readonly timedOut: ((cause: unknown) => InterlockError) | null;
+}
 
 /** What a daemon publishes about itself, as far as this client reads it. */
 interface RuntimeFile {
@@ -69,7 +106,12 @@ export async function connectDaemon(dataDir: string): Promise<DaemonClient> {
   const token = readToken(dataDir);
   const origin = `http://127.0.0.1:${String(port)}`;
 
-  const request = async <T>(path: string, body?: unknown): Promise<T> => {
+  const request = async <T>(
+    path: string,
+    body?: unknown,
+    wait: Wait = { timeoutMs: REQUEST_TIMEOUT_MS, timedOut: null },
+  ): Promise<T> => {
+    const { timeoutMs } = wait;
     let response: Response;
     try {
       response = await fetch(`${origin}${path}`, {
@@ -79,9 +121,14 @@ export async function connectDaemon(dataDir: string): Promise<DaemonClient> {
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
+      // A check that ran past its deadline reached a daemon that is running
+      // and busy; calling that "not running" sends a script to start another.
+      if (wait.timedOut !== null && (error as Error | null)?.name === 'TimeoutError') {
+        throw wait.timedOut(error);
+      }
       // A refused connection is the ordinary case rather than an edge one: a
       // daemon that crashed leaves its runtime file behind, so the file saying
       // where to look is not the same as something being there.
@@ -125,6 +172,21 @@ export async function connectDaemon(dataDir: string): Promise<DaemonClient> {
     },
     async registerSession(registration: unknown): Promise<AgentSession> {
       return (await request<{ session: AgentSession }>('/api/sessions', registration)).session;
+    },
+    async check(repoId: Repo['id'], body: CheckRequest): Promise<CheckReport> {
+      const encoded = encodeURIComponent(repoId);
+      return (
+        await request<{ check: CheckReport }>(`/api/repos/${encoded}/check`, body, {
+          timeoutMs: body.timeoutMs + CHECK_GRACE_MS,
+          timedOut: (cause) =>
+            new InterlockError('CHECK_TIMEOUT', 'The daemon did not answer in time', {
+              cause,
+              details: { timeoutMs: body.timeoutMs },
+              remedy: 'The daemon is running but busy. Check again, or pass a longer --timeout.',
+              infra: true,
+            }),
+        })
+      ).check;
     },
   };
 }

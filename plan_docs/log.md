@@ -4,9 +4,28 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-04 — review of `interlock check`
+
+- **Decided by a human — the second write route stands.** The same token, loopback only, a small validated body, branch names never handed to git, and only the work the scheduler does unasked.
+- **Taken — planning the pair ran outside the deadline.** The merge base is git work on a large history; `planPair` now runs under the same deadline as the pass and the run, and a test holds planning forever and gets `CHECK_TIMEOUT`.
+- **Taken — a caller hanging up was reported as a bad request.** It is `REQUEST_CANCELLED` now, a new code, not infrastructure, answered 499. Nobody reads it, but the log and the code should not say the request was wrong.
+- **Taken as a note — manual checks always start first.** A script checking in a loop holds the automatic pairs back; accepted for a token-protected loopback tool, and written into the scheduler notes with the remedy.
+- **Deferred as a task — excerpts reach agents unwrapped.** Agreed, not blocking: a new M2 task moves `wrapUntrusted` into `shared` and wraps the excerpt blocks in `check`'s human output.
+
 ## 2026-10-04 — copy-on-write and VM snapshots, recorded as deferred
 
 - **Deferred, in M3's new "Deferred" section:** copy-on-write slot fills and dependencies, and forked VM snapshots for the sandbox. Slot clones would save about 1 GB of disk on a large repository and almost no time, since cold fills are rare, at the cost of a second code path CI cannot test and of untracked files — `.env` among them — riding into a slot. VM snapshots need Linux KVM. Each names what would justify building it.
+
+## 2026-10-02 — `interlock check`
+
+- **Task rewritten before starting.** The issue's approach held — through the daemon, one route modelled on sessions, wait on the scheduler, report the pair's state, plan one named pair — with gaps that would have shipped wrong answers. The rewrite is in the milestone.
+- **Found — a check would have judged stale content.** The pipeline merges what the watcher last captured, up to a sweep interval old when an event is missed, and names resolve from the store, where a branch made seconds ago is not yet. The route runs a watcher pass first, one that starts after any already in flight (`reconcileFresh`): joined, a running pass may have read the worktree before the edit. Pinned with a daemon whose watch never reports and whose sweep never comes round; without the pass, six end-to-end cases fail.
+- **Decided — a check waits on its own run.** The outcome is that of the run launched from the request's queue entry, attached in the same turn as the entry, so no pump can launch it unseen; a run of the pair already in flight began earlier and is not the answer. Manual entries start ahead of the queue and ignore the pair's backoff, so a check after an infrastructure failure does not wait five minutes. A superseded or stale run is asked for again, up to four times, within the deadline. Stopping the scheduler rejects every waiter. `enqueueNow`, which only queued, is replaced by `check`.
+- **Decided — exit codes.** 0 clean, 1 conflicts found (a gate needs one, as `git diff --exit-code` does; `status` still never fails on Findings), 64 for bad arguments, an unknown branch, an unrelated pair, a branch against itself or a directory in no watched repository, 69 for no daemon, 70 for anything else, a timeout included. Three error codes added so the CLI decides by code, not prose: `BRANCH_NOT_FOUND` (404), `BRANCHES_UNRELATED` (409), `CHECK_TIMEOUT` (503).
+- **Decided — names.** One name checks it against the default branch; a name matches a branch's short name or full ref; an unknown one lists up to twenty branches. The repository is the one whose root or worktree holds the current directory, longest match, on real paths.
+- **Decided — deadlines.** Default 60 s, 1 s to 10 min, set with `--timeout`; the client waits 5 s past it so the daemon's own timeout, which says why, arrives first. A client-side timeout on this route is `CHECK_TIMEOUT`, not "nothing is listening", which would have exited 69.
+- **Flagged for a human decision — security posture.** This is the API's second write route: it starts work and writes runs and Findings (threat model T12). And `interlock check` prints repository excerpts, escaped for the terminal, to a terminal an agent running it reads without `wrapUntrusted()`.
+- **Mutation: 38 mutations, 38 caught,** after three survivors, each a missing test: a hang-up while the check waits on its run (the test aborted before it started waiting), the innermost of nested watched repositories, and an escaped excerpt (the harness had not run the render tests).
 
 ## 2026-09-30 — the two ast-semantic cases decided (ADR-0006)
 

@@ -226,6 +226,41 @@ describe('run pipeline', () => {
       expect(candidates).toEqual([]);
     });
 
+    it('plans a named pair with nothing in common, which planning from a branch declines', async () => {
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      writeFileSync(join(base, 'b', 'other.ts'), lines('changed'));
+      await observe();
+      const [a, b] = [await branchNamed('a'), await branchNamed('b')];
+      expect((await pipeline.plan(a.repoId, a.id)).declined).toBe(1);
+
+      const candidate = await pipeline.planPair(a.repoId, b.id, a.id);
+
+      expect(candidate.overlap.tier).toBe('none');
+      expect(candidate.pair.key).toBe(makePairKey(a.id, b.id));
+      expect(candidate.pair.mergeBaseSha).toBe(git(root, 'rev-parse', 'main').trim());
+      // Stored like any planned pair, and the same row the next time.
+      const again = await pipeline.planPair(a.repoId, a.id, b.id);
+      expect(again.pair.id).toBe(candidate.pair.id);
+      expect((await store.listMergePairs(a.repoId)).map((pair) => pair.key)).toContain(
+        candidate.pair.key,
+      );
+    });
+
+    it('refuses a named pair with no history in common, or a branch it does not know', async () => {
+      git(root, 'checkout', '-q', '--orphan', 'lonely');
+      git(root, 'commit', '-qm', 'alone', '--allow-empty');
+      git(root, 'checkout', '-q', 'main');
+      await observe();
+      const [a, lonely] = [await branchNamed('a'), await branchNamed('lonely')];
+
+      await expect(pipeline.planPair(a.repoId, a.id, lonely.id)).rejects.toMatchObject({
+        code: 'BRANCHES_UNRELATED',
+      });
+      await expect(pipeline.planPair(a.repoId, a.id, ulid())).rejects.toMatchObject({
+        code: 'BRANCH_NOT_FOUND',
+      });
+    });
+
     it('plans nothing for a repository or a branch it does not know', async () => {
       await observe();
       const a = await branchNamed('a');
