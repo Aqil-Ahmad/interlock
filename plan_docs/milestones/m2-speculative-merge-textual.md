@@ -591,6 +591,12 @@ merge-tree` over the two commits reports the conflict — with neither side
   without `wrapUntrusted`. Recorded in `docs/architecture.md` and the threat
   model.
 
+- [ ] **Wrap the excerpts `interlock check` prints**
+      **Files:** `packages/shared/src/`, `packages/mcp-server/src/sanitize.ts`, `packages/cli/src/render.ts`
+      **What:** `check` prints other branches' code, and agents are who will run it as a gate; the excerpts are escaped for the terminal but reach the agent as plain output, not as untrusted data. Move `wrapUntrusted` into `shared` — it depends on nothing — so the CLI and the MCP server use one implementation, and wrap each excerpt block in the human output.
+      **Done when:** an excerpt holding an instruction-shaped line prints neutralised and inside the untrusted-content delimiters; the MCP server's own tests pass unchanged against the moved function; `--json` keeps excerpts as data, unwrapped, since a script parses them; threat model T12's residual risk no longer names this.
+      **Constraints:** hard rule 4. The terminal escaping stays: wrapping is about an agent reading, escaping about a terminal acting.
+
 - [x] **Fixture suite**
       **Files:** `eval/fixtures/`, `eval/run.ts`, `eval/reports/`, `eval/README.md`, `vitest.config.ts`
       **What:** the golden evaluation set — small synthetic repositories with planted, labelled conflicts and their negative twins — and a runner that pushes each through the real pipeline and reports precision and recall per analyzer.

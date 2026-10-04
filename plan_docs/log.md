@@ -4,6 +4,14 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-04 — review of `interlock check`
+
+- **Decided by a human — the second write route stands.** The same token, loopback only, a small validated body, branch names never handed to git, and only the work the scheduler does unasked.
+- **Taken — planning the pair ran outside the deadline.** The merge base is git work on a large history; `planPair` now runs under the same deadline as the pass and the run, and a test holds planning forever and gets `CHECK_TIMEOUT`.
+- **Taken — a caller hanging up was reported as a bad request.** It is `REQUEST_CANCELLED` now, a new code, not infrastructure, answered 499. Nobody reads it, but the log and the code should not say the request was wrong.
+- **Taken as a note — manual checks always start first.** A script checking in a loop holds the automatic pairs back; accepted for a token-protected loopback tool, and written into the scheduler notes with the remedy.
+- **Deferred as a task — excerpts reach agents unwrapped.** Agreed, not blocking: a new M2 task moves `wrapUntrusted` into `shared` and wraps the excerpt blocks in `check`'s human output.
+
 ## 2026-10-02 — `interlock check`
 
 - **Task rewritten before starting.** The issue's approach held — through the daemon, one route modelled on sessions, wait on the scheduler, report the pair's state, plan one named pair — with gaps that would have shipped wrong answers. The rewrite is in the milestone.
