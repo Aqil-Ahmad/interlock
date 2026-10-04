@@ -166,7 +166,8 @@ export function createChecks(options: ChecksOptions): Checks {
     }
 
     for (let attempt = 1; ; attempt++) {
-      const candidate = await options.planPair(repo.id, a.id, b.id);
+      // Under the deadline as well: a merge base on a large history is git work.
+      const candidate = await within(options.planPair(repo.id, a.id, b.id));
       const outcome = await within(options.check(candidate));
       if (!settled(outcome)) {
         // A side moved under the run, or its tree left the shadow: the content
@@ -296,7 +297,7 @@ function bounded<T>(
       caller.removeEventListener('abort', stop);
       reject(
         caller.aborted
-          ? new InterlockError('API_REQUEST_INVALID', 'The caller went away', { infra: true })
+          ? new InterlockError('REQUEST_CANCELLED', 'The caller went away')
           : new InterlockError('CHECK_TIMEOUT', 'The check did not finish in time', {
               details: { timeoutMs },
               remedy:

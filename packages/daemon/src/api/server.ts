@@ -482,6 +482,9 @@ function statusFor(error: InterlockError): number {
       return 404;
     case 'BRANCHES_UNRELATED':
       return 409;
+    // Nobody is there to read it; the status says why the request ended.
+    case 'REQUEST_CANCELLED':
+      return 499;
     case 'CONFIG_INVALID':
     case 'API_REQUEST_INVALID':
       return 400;

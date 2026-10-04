@@ -246,6 +246,14 @@ describe('a check', () => {
     });
   });
 
+  it('holds planning the pair to the deadline as well', async () => {
+    const { checks, calls } = harness([{ kind: 'landed', result: analysed }], {
+      planPair: () => new Promise<PairCandidate>(() => undefined),
+    });
+    await expect(ask(checks, { timeoutMs: 50 })).rejects.toMatchObject({ code: 'CHECK_TIMEOUT' });
+    expect(calls).not.toContain('run');
+  });
+
   it('holds the pass over the repository to the deadline as well', async () => {
     const { checks, calls } = harness([{ kind: 'landed', result: analysed }], {
       refreshRepo: () => new Promise<void>(() => undefined),
@@ -272,6 +280,8 @@ describe('a check', () => {
     caller.abort();
     const error = await asking.catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(InterlockError);
-    expect((error as InterlockError).code).not.toBe('CHECK_TIMEOUT');
+    // Neither a timeout nor a bad request: the request was fine, and nobody waited.
+    expect((error as InterlockError).code).toBe('REQUEST_CANCELLED');
+    expect((error as InterlockError).infra).toBe(false);
   });
 });

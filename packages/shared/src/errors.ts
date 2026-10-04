@@ -51,6 +51,8 @@ export const INTERLOCK_ERROR_CODES = [
   'DAEMON_UNREACHABLE',
   'UNAUTHORIZED',
   'API_REQUEST_INVALID',
+  /** The caller hung up before the answer: nothing was wrong with what it asked. */
+  'REQUEST_CANCELLED',
   'NOT_IMPLEMENTED',
 ] as const;
 
