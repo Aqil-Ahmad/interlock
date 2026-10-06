@@ -479,7 +479,7 @@ export function renderBudget(budget: BudgetReport): string {
   budget.windows.forEach((window, index) => {
     const counts =
       window.raised === 0
-        ? '0 raised, rate: no data'
+        ? `0 raised, rate: ${rateText(window.rate)}`
         : `${String(window.raised)} raised, ${String(window.dismissedWrong)} dismissed as wrong (${rateText(window.rate)}), ${String(window.dismissedKnown)} as known`;
     lines.push(`  ${labels[index]!.padEnd(width)}  since ${utcMinute(window.since)}  ${counts}`);
   });

@@ -1040,6 +1040,28 @@ describe('run pipeline', () => {
       expect(published('finding.resolved')).toEqual([]);
     });
 
+    it('holds only the conflict it was made on, not the same content at another path', async () => {
+      // A copy of the file, conflicting the same way: the same blobs on each
+      // side, a different conflict.
+      for (const side of ['a', 'b'] as const) {
+        writeFileSync(join(base, side, 'copy.ts'), body(side === 'a' ? '1' : '2'));
+      }
+      await observe();
+      await run();
+      const open = await store.listOpenFindings((await repo()).id);
+      expect(open).toHaveLength(2);
+      const original = open.find((finding) =>
+        finding.evidence.some((e) => e.type === 'merge-conflict' && e.path === 'total.ts'),
+      )!;
+      await dismissals.dismiss(original.id, { reason: 'wrong', note: null });
+
+      expect(await runFresh()).toMatchObject({ findingCount: 1 });
+
+      const [copy] = await store.listOpenFindings((await repo()).id);
+      expect(copy!.evidence).toContainEqual(expect.objectContaining({ path: 'copy.ts' }));
+      expect(copy!.id).not.toBe(original.id);
+    });
+
     it('stays dismissed when the same content is answered from the cache', async () => {
       const dismissed = await dismissOpen('known');
       const before = raises();
