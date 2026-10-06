@@ -31,6 +31,7 @@ import { INITIAL_SCHEMA } from '../src/store/migrations/001-initial.js';
 import { addSessionLiveness } from '../src/store/migrations/002-session-liveness.js';
 import { addAnalyzerCacheRun } from '../src/store/migrations/003-analyzer-cache-run.js';
 import { addRetentionIndexes } from '../src/store/migrations/004-retention.js';
+import { addDismissals } from '../src/store/migrations/005-dismissals.js';
 import type { Store } from '../src/store/index.js';
 import { rejection } from './support/rejection.js';
 
@@ -1174,6 +1175,405 @@ describe('store', () => {
     it('closes more than once without complaint', async () => {
       await store.close();
       await expect(store.close()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('dismissals and their counts', () => {
+    let repoId: RepoId;
+    let a: BranchRefId;
+    let b: BranchRefId;
+    let pairId: MergePairId;
+    let held: SpeculativeRun;
+
+    const wrong = (at: string = T.mid) => ({
+      reason: 'wrong' as const,
+      note: null,
+      dismissedAt: at,
+    });
+
+    beforeEach(async () => {
+      repoId = (await store.upsertRepo(repo())).id;
+      a = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/a', name: 'a' }))).id;
+      b = (await store.upsertBranchRef(branch(repoId, { ref: 'refs/heads/b', name: 'b' }))).id;
+      pairId = (await store.upsertMergePair(pair(repoId, a, b))).id;
+      held = run(pairId, { finishedAt: T.early });
+      await store.upsertRun(held);
+    });
+
+    it('counts a raise in the UTC hour it was first seen, and sums a window from its first hour', async () => {
+      await store.raiseFinding(finding(held.id, a, b, { firstSeenAt: '2026-01-01T09:59:59.999Z' }));
+      await store.raiseFinding(finding(held.id, a, b, { firstSeenAt: '2026-01-01T10:00:00.000Z' }));
+      await store.raiseFinding(
+        finding(held.id, a, b, { firstSeenAt: '2026-01-01T10:30:00.000Z', rule: 'modify-delete' }),
+      );
+
+      expect(await store.findingCounts('2026-01-01T10')).toEqual([
+        { kind: 'textual', rule: 'modify-delete', raised: 1, dismissedWrong: 0, dismissedKnown: 0 },
+        {
+          kind: 'textual',
+          rule: 'overlapping-hunks',
+          raised: 1,
+          dismissedWrong: 0,
+          dismissedKnown: 0,
+        },
+      ]);
+      expect(await store.findingCounts('2026-01-01T09')).toContainEqual({
+        kind: 'textual',
+        rule: 'overlapping-hunks',
+        raised: 2,
+        dismissedWrong: 0,
+        dismissedKnown: 0,
+      });
+      expect(await store.findingCounts('2026-01-01T11')).toEqual([]);
+    });
+
+    it('writes a raised Finding as it was given', async () => {
+      const raised = finding(held.id, a, b);
+      await store.raiseFinding(raised);
+
+      expect(await store.getFinding(raised.id)).toEqual(raised);
+    });
+
+    it('counts nothing for a Finding written without being raised', async () => {
+      await store.upsertFinding(finding(held.id, a, b));
+
+      expect(await store.findingCounts('2000-01-01T00')).toEqual([]);
+    });
+
+    it('dismisses an open Finding, and counts it in the hour it was raised by reason', async () => {
+      const first = finding(held.id, a, b, { firstSeenAt: '2026-01-01T10:15:00.000Z' });
+      const second = finding(held.id, a, b, { firstSeenAt: '2026-01-01T10:45:00.000Z' });
+      await store.raiseFinding(first);
+      await store.raiseFinding(second);
+
+      const dismissed = await store.dismissFinding(first.id, {
+        reason: 'wrong',
+        note: 'git merges this cleanly with rerere',
+        dismissedAt: T.late,
+      });
+      await store.dismissFinding(second.id, { reason: 'known', note: null, dismissedAt: T.late });
+
+      expect(dismissed).toEqual({
+        repoId,
+        finding: {
+          ...first,
+          status: 'dismissed',
+          updatedAt: T.late,
+          dismissal: {
+            reason: 'wrong',
+            note: 'git merges this cleanly with rerere',
+            dismissedAt: T.late,
+          },
+        },
+      });
+      expect(await store.getFinding(first.id)).toEqual(dismissed!.finding);
+      // Dismissed months later, counted in the hour the two were raised: the
+      // window holds the Findings raised in it, and what became of them.
+      expect(await store.findingCounts('2026-01-01T10')).toEqual([
+        {
+          kind: 'textual',
+          rule: 'overlapping-hunks',
+          raised: 2,
+          dismissedWrong: 1,
+          dismissedKnown: 1,
+        },
+      ]);
+      expect(await store.findingCounts('2026-01-01T11')).toEqual([]);
+    });
+
+    it('dismisses a stale Finding as it dismisses an open one', async () => {
+      const stale = finding(held.id, a, b, { status: 'stale' });
+      await store.raiseFinding(stale);
+
+      expect((await store.dismissFinding(stale.id, wrong()))?.finding.status).toBe('dismissed');
+    });
+
+    it('refuses a Finding that is resolved, dismissed already or not there, counting nothing', async () => {
+      const resolved = finding(held.id, a, b, { status: 'resolved', resolvedAt: T.mid });
+      const open = finding(held.id, a, b);
+      await store.raiseFinding(resolved);
+      await store.raiseFinding(open);
+      await store.dismissFinding(open.id, wrong());
+
+      expect(await store.dismissFinding(resolved.id, wrong())).toBeNull();
+      expect(await store.dismissFinding(open.id, { ...wrong(T.late), reason: 'known' })).toBeNull();
+      expect(await store.dismissFinding(ulid<FindingId>(), wrong())).toBeNull();
+
+      expect(await store.getFinding(resolved.id)).toEqual(resolved);
+      expect((await store.getFinding(open.id))?.dismissal).toEqual(wrong());
+      expect(await store.findingCounts('2000-01-01T00')).toEqual([
+        {
+          kind: 'textual',
+          rule: 'overlapping-hunks',
+          raised: 2,
+          dismissedWrong: 1,
+          dismissedKnown: 0,
+        },
+      ]);
+    });
+
+    it('never writes over a dismissed Finding, and says so', async () => {
+      const open = finding(held.id, a, b);
+      await store.raiseFinding(open);
+      await store.dismissFinding(open.id, wrong());
+      const before = await store.getFinding(open.id);
+
+      // A run that read it open before the dismissal landed.
+      expect(await store.upsertFinding({ ...open, evidence: [], updatedAt: T.late })).toBe(false);
+      expect(await store.upsertFinding({ ...open, status: 'resolved', resolvedAt: T.late })).toBe(
+        false,
+      );
+
+      expect(await store.getFinding(open.id)).toEqual(before);
+      expect(await store.upsertFinding({ ...finding(held.id, a, b) })).toBe(true);
+    });
+
+    it('lists live dismissals, and ends one that stopped reproducing', async () => {
+      const open = finding(held.id, a, b);
+      const dismissed = finding(held.id, a, b);
+      await store.raiseFinding(open);
+      await store.raiseFinding(dismissed);
+      await store.dismissFinding(dismissed.id, wrong());
+
+      expect((await store.listDismissedFindings(repoId)).map((each) => each.id)).toEqual([
+        dismissed.id,
+      ]);
+      expect((await store.listDismissedFindings(repoId))[0]?.evidence).toEqual(dismissed.evidence);
+      expect((await store.listOpenFindings(repoId)).map((each) => each.id)).toEqual([open.id]);
+      expect((await store.listLiveFindings(repoId)).map((each) => each.id).sort()).toEqual(
+        [open.id, dismissed.id].sort(),
+      );
+
+      expect(await store.endDismissal(dismissed.id, T.late)).toBe(true);
+      expect(await store.endDismissal(dismissed.id, T.late)).toBe(false);
+      expect(await store.endDismissal(open.id, T.late)).toBe(false);
+
+      expect(await store.getFinding(dismissed.id)).toMatchObject({
+        status: 'dismissed',
+        resolvedAt: T.late,
+        updatedAt: T.late,
+        dismissal: wrong(),
+      });
+      expect((await store.getFinding(open.id))?.resolvedAt).toBeNull();
+      expect(await store.listDismissedFindings(repoId)).toEqual([]);
+      expect((await store.listLiveFindings(repoId)).map((each) => each.id)).toEqual([open.id]);
+      const otherRepo = (await store.upsertRepo(repo({ rootPath: '/repos/other' }))).id;
+      expect(await store.listDismissedFindings(otherRepo)).toEqual([]);
+    });
+
+    it('finds the event that raised a Finding, and no other', async () => {
+      const raised = finding(held.id, a, b);
+      const payload = { findingId: raised.id, runId: held.id, kind: 'textual', rule: 'r' };
+      const resolved = event({
+        type: 'finding.resolved',
+        payload: { type: 'finding.resolved', repoId: null, at: T.early, ...payload } as never,
+      });
+      const raise = event({
+        type: 'finding.raised',
+        payload: { type: 'finding.raised', repoId: null, at: T.early, ...payload } as never,
+      });
+      await store.appendEvent(resolved);
+      await store.appendEvent(raise);
+
+      expect(await store.raisedEventOf(raised.id)).toBe(raise.id);
+      expect(await store.raisedEventOf(ulid<FindingId>())).toBeNull();
+    });
+
+    it('keeps the counts through a pass that prunes every Finding they counted', async () => {
+      const resolved = finding(held.id, a, b, { firstSeenAt: T.early });
+      const ended = finding(held.id, a, b, { firstSeenAt: T.early });
+      await store.raiseFinding(resolved);
+      await store.raiseFinding(ended);
+      await store.upsertFinding({ ...resolved, status: 'resolved', resolvedAt: T.early });
+      await store.dismissFinding(ended.id, wrong(T.early));
+      await store.endDismissal(ended.id, T.early);
+      const before = await store.findingCounts('2000-01-01T00');
+
+      await store.prune(T.late);
+
+      expect(await store.getRun(held.id)).toBeNull();
+      expect(await store.getFinding(ended.id)).toBeNull();
+      expect(before).toEqual([
+        {
+          kind: 'textual',
+          rule: 'overlapping-hunks',
+          raised: 2,
+          dismissedWrong: 1,
+          dismissedKnown: 0,
+        },
+      ]);
+      expect(await store.findingCounts('2000-01-01T00')).toEqual(before);
+    });
+
+    it('keeps a live dismissal’s run and the events tracing it, and lets an ended one go', async () => {
+      const spent = run(pairId, { finishedAt: T.early });
+      await store.upsertRun(spent);
+      const live = finding(held.id, a, b);
+      const ended = finding(spent.id, a, b);
+      await store.raiseFinding(live);
+      await store.raiseFinding(ended);
+      await store.dismissFinding(live.id, wrong(T.early));
+      await store.dismissFinding(ended.id, wrong(T.early));
+      await store.endDismissal(ended.id, T.early);
+      const trace = async (target: Finding, runId: SpeculativeRunId): Promise<EventRecord[]> => {
+        const started = event({
+          type: 'run.started',
+          payload: { type: 'run.started', repoId, at: T.early, runId, mergePairId: pairId },
+        });
+        const raised = event({
+          type: 'finding.raised',
+          payload: {
+            type: 'finding.raised',
+            repoId,
+            at: T.early,
+            findingId: target.id,
+            runId,
+            kind: 'textual',
+            rule: target.rule,
+          },
+          causedBy: started.id,
+        });
+        const dismissed = event({
+          type: 'finding.dismissed',
+          payload: {
+            type: 'finding.dismissed',
+            repoId,
+            at: T.early,
+            findingId: target.id,
+            runId,
+            kind: 'textual',
+            rule: target.rule,
+            reason: 'wrong',
+          },
+          causedBy: raised.id,
+        });
+        for (const record of [started, raised, dismissed]) await store.appendEvent(record);
+        return [started, raised, dismissed];
+      };
+      const kept = await trace(live, held.id);
+      await trace(ended, spent.id);
+
+      await store.prune(T.late);
+
+      // Pruned, a live dismissal's conflict would be raised again on the next
+      // run as though nobody had dismissed it.
+      expect(await store.getFinding(live.id)).toMatchObject({ status: 'dismissed' });
+      expect(await store.getRun(held.id)).not.toBeNull();
+      expect(await store.getRun(spent.id)).toBeNull();
+      expect((await collect(store.readEvents())).map((each) => each.id)).toEqual(
+        kept.map((each) => each.id),
+      );
+    });
+
+    it('keeps a live dismissal’s run when its daemon died before finishing it', async () => {
+      const unfinished = run(pairId, { finishedAt: null, status: 'running', startedAt: T.early });
+      await store.upsertRun(unfinished);
+      const live = finding(unfinished.id, a, b);
+      await store.raiseFinding(live);
+      await store.dismissFinding(live.id, wrong(T.early));
+
+      await store.prune(T.late, { abandonedBefore: T.late });
+
+      expect(await store.getRun(unfinished.id)).not.toBeNull();
+    });
+  });
+
+  describe('the dismissals migration', () => {
+    /**
+     * A store at schema 4 holding Findings: a current one stepped back, so its
+     * rows are exactly what the code before this migration wrote.
+     */
+    const atVersion4 = async (path: string): Promise<DatabaseSync> => {
+      const current = await openStore({ path });
+      const repoId = (await current.upsertRepo(repo())).id;
+      const x = (await current.upsertBranchRef(branch(repoId, { ref: 'refs/heads/x', name: 'x' })))
+        .id;
+      const y = (await current.upsertBranchRef(branch(repoId, { ref: 'refs/heads/y', name: 'y' })))
+        .id;
+      const pairOf = (await current.upsertMergePair(pair(repoId, x, y))).id;
+      const held = run(pairOf);
+      await current.upsertRun(held);
+      for (const firstSeenAt of [
+        '2026-01-01T10:05:00.000Z',
+        '2026-01-01T10:55:00.000Z',
+        '2026-01-01T11:00:00.000Z',
+      ]) {
+        await current.upsertFinding(finding(held.id, x, y, { firstSeenAt }));
+      }
+      await current.close();
+      const db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+      db.exec('DROP TABLE finding_counts');
+      db.exec('DROP INDEX idx_events_finding');
+      for (const [table, column] of [
+        ['events', 'finding_id'],
+        ['findings', 'dismissal_reason'],
+        ['findings', 'dismissal_note'],
+        ['findings', 'dismissed_at'],
+      ] as const) {
+        db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      }
+      db.exec('PRAGMA user_version = 4');
+      return db;
+    };
+
+    const counts = (db: DatabaseSync): unknown[] =>
+      db
+        .prepare(
+          'SELECT hour, kind, rule, raised, dismissed_wrong FROM finding_counts ORDER BY hour',
+        )
+        .all();
+
+    it('adds the dismissal, and counts the Findings still held by the hour they were raised', async () => {
+      const db = await atVersion4(join(dataDir, 'v4.db'));
+      try {
+        expect(runMigrations(db, silentLogger)).toBe(SCHEMA_VERSION);
+
+        expect(counts(db)).toEqual([
+          {
+            hour: '2026-01-01T10',
+            kind: 'textual',
+            rule: 'overlapping-hunks',
+            raised: 2,
+            dismissed_wrong: 0,
+          },
+          {
+            hour: '2026-01-01T11',
+            kind: 'textual',
+            rule: 'overlapping-hunks',
+            raised: 1,
+            dismissed_wrong: 0,
+          },
+        ]);
+        expect(
+          db.prepare('SELECT count(*) AS n FROM findings WHERE dismissal_reason IS NULL').get(),
+        ).toEqual({ n: 3 });
+        const indexes = db
+          .prepare("SELECT name FROM pragma_index_list('events')")
+          .all()
+          .map((row) => String((row as { name: unknown }).name));
+        expect(indexes).toContain('idx_events_finding');
+      } finally {
+        db.close();
+      }
+    });
+
+    it('applies again to a database that already has it, counting nothing twice', async () => {
+      const db = await atVersion4(join(dataDir, 'again4.db'));
+      try {
+        runMigrations(db, silentLogger);
+        const before = counts(db);
+
+        expect(() => addDismissals(db)).not.toThrow();
+
+        expect(counts(db)).toEqual(before);
+        const columns = db
+          .prepare("SELECT name FROM pragma_table_xinfo('findings')")
+          .all()
+          .map((row) => String((row as { name: unknown }).name));
+        expect(columns.filter((name) => name === 'dismissal_reason')).toHaveLength(1);
+      } finally {
+        db.close();
+      }
     });
   });
 

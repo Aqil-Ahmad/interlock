@@ -29,6 +29,8 @@ import type {
 } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventBus } from '../src/bus/index.js';
+import { createDismissals } from '../src/dismiss.js';
+import type { Dismissals } from '../src/dismiss.js';
 import type { PairCandidate, PairRunRequest, PairRunResult } from '../src/scheduler/index.js';
 import { createRunPipeline, SNAPSHOT_COMMIT_REUSE_MS } from '../src/scheduler/run-pipeline.js';
 import type { RunPipeline } from '../src/scheduler/run-pipeline.js';
@@ -985,6 +987,203 @@ describe('run pipeline', () => {
     });
   });
 
+  describe('a dismissed conflict', () => {
+    let dismissals: Dismissals;
+
+    const edit = async (side: 'a' | 'b', value: string, extra = ''): Promise<void> => {
+      writeFileSync(join(base, side, 'total.ts'), `${body(value)}${extra}`);
+      await observe();
+    };
+
+    /** The pair's one open Finding, dismissed as a person would. */
+    const dismissOpen = async (reason: 'wrong' | 'known' = 'wrong'): Promise<Finding> => {
+      const [open] = await store.listOpenFindings((await repo()).id);
+      return dismissals.dismiss(open!.id, { reason, note: null });
+    };
+
+    /** The same content merged afresh rather than answered from the cache. */
+    const runFresh = async (): Promise<PairRunResult> => {
+      const analyzer = textualAnalyzer as { version: number };
+      analyzer.version += 1;
+      try {
+        lastKey = null;
+        return await run();
+      } finally {
+        analyzer.version -= 1;
+      }
+    };
+
+    const raises = (): number => published('finding.raised').length;
+
+    beforeEach(async () => {
+      dismissals = createDismissals({ store, bus, logger: silentLogger });
+      await edit('a', '1');
+      await edit('b', '2');
+      await run();
+    });
+
+    it('stays dismissed when the same content is merged again, and raises nothing', async () => {
+      const dismissed = await dismissOpen();
+      const before = raises();
+
+      const again = await runFresh();
+
+      expect(again).toMatchObject({
+        kind: 'analysed',
+        cached: false,
+        clean: false,
+        findingCount: 0,
+      });
+      expect(raises()).toBe(before);
+      expect(await store.listOpenFindings((await repo()).id)).toEqual([]);
+      expect(await store.getFinding(dismissed.id)).toEqual(dismissed);
+      expect(published('finding.resolved')).toEqual([]);
+    });
+
+    it('stays dismissed when the same content is answered from the cache', async () => {
+      const dismissed = await dismissOpen('known');
+      const before = raises();
+      lastKey = null;
+
+      const hit = await run();
+
+      expect(hit).toMatchObject({ kind: 'analysed', cached: true, findingCount: 0 });
+      expect(raises()).toBe(before);
+      expect(await store.listOpenFindings((await repo()).id)).toEqual([]);
+      expect(await store.getFinding(dismissed.id)).toEqual(dismissed);
+    });
+
+    it('stays dismissed across a restart, which merges every pair again', async () => {
+      const dismissed = await dismissOpen();
+      pipeline.detach();
+      sweep = createSweep({ store, bus, runner, dataDir: join(base, 'data'), shadows });
+      pipeline = build();
+      await observe();
+      lastKey = null;
+
+      expect(await run()).toMatchObject({ kind: 'analysed', findingCount: 0 });
+      expect(await store.listDismissedFindings((await repo()).id)).toEqual([dismissed]);
+    });
+
+    it.each([
+      ['a', 'the conflicting line'],
+      ['b', 'the conflicting line'],
+      ['a', 'a line nowhere near the conflict'],
+      ['b', 'a line nowhere near the conflict'],
+    ] as const)(
+      'is raised again as new once side %s changes %s, and the dismissal ends',
+      async (side, where) => {
+        const dismissed = await dismissOpen();
+        const before = raises();
+        if (where === 'the conflicting line') await edit(side, side === 'a' ? '3' : '4');
+        else await edit(side, side === 'a' ? '1' : '2', 'export const unrelated = 1;\n');
+
+        const again = await run();
+
+        expect(again).toMatchObject({ kind: 'analysed', findingCount: 1 });
+        const [raised] = await store.listOpenFindings((await repo()).id);
+        expect(raised!.id).not.toBe(dismissed.id);
+        expect(raises()).toBe(before + 1);
+        const ended = await store.getFinding(dismissed.id);
+        expect(ended).toMatchObject({ status: 'dismissed', dismissal: dismissed.dismissal });
+        expect(ended!.resolvedAt).not.toBeNull();
+        const resolved = published('finding.resolved').at(-1)!;
+        expect(resolved.payload).toMatchObject({
+          findingId: dismissed.id,
+          reason: 'no-longer-reproduces',
+        });
+        expect(resolved.causedBy).toBe(published('run.analyzer-completed').at(-1)!.id);
+      },
+    );
+
+    it('is raised again once the conflict goes and comes back, even at the same content', async () => {
+      const dismissed = await dismissOpen();
+      await edit('b', '1');
+      expect(await run()).toMatchObject({ clean: true });
+      expect((await store.getFinding(dismissed.id))?.resolvedAt).not.toBeNull();
+      await edit('b', '2');
+
+      const back = await run();
+
+      expect(back).toMatchObject({ kind: 'analysed', cached: true, findingCount: 1 });
+      expect((await store.listOpenFindings((await repo()).id))[0]!.id).not.toBe(dismissed.id);
+    });
+
+    it('keeps its pair planned while nothing else would, so a run can end it', async () => {
+      const dismissed = await dismissOpen();
+      // Back to the base: nothing in common between the two sides any more.
+      writeFileSync(join(base, 'b', 'total.ts'), body('items.length'));
+      await observe();
+      const [a, b] = [await branchNamed('a'), await branchNamed('b')];
+
+      const { candidates, declined } = await pipeline.plan(a.repoId, a.id);
+
+      const candidate = candidates.find((c) => c.pair.a === b.id || c.pair.b === b.id);
+      expect(candidate).toMatchObject({ overlap: { tier: 'none' }, openFindings: true });
+      expect(declined).toBe(0);
+      expect(await pipeline.planPair(a.repoId, a.id, b.id)).toMatchObject({ openFindings: true });
+
+      await pipeline.runPair(request(candidate!), new AbortController().signal);
+
+      expect(await store.listDismissedFindings(a.repoId)).toEqual([]);
+      expect((await store.getFinding(dismissed.id))?.resolvedAt).not.toBeNull();
+      // Ended, it no longer holds the pair in the plan.
+      expect((await pipeline.plan(a.repoId, a.id)).declined).toBe(1);
+    });
+
+    it('leaves a dismissal that landed while a run was writing as it is', async () => {
+      const [open] = await store.listOpenFindings((await repo()).id);
+      // The run reads the Finding open and finds no dismissal, and the
+      // dismissal lands before it writes.
+      let armed = false;
+      const racing = new Proxy(store, {
+        get(target, property) {
+          if (property === 'listDismissedFindings' && armed) {
+            armed = false;
+            return async (repoId: RepoId) => {
+              const read = await target.listDismissedFindings(repoId);
+              await dismissals.dismiss(open!.id, { reason: 'wrong', note: null });
+              return read;
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
+        },
+      });
+      const using = createRunPipeline({
+        store: racing,
+        bus,
+        runner,
+        shadows,
+        logger: silentLogger,
+      });
+      using.attach();
+      // Conflict-free content, so the run means to resolve what it read open.
+      await edit('b', '1');
+      const [a, b] = [await branchNamed('a'), await branchNamed('b')];
+      const { candidates } = await using.plan(a.repoId, a.id);
+      const candidate = candidates.find((c) => c.pair.a === b.id || c.pair.b === b.id)!;
+      armed = true;
+
+      expect(await using.runPair(request(candidate), new AbortController().signal)).toMatchObject({
+        kind: 'analysed',
+        clean: true,
+      });
+      using.detach();
+
+      expect(armed).toBe(false);
+      expect(await store.getFinding(open!.id)).toMatchObject({
+        status: 'dismissed',
+        resolvedAt: null,
+      });
+      expect(
+        published('finding.resolved').filter(
+          (record) => (record.payload as { findingId: string }).findingId === open!.id,
+        ),
+      ).toEqual([]);
+    });
+  });
+
   describe('sides', () => {
     it('writes the watcher’s captures into the shadow, never the user’s store', async () => {
       writeFileSync(join(base, 'a', 'total.ts'), body('captured'));
@@ -1588,6 +1787,31 @@ describe('run pipeline', () => {
       await collector().pass(new Date().toISOString());
 
       for (const commit of evidenceCommits(finding!)) expect(await readable(commit)).toBe(true);
+    });
+
+    it('keeps a live dismissal’s commits, and lets them go once it ends', async () => {
+      await run();
+      const [finding] = await store.listOpenFindings((await repo()).id);
+      await createDismissals({ store, bus, logger: silentLogger }).dismiss(finding!.id, {
+        reason: 'wrong',
+        note: null,
+      });
+      const commits = evidenceCommits(finding!);
+      await age(30 * 24 * HOUR);
+
+      await collector().pass(new Date().toISOString());
+
+      for (const commit of commits) expect(await readable(commit)).toBe(true);
+
+      writeFileSync(join(base, 'b', 'total.ts'), body('items.length'));
+      await observe();
+      expect(await run()).toMatchObject({ kind: 'analysed', clean: true });
+      expect((await store.getFinding(finding!.id))?.resolvedAt).not.toBeNull();
+      await age(30 * 24 * HOUR);
+
+      await collector().pass(new Date().toISOString());
+
+      for (const commit of commits) expect(await readable(commit)).toBe(false);
     });
 
     it('keeps the trees an idle branch was last seen at, which its next check merges', async () => {
