@@ -4,6 +4,22 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-06 — false-positive budget
+
+- **Task rewritten before starting.** The issue's approach held — dismiss a conflict at its content, suppress in reconciliation, count in a table retention never prunes, "delivered" not measured — with gaps that would have shipped a rate nobody could read. The rewrite is in the milestone.
+- **Found — the task named the wrong files.** `core/src/advisor/` plays no part, and "delivered" counts nothing until something delivers; reported as not measured, never 0.
+- **Decided — a dismissal is the key at each side's blob, by branch id.** Compared by branch id because a Finding's attribution may name the pair the other way round from the pair. A Finding with no `textualFindingKey` is refused: dismissed alone, it could not be matched again and would last one run.
+- **Decided — a dismissal lasts while its conflict reproduces at that content.** A run or hit that does not find it ends it (`resolvedAt` set, status kept), so retention can take it; the conflict returning later, even at the same content, is a new Finding. An agent reverting and re-applying a change will therefore see it again — saying it twice was preferred to a suppression nobody can see the end of.
+- **Decided — a dismissed Finding is written only by dismissing and ending it.** A run that read the Finding open before a dismissal landed would otherwise write it back open over the dismissal.
+- **Decided — cohorts by raise.** A dismissal is counted in the hour its Finding was first raised, so a window's rate is of the Findings raised in it: never above 100%, and an old window's rate can still rise. Counting dismissals when made would mix cohorts in a short window.
+- **Decided — hour buckets.** "Last 24 hours" is the current UTC hour and the 23 before it, and the report prints the instant that starts; a day bucket would have printed one window and computed another.
+- **Decided — the whole id, no prefix,** and `check` prints it. ULIDs made in one millisecond share ten characters, so a prefix is ambiguous exactly when Findings arrive together.
+- **Decided — `--reason` is required.** A default would decide the rate for whoever did not think about it.
+- **Decided — undismiss is out of scope.** A mistaken dismissal ends as soon as either side changes.
+- **Decided — exit codes for `dismiss`** follow `status` and `check`: 0, 64 for bad arguments or a Finding that is unknown, resolved, already dismissed or has no identity, 69 no daemon, 70 anything else. Two error codes so the CLI decides by code: `FINDING_NOT_FOUND` (404), `FINDING_NOT_DISMISSABLE` (409).
+- **Decided — a live dismissal is live state** for retention and for the shadow's keep refs alike, as an open Finding is; an ended one is not. The counters table is never pruned: a row per rule per active hour.
+- **Decided — daemon-wide, not per repository.** A false positive is a detector's bug.
+
 ## 2026-10-04 — review of `interlock check`
 
 - **Decided by a human — the second write route stands.** The same token, loopback only, a small validated body, branch names never handed to git, and only the work the scheduler does unasked.

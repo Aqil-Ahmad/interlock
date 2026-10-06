@@ -533,10 +533,70 @@ merge-tree` over the two commits reports the conflict — with neither side
   change in either, a comment included, is a miss.
 
 - [ ] **False-positive budget**
-      **Files:** `packages/daemon/src/store/`, `packages/core/src/advisor/`
-      **What:** count findings raised, findings delivered, and findings later dismissed or resolved as wrong. Expose the ratio.
-      **Done when:** the daemon can report its own false-positive rate for a time window, and `interlock status` shows it.
-      **Constraints:** the design rule is **when unsure, say nothing**. A tool that catches 60% of conflicts and never lies is a product; one that catches 95% and cries wolf twice a day is uninstalled within a week. Every false positive is a bug with an issue, not a tuning parameter. Decide what a dismissal means before counting one: reconciliation matches open Findings only, so today a dismissed conflict is raised again as a new Finding on the pair's next run — or cache hit, which reconciles the same way — and a dismissal lasts one run.
+      **Files:** `packages/shared/src/models/finding.ts`, `packages/shared/src/events/`, `packages/core/src/merge/conflict-classifier.ts`, `packages/daemon/src/store/`, `packages/daemon/src/api/`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/dismiss.ts`, `packages/daemon/src/budget.ts`, `packages/cli/src/commands/`, `packages/cli/src/render.ts`, `docs/architecture.md`, `docs/threat-model.md`
+      **What:** measure how often Interlock is wrong — Findings raised against Findings a human dismissed as wrong — and make a dismissal last, so the same false positive is not raised again on every run.
+
+  Rewritten before starting, from reading the pipeline, the store and
+  retention. Two premises of the first draft were wrong: `core/src/advisor/`
+  has nothing to do with it, and nothing delivers Findings yet, so a
+  "delivered" count would be a zero standing in for "not measured".
+  **A dismissal's identity** is the conflict's `textualFindingKey` (rule,
+  pair, path) at its content: each side's blob oid from the `merge-conflict`
+  evidence, null for a side that deleted the file, read by branch id and never
+  by position, since a Finding's attribution may name the pair the other way
+  round. A Finding with no key — no textual Finding lacks one, and no other
+  kind exists yet — is refused, not dismissed alone: one that cannot be
+  matched again would last one run, which is the bug being fixed.
+  **Where it applies:** in `reconcileFindings`, which a run and a cache hit
+  both go through. A found Finding matching a live dismissal on key and
+  content raises nothing and leaves the dismissal as it is. A live dismissal
+  the run does not find at its content has stopped reproducing: it is ended —
+  `resolvedAt` set, status kept, a `finding.resolved` with
+  `no-longer-reproduces` — and a later return of the conflict is a new Finding,
+  even at the dismissed content. Planning treats a pair with a live dismissal
+  as it treats one with an open Finding, so a run comes round to end it.
+  **Model and event:** `Finding.dismissal` (`reason` `wrong` or `known`, an
+  optional note of at most 500 characters, `dismissedAt`), migration 005. A
+  dismissed Finding is written only by the dismissal and by its ending: a run
+  that read it open before the dismissal landed cannot write it back open. A
+  `finding.dismissed` event carries the reason and the run, caused by the
+  Finding's own `finding.raised`.
+  **Counting:** a counters table by UTC hour, kind and rule, incremented in
+  the transaction that raises or dismisses, never pruned. Raised is distinct
+  Finding ids first raised. A dismissal is counted in the hour its Finding was
+  first raised, so a window's rate is of the Findings raised in it — a cohort,
+  never above 100%, which can still rise as later dismissals come in. Only
+  `wrong` counts as false; `known` is counted beside it; `no-longer-reproduces`
+  is neither. The windows are the last 24 and 168 whole UTC hours including
+  the current one, and the report states the instant each starts. Zero raised
+  is no data, never 0%. Daemon-wide, per rule and overall: a detector's bug is
+  not a repository's.
+  **Names:** `interlock check` prints each Finding's id; `dismiss` takes the
+  whole id. No prefix: ULIDs made in one millisecond share their first ten
+  characters, so a short prefix is ambiguous exactly when Findings come
+  together. **Undismiss** is out of scope: a mistaken dismissal ends when
+  either side changes.
+
+  **Done when:** `POST /api/findings/:id/dismiss` and `interlock dismiss <id>
+--reason wrong|known [--note <text>]` dismiss an open Finding; exits are 0
+  dismissed, 64 for bad arguments, an unknown Finding, or one already resolved,
+  already dismissed or with no identity, 69 for no daemon, 70 for anything else;
+  dismissed content run again, or answered from the cache, raises nothing;
+  either side's blob changing raises a new Finding; `GET /api/budget` and
+  `interlock status` (and `--json`) report raised, dismissed as wrong, dismissed
+  as known, the rate or "no data", and the most-dismissed rules for both
+  windows with their start, and "delivered" as not measured, never 0; the
+  counts survive a retention pass; a live dismissal's run, events and evidence
+  commits survive retention and shadow collection, an ended one's do not;
+  tested end to end against a real daemon on a temp data dir.
+  **Constraints:** when unsure, say nothing. The rate is a signal for fixing
+  detectors and never a threshold that suppresses output; every false positive
+  is a bug with an issue. A third write route — it changes a Finding and the
+  counts — is a security-posture question: the same token, loopback only, a
+  1 KiB body, every field validated, unknown keys refused, the reason an enum,
+  the note bounded and escaped before a terminal prints it; flagged in the PR
+  for a human decision and recorded in the threat model. `interlock status`
+  keeps never failing on Findings.
 
 - [ ] **Show a shadow collection in `interlock status`**
       **Files:** `packages/daemon/src/api/`, `packages/cli/src/commands/status.ts`, `packages/cli/src/render.ts`
