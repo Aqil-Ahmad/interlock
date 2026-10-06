@@ -106,9 +106,10 @@ Two exceptions are always planned, at least one tier up:
   pair. It is the merge that will actually happen, it costs N−1 pairs rather
   than N², and the default branch's own change set is empty against itself, so
   file overlap cannot rank it.
-- **A pair with an open Finding.** Only a run resolves one, and undoing the
-  conflicting edit is exactly what removes the overlap. Declined, such a pair
-  would keep its Finding open forever.
+- **A pair with an open Finding, or a live dismissal.** Only a run resolves
+  one, and undoing the conflicting edit is exactly what removes the overlap.
+  Declined, such a pair would keep its Finding open forever — or its
+  dismissal live, holding its run, events and commits past retention.
 
 A branch no worktree holds is never snapshotted, so its change set is its
 committed changes alone, diffed from its head once per head. Without one, every
@@ -219,6 +220,16 @@ Finding traces back to the edit.
 
 A Finding matching an open one of the same pair by `textualFindingKey` keeps
 that one's id, `firstSeenAt` and run; an open one not reproduced is resolved.
+
+A Finding matching a live dismissal of the pair by `textualFindingKey` and by
+`textualFindingContent` — each side's blob of the file, by branch id — is the
+conflict a person already judged, at the content they judged: it raises
+nothing, and the dismissal stands. A cache hit reconciles the verdict's
+Findings the same way, so it never raises one a run would not. A live
+dismissal the run did not find at its content has stopped reproducing; it is
+ended, `resolvedAt` set with `dismissed` kept, and a later return is new. A run
+never writes over a dismissed Finding: one that read it open before the
+dismissal landed finds its write refused, and publishes nothing for it.
 
 The watcher announces a tree again when the head under it moves, even if the
 files did not: a commit of exactly the work on disk, or a rebase, changes the

@@ -532,7 +532,7 @@ merge-tree` over the two commits reports the conflict — with neither side
   redaction every excerpt goes through and the models a Finding is made of. Any
   change in either, a comment included, is a miss.
 
-- [ ] **False-positive budget**
+- [x] **False-positive budget**
       **Files:** `packages/shared/src/models/finding.ts`, `packages/shared/src/events/`, `packages/core/src/merge/conflict-classifier.ts`, `packages/daemon/src/store/`, `packages/daemon/src/api/`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/dismiss.ts`, `packages/daemon/src/budget.ts`, `packages/cli/src/commands/`, `packages/cli/src/render.ts`, `docs/architecture.md`, `docs/threat-model.md`
       **What:** measure how often Interlock is wrong — Findings raised against Findings a human dismissed as wrong — and make a dismissal last, so the same false positive is not raised again on every run.
 
@@ -575,7 +575,9 @@ merge-tree` over the two commits reports the conflict — with neither side
   whole id. No prefix: ULIDs made in one millisecond share their first ten
   characters, so a short prefix is ambiguous exactly when Findings come
   together. **Undismiss** is out of scope: a mistaken dismissal ends when
-  either side changes.
+  either side changes. **`check`** lists dismissed conflicts that still stand
+  beside the open ones; they leave the pair clean, so a dismissal does not keep
+  failing a gate.
 
   **Done when:** `POST /api/findings/:id/dismiss` and `interlock dismiss <id>
 --reason wrong|known [--note <text>]` dismiss an open Finding; exits are 0
@@ -593,7 +595,7 @@ merge-tree` over the two commits reports the conflict — with neither side
   detectors and never a threshold that suppresses output; every false positive
   is a bug with an issue. A third write route — it changes a Finding and the
   counts — is a security-posture question: the same token, loopback only, a
-  1 KiB body, every field validated, unknown keys refused, the reason an enum,
+  4 KiB body, every field validated, unknown keys refused, the reason an enum,
   the note bounded and escaped before a terminal prints it; flagged in the PR
   for a human decision and recorded in the threat model. `interlock status`
   keeps never failing on Findings.
