@@ -378,6 +378,9 @@ describe('interlock status', () => {
       writeFileSync(tokenPath(dataDir), 'stand-in\n', { mode: 0o600 });
     };
 
+    /** The budget a daemon with nothing counted answers, for a stand-in that gets that far. */
+    const BUDGET = { status: 200, body: { budget: { windows: [] } } };
+
     beforeEach(() => {
       peak = 0;
       inFlight = 0;
@@ -428,6 +431,7 @@ describe('interlock status', () => {
           body: { error: { code: 'REPO_NOT_FOUND', message: 'No such repository' } },
         },
         '/api/repos/gone/sessions': { status: 200, body: { sessions: [] } },
+        '/api/budget': BUDGET,
       });
 
       expect(await status('--data-dir', dataDir)).toBe(70);
@@ -494,6 +498,7 @@ describe('interlock status', () => {
       await serve({
         '/api/health': { status: 200, body: { protocolVersion: 1 } },
         '/api/repos': { status: 200, body: { repos } },
+        '/api/budget': BUDGET,
         ...perRepo,
       });
 

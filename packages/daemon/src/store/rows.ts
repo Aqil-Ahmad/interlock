@@ -3,6 +3,7 @@ import {
   SESSION_ATTRIBUTIONS,
   ANALYZER_KINDS,
   ANALYZER_VERDICTS,
+  DISMISSAL_REASONS,
   FINDING_STATUSES,
   InterlockError,
   RUN_STATUSES,
@@ -349,6 +350,15 @@ export function toFinding(row: Row, evidence: readonly Evidence[]): Finding {
     firstSeenAt: text(row, 'first_seen_at'),
     updatedAt: text(row, 'updated_at'),
     resolvedAt: textOrNull(row, 'resolved_at'),
+    ...(row.dismissal_reason === null
+      ? {}
+      : {
+          dismissal: {
+            reason: oneOf(row, 'dismissal_reason', DISMISSAL_REASONS),
+            note: textOrNull(row, 'dismissal_note'),
+            dismissedAt: text(row, 'dismissed_at'),
+          },
+        }),
   };
 }
 
@@ -370,6 +380,9 @@ export function findingParams(finding: Finding): Params {
     first_seen_at: finding.firstSeenAt,
     updated_at: finding.updatedAt,
     resolved_at: finding.resolvedAt,
+    dismissal_reason: finding.dismissal?.reason ?? null,
+    dismissal_note: finding.dismissal?.note ?? null,
+    dismissed_at: finding.dismissal?.dismissedAt ?? null,
   };
 }
 

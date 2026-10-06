@@ -396,6 +396,7 @@ describe('renderCheck', () => {
         resolvedAt: null,
       },
     ],
+    dismissed: [],
   });
 
   it('escapes every piece of the repository it prints, excerpts a line at a time', () => {

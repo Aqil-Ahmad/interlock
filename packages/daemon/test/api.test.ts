@@ -20,6 +20,7 @@ import type { BranchRefId, InterlockConfig, LogRecord, RepoId } from '@interlock
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApiServer, ensureToken } from '../src/api/index.js';
 import type { CheckRequest, Checks } from '../src/check.js';
+import { createDismissals } from '../src/dismiss.js';
 import type { ApiServer, Bound } from '../src/api/index.js';
 import { EventBus } from '../src/bus/index.js';
 import { createSessionRegistry } from '../src/hooks/index.js';
@@ -151,10 +152,18 @@ describe('localhost API', () => {
           mergeBaseSha: 'a'.repeat(40),
           clean: true,
           findings: [],
+          dismissed: [],
         });
       },
     };
-    api = createApiServer({ config, store, sessions, checks: () => checks, logger });
+    api = createApiServer({
+      config,
+      store,
+      sessions,
+      checks: () => checks,
+      dismissals: createDismissals({ store, bus, logger }),
+      logger,
+    });
     bound = await api.start();
   });
 

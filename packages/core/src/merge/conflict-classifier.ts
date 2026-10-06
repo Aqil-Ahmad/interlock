@@ -269,6 +269,30 @@ export function textualFindingKey(finding: Finding): string | null {
   return JSON.stringify(['textual', finding.rule, ...pair, merge.path]);
 }
 
+/**
+ * The content a textual Finding was raised at — each branch's blob of the
+ * conflicted file — or null for any other Finding.
+ *
+ * What a dismissal is held to beside {@link textualFindingKey}: the key says
+ * which conflict, this says at what content, and a dismissal of one conflict
+ * outlives neither side's file changing. Keyed by branch id, never by side:
+ * the evidence's sides follow the Finding's own attribution, which may name the
+ * pair the other way round from another Finding of the same conflict. A side
+ * that deleted the file is null, which is content too.
+ */
+export function textualFindingContent(finding: Finding): string | null {
+  const merge = finding.evidence.find(
+    (evidence): evidence is MergeConflictEvidence => evidence.type === 'merge-conflict',
+  );
+  if (finding.kind !== 'textual' || merge === undefined) return null;
+  const sides: [string, string | null][] = [
+    [finding.attribution.branchA, merge.sideA?.oid ?? null],
+    [finding.attribution.branchB, merge.sideB?.oid ?? null],
+  ];
+  sides.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return JSON.stringify(sides);
+}
+
 // --- Structure ---------------------------------------------------------------
 
 interface Conflict {

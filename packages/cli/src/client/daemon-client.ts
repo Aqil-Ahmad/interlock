@@ -6,7 +6,15 @@ import {
   runtimePath,
   tokenPath,
 } from '@interlock/shared';
-import type { AgentSession, BranchRef, BranchRefId, Finding, Repo } from '@interlock/shared';
+import type {
+  AgentSession,
+  AnalyzerKind,
+  BranchRef,
+  BranchRefId,
+  DismissalReason,
+  Finding,
+  Repo,
+} from '@interlock/shared';
 
 /**
  * The CLI's half of the localhost API.
@@ -38,6 +46,47 @@ export interface DaemonClient {
    * that says why it ran out.
    */
   check(repoId: Repo['id'], request: CheckRequest): Promise<CheckReport>;
+  /** Dismiss one open Finding, answered with it as dismissed. */
+  dismiss(findingId: string, request: DismissRequest): Promise<Finding>;
+  /** How often Findings were dismissed as wrong, over each window the daemon reports. */
+  budget(): Promise<BudgetReport>;
+}
+
+/** What `POST /api/findings/:id/dismiss` takes. */
+export interface DismissRequest {
+  readonly reason: DismissalReason;
+  readonly note: string | null;
+}
+
+/** What `GET /api/budget` answers: raised and dismissed counts by window, overall and per rule. */
+export interface BudgetReport {
+  readonly windows: readonly BudgetWindow[];
+}
+
+export interface BudgetWindow {
+  readonly hours: number;
+  /** The start of the earliest whole UTC hour counted. */
+  readonly since: string;
+  readonly until: string;
+  /** Findings first raised in the window. */
+  readonly raised: number;
+  /** Of those, how many have been dismissed as wrong, and as known. */
+  readonly dismissedWrong: number;
+  readonly dismissedKnown: number;
+  /** Null when nothing was raised: no data, not 0. */
+  readonly rate: number | null;
+  /** Null: not measured. */
+  readonly delivered: null;
+  readonly rules: readonly BudgetRule[];
+}
+
+export interface BudgetRule {
+  readonly kind: AnalyzerKind;
+  readonly rule: string;
+  readonly raised: number;
+  readonly dismissedWrong: number;
+  readonly dismissedKnown: number;
+  readonly rate: number | null;
 }
 
 /** What `POST /api/repos/:id/check` takes. */
@@ -56,6 +105,8 @@ export interface CheckReport {
   readonly mergeBaseSha: string;
   readonly clean: boolean;
   readonly findings: readonly Finding[];
+  /** Conflicts dismissed at the content they still stand at; they leave the pair clean. */
+  readonly dismissed: readonly Finding[];
 }
 
 /**
@@ -187,6 +238,14 @@ export async function connectDaemon(dataDir: string): Promise<DaemonClient> {
             }),
         })
       ).check;
+    },
+    async dismiss(findingId: string, body: DismissRequest): Promise<Finding> {
+      const encoded = encodeURIComponent(findingId);
+      return (await request<{ finding: Finding }>(`/api/findings/${encoded}/dismiss`, body))
+        .finding;
+    },
+    async budget(): Promise<BudgetReport> {
+      return (await request<{ budget: BudgetReport }>('/api/budget')).budget;
     },
   };
 }

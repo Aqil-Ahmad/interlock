@@ -5,6 +5,7 @@ import { INTERLOCK_PROTOCOL_VERSION, notImplemented } from '@interlock/shared';
 import type { DaemonRuntime, EventRecord, InterlockConfig, Logger } from '@interlock/shared';
 import { createApiServer } from './api/index.js';
 import { createChecks } from './check.js';
+import { createDismissals } from './dismiss.js';
 import type { Checks } from './check.js';
 import { holdDataDir, refuseDataDirInRepos } from './data-dir.js';
 import type { DataDirHold } from './data-dir.js';
@@ -189,6 +190,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         store,
         sessions,
         checks: () => checks,
+        dismissals: createDismissals({ store, bus, logger: options.logger }),
         logger: options.logger,
       });
       const bound = await api.start();

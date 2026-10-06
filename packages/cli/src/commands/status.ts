@@ -1,6 +1,6 @@
 import { InterlockError, dataDirFrom, isInterlockError } from '@interlock/shared';
 import { connectDaemon } from '../client/daemon-client.js';
-import { renderJson, renderStatus } from '../render.js';
+import { renderBudget, renderJson, renderStatus } from '../render.js';
 import type { RepoView } from '../render.js';
 import type { Command } from './command.js';
 import { describeError } from './describe.js';
@@ -27,7 +27,8 @@ const EXIT_SOFTWARE = 70;
 const USAGE = [
   'Usage: interlock status [options]',
   '',
-  'Show in-flight branches, their dirty state and touched files.',
+  'Show in-flight branches, their dirty state and touched files, and how many',
+  'Findings were dismissed as wrong over the last 24 hours and 7 days.',
   '',
   'Options:',
   '  --json              Emit the same facts as JSON',
@@ -123,7 +124,7 @@ export async function runStatus(
 
   try {
     const client = await connectDaemon(options.dataDir);
-    const repos = await client.repos();
+    const [repos, budget] = await Promise.all([client.repos(), client.budget()]);
     // Together rather than one after another: each carries its own timeout, so
     // a serial pass multiplies the worst case by the number of repositories
     // while the daemon answers all of them off one local socket pool.
@@ -136,7 +137,9 @@ export async function runStatus(
         return { repo, branches, sessions };
       }),
     );
-    io.out(options.json ? renderJson(views) : renderStatus(views));
+    io.out(
+      options.json ? renderJson(views, budget) : `${renderStatus(views)}\n${renderBudget(budget)}`,
+    );
     // Whatever it found. A report that failed the build because it had
     // something to report would be used once and then piped to `true`.
     return EXIT_OK;

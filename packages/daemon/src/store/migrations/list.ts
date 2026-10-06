@@ -3,6 +3,7 @@ import { INITIAL_SCHEMA } from './001-initial.js';
 import { addSessionLiveness } from './002-session-liveness.js';
 import { addAnalyzerCacheRun } from './003-analyzer-cache-run.js';
 import { addRetentionIndexes } from './004-retention.js';
+import { addDismissals } from './005-dismissals.js';
 
 /**
  * Schema migrations.
@@ -35,6 +36,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 2, name: 'session-liveness', up: addSessionLiveness },
   { version: 3, name: 'analyzer-cache-run', up: addAnalyzerCacheRun },
   { version: 4, name: 'retention', up: addRetentionIndexes },
+  { version: 5, name: 'dismissals', up: addDismissals },
 ];
 
 export const SCHEMA_VERSION: number = MIGRATIONS.reduce(

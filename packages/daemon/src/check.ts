@@ -36,8 +36,15 @@ export interface CheckReport {
   readonly a: CheckedBranch;
   readonly b: CheckedBranch;
   readonly mergeBaseSha: string;
+  /** No open Findings. A pair whose only conflicts were dismissed is clean: a human said so. */
   readonly clean: boolean;
   readonly findings: readonly Finding[];
+  /**
+   * Conflicts a human dismissed that still stand at the content they judged.
+   * Reported beside the open ones, so a pair holding one is never described as
+   * merging cleanly.
+   */
+  readonly dismissed: readonly Finding[];
 }
 
 export interface Checks {
@@ -181,15 +188,17 @@ export function createChecks(options: ChecksOptions): Checks {
       }
       answerFor(outcome, a, b);
       const key = makePairKey(a.id, b.id);
-      const findings = (await store.listOpenFindings(repo.id)).filter(
-        (finding) => makePairKey(finding.attribution.branchA, finding.attribution.branchB) === key,
-      );
+      const ofPair = (finding: Finding): boolean =>
+        makePairKey(finding.attribution.branchA, finding.attribution.branchB) === key;
+      const findings = (await store.listOpenFindings(repo.id)).filter(ofPair);
+      const dismissed = (await store.listDismissedFindings(repo.id)).filter(ofPair);
       log.info('checked a pair', {
         repoId: repo.id,
         a: a.id,
         b: b.id,
         attempts: attempt,
         findings: findings.length,
+        dismissed: dismissed.length,
       });
       return {
         repoId: repo.id,
@@ -198,6 +207,7 @@ export function createChecks(options: ChecksOptions): Checks {
         mergeBaseSha: candidate.pair.mergeBaseSha,
         clean: findings.length === 0,
         findings,
+        dismissed,
       };
     }
   };

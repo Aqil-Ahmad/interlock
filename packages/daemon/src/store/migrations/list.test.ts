@@ -36,6 +36,7 @@ describe('merged migrations do not change', () => {
     2: '8e093305cdab6bbf',
     3: '1000d99ead1b0a42',
     4: 'c739b66a4d11d061',
+    5: '674abc970ed74e50',
   };
 
   it('has a recorded digest for every migration, and every digest matches', () => {

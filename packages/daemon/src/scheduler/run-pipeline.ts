@@ -11,6 +11,7 @@ import {
   runRequired,
   speculativeMerge,
   textualAnalyzer,
+  textualFindingContent,
   textualFindingKey,
 } from '@interlock/core';
 import type {
@@ -425,6 +426,17 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     return made.commitSha;
   };
 
+  /**
+   * The Findings only a run of their pair can end: open ones, and dismissals
+   * still holding a conflict back. A pair holding either is planned whatever
+   * its overlap — undoing the conflicting edit is exactly what removes the
+   * overlap, and a dismissal no run ever comes back to is kept for good.
+   */
+  const heldFindings = async (repoId: RepoId): Promise<Finding[]> => [
+    ...(await store.listOpenFindings(repoId)),
+    ...(await store.listDismissedFindings(repoId)),
+  ];
+
   const plan = async (repoId: RepoId, branchRefId: BranchRefId): Promise<PairPlan> => {
     const repo = await repoOf(repoId);
     if (repo === null) return { candidates: [], declined: 0 };
@@ -434,7 +446,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     const handle = await handleOf(repo);
     const stored = new Map((await store.listMergePairs(repoId)).map((pair) => [pair.key, pair]));
     const withFindings = new Set(
-      (await store.listOpenFindings(repoId)).map((finding) =>
+      (await heldFindings(repoId)).map((finding) =>
         makePairKey(finding.attribution.branchA, finding.attribution.branchB),
       ),
     );
@@ -511,7 +523,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
       lastRunAt: stored?.lastRunAt ?? null,
       stale: true,
     });
-    const openFindings = (await store.listOpenFindings(repoId)).some(
+    const openFindings = (await heldFindings(repoId)).some(
       (finding) => makePairKey(finding.attribution.branchA, finding.attribution.branchB) === key,
     );
     return {
@@ -915,13 +927,20 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   };
 
   /**
-   * Write a run's Findings over the pair's open ones.
+   * Write a run's Findings over the pair's open and dismissed ones.
    *
    * The same conflict is found on every run while both branches sit still, so a
    * Finding that matches an open one by `textualFindingKey` takes over that
    * one's id, `firstSeenAt` and run — a Finding belongs to the run that raised
    * it, which the store keeps while the Finding is open — rather than opening a
    * duplicate. An open one the run did not reproduce is resolved.
+   *
+   * A Finding matching a dismissed one on the key and on each side's content
+   * is the conflict a human already judged, at the content they judged: it
+   * raises nothing, and the dismissal stands. Matched on the key alone, an edit
+   * anywhere in the file would stay hidden behind a verdict about other code.
+   * A dismissal the run did not find at its content has stopped reproducing,
+   * and is ended, so the conflict coming back is raised as new.
    */
   const reconcileFindings = async (
     repoId: RepoId,
@@ -930,18 +949,32 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     cause: EventId,
   ): Promise<Finding['id'][]> => {
     const now = new Date().toISOString();
-    const open = (await store.listOpenFindings(repoId)).filter(
-      (finding) =>
-        finding.kind === 'textual' &&
-        makePairKey(finding.attribution.branchA, finding.attribution.branchB) === pair.key,
-    );
+    const ofPair = (finding: Finding): boolean =>
+      finding.kind === 'textual' &&
+      makePairKey(finding.attribution.branchA, finding.attribution.branchB) === pair.key;
+    const open = (await store.listOpenFindings(repoId)).filter(ofPair);
     const byKey = new Map(open.map((finding) => [textualFindingKey(finding), finding]));
+    const dismissed = (await store.listDismissedFindings(repoId)).filter(ofPair);
+    const holding = new Set<Finding['id']>();
 
     const ids: Finding['id'][] = [];
     for (const finding of found) {
-      const previous = byKey.get(textualFindingKey(finding));
+      const key = textualFindingKey(finding);
+      const content = textualFindingContent(finding);
+      const judged = dismissed.find(
+        (dismissal) =>
+          key !== null &&
+          content !== null &&
+          textualFindingKey(dismissal) === key &&
+          textualFindingContent(dismissal) === content,
+      );
+      if (judged !== undefined) {
+        holding.add(judged.id);
+        continue;
+      }
+      const previous = byKey.get(key);
       if (previous !== undefined) {
-        byKey.delete(textualFindingKey(finding));
+        byKey.delete(key);
         await store.upsertFinding({
           ...finding,
           id: previous.id,
@@ -951,7 +984,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         ids.push(previous.id);
         continue;
       }
-      await store.upsertFinding(finding);
+      await store.raiseFinding(finding);
       ids.push(finding.id);
       await bus.publish(
         {
@@ -968,13 +1001,35 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     }
 
     for (const gone of byKey.values()) {
-      await store.upsertFinding({ ...gone, status: 'resolved', resolvedAt: now, updatedAt: now });
+      // Dismissed since it was read: the dismissal is the newer word on it.
+      const written = await store.upsertFinding({
+        ...gone,
+        status: 'resolved',
+        resolvedAt: now,
+        updatedAt: now,
+      });
+      if (!written) continue;
       await bus.publish(
         {
           type: 'finding.resolved',
           repoId,
           at: now,
           findingId: gone.id,
+          reason: 'no-longer-reproduces',
+        },
+        { causedBy: cause },
+      );
+    }
+
+    for (const dismissal of dismissed) {
+      if (holding.has(dismissal.id)) continue;
+      if (!(await store.endDismissal(dismissal.id, now))) continue;
+      await bus.publish(
+        {
+          type: 'finding.resolved',
+          repoId,
+          at: now,
+          findingId: dismissal.id,
           reason: 'no-longer-reproduces',
         },
         { causedBy: cause },
