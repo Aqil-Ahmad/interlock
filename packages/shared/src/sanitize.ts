@@ -46,8 +46,12 @@ const ROLE_TAG = /<\/?(?:system|assistant|user|instructions?)>/i;
  * marker, and those were most of what this neutralised in ordinary code.
  */
 const COMMENT_OPENER = /(?<!:)\/\/|\/\*|#|--|;/g;
-/** A comment's own punctuation, which stands between the opener and the words. */
-const LEADING_MARKERS = /^(?:\s*(?:\/\/+|\/\*+|\*+\/?|#+|-{2,}|<!--|;+))+/;
+/**
+ * A comment's own punctuation, which stands between the opener and the words.
+ * `<!--` needs no entry: its `--` is an opener, read from there. A single `-`
+ * is not a marker, because it opens every Markdown list item.
+ */
+const LEADING_MARKERS = /^(?:\s*(?:\/\/+|\/\*+|\*+\/?|#+|-{2,}|;+))+/;
 
 /**
  * Unicode tag characters, `U+E0000`–`U+E007F`.
@@ -78,9 +82,10 @@ const HIDDEN = /[\p{Bidi_Control}\u{E0000}-\u{E007F}]/gu;
  * Normalised so that a disguise of an instruction matches as the instruction:
  * NFKC folds full-width and other compatibility forms onto ASCII, and invisible
  * characters are dropped, so a zero-width space inside `ignore` hides nothing.
- * A run of tag characters is decoded to the ASCII it shadows and kept apart,
+ * A run of tag characters is decoded to the ASCII it shadows and read apart,
  * because that is how a model reads it: a separate sentence, not the tail of
- * the code before it.
+ * the code before it. In the visible text it is dropped like any other
+ * invisible, so it cannot split a word a person reads whole.
  */
 function readings(line: string): string[] {
   const hidden: string[] = [];
@@ -90,7 +95,7 @@ function readings(line: string): string[] {
         .map((character) => String.fromCodePoint(character.codePointAt(0)! - 0xe0000))
         .join(''),
     );
-    return ' ';
+    return '';
   });
   return [visible, ...hidden].map((text) => text.replace(IGNORABLE, '').normalize('NFKC'));
 }
