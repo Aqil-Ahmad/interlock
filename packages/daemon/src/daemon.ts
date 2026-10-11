@@ -185,12 +185,17 @@ export function createDaemon(options: DaemonOptions): Daemon {
         staleAfterMs: config.sessions.staleAfterMs,
       });
       let checks: Checks | null = null;
+      // One shadow per repository for everything that writes objects: the
+      // watcher's captures and the commits a run merges must be one store.
+      // Before the listener, which reports its collections.
+      const shadows = createShadowRegistry({ runner, dataDir: config.dataDir });
       api = createApiServer({
         config,
         store,
         sessions,
         checks: () => checks,
         dismissals: createDismissals({ store, bus, logger: options.logger }),
+        collections: (repoId) => shadows.state(repoId),
         logger: options.logger,
       });
       const bound = await api.start();
@@ -204,9 +209,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
         });
       }, cadence);
 
-      // One shadow per repository for everything that writes objects: the
-      // watcher's captures and the commits a run merges must be one store.
-      const shadows = createShadowRegistry({ runner, dataDir: config.dataDir });
       const runs = createRunPipeline({ store, bus, runner, shadows, logger: options.logger });
       pipeline = runs;
       runs.attach();

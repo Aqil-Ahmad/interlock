@@ -160,6 +160,49 @@ describe('daemon', () => {
       Date.parse(before) - SNAPSHOT_COMMIT_REUSE_MS,
     );
     expect(collected).toMatchObject({ level: 'info', unkeepable: [] });
+
+    // The pause the log line gives is the one the API serves, read off the
+    // same registry.
+    const repos = await call<{ repos: Repo[] }>('/api/repos', token());
+    const id = repos.body.repos[0]!.id;
+    const state = await call<{ collection: { phase: string; last: { pausedMs: number } | null } }>(
+      `/api/repos/${id}/collection`,
+      token(),
+    );
+    expect(state.status).toBe(200);
+    expect(state.body.collection).toMatchObject({
+      phase: 'idle',
+      last: { pausedMs: collected.pausedMs },
+    });
+  });
+
+  it('reads as no collection yet after a restart', async () => {
+    await daemon.start();
+    await until(
+      () => Promise.resolve(logs.find((record) => record.msg === 'collected the shadow') ?? null),
+      'a shadow collection',
+    );
+    await daemon.stop();
+
+    daemon = createDaemon({
+      config,
+      logger: createLogger('test', { level: 'trace', sink: (record) => logs.push(record) }),
+      sweepIntervalMs: 200,
+    });
+    const restarted = new Date().toISOString();
+    await daemon.start();
+    const repos = await call<{ repos: Repo[] }>('/api/repos', token());
+    const id = repos.body.repos[0]!.id;
+    const state = await call<{ collection: { last: { endedAt: string } | null } }>(
+      `/api/repos/${id}/collection`,
+      token(),
+    );
+
+    // The restarted daemon's own first pass may have finished by now; what it
+    // never reads is the collection the previous daemon ran.
+    const last = state.body.collection.last;
+    if (last !== null) expect(last.endedAt >= restarted).toBe(true);
+    expect(state.body.collection).toMatchObject({ failing: null });
   });
 
   it('prunes again on its timer, and a pass in flight holds up a stop', async () => {

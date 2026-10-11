@@ -27,8 +27,9 @@ const EXIT_SOFTWARE = 70;
 const USAGE = [
   'Usage: interlock status [options]',
   '',
-  'Show in-flight branches, their dirty state and touched files, and how many',
-  'Findings were dismissed as wrong over the last 24 hours and 7 days.',
+  'Show in-flight branches, their dirty state and touched files, each',
+  "repository's shadow collection, and how many Findings were dismissed as",
+  'wrong over the last 24 hours and 7 days.',
   '',
   'Options:',
   '  --json              Emit the same facts as JSON',
@@ -139,15 +140,27 @@ export async function runStatus(
     // Together rather than one after another: each carries its own timeout, so
     // a serial pass multiplies the worst case by the number of repositories
     // while the daemon answers all of them off one local socket pool.
+    //
+    // A collection that cannot be read is said once and left out, as the
+    // budget is: a daemon from before the route answers 404 for every
+    // repository, and the branch report does not depend on it.
+    let collectionError: unknown = null;
     const views: RepoView[] = await Promise.all(
       repos.map(async (repo) => {
-        const [branches, sessions] = await Promise.all([
+        const [branches, sessions, collection] = await Promise.all([
           client.branches(repo.id),
           client.sessions(repo.id),
+          client.collection(repo.id).catch((error: unknown) => {
+            collectionError ??= error;
+            return undefined;
+          }),
         ]);
-        return { repo, branches, sessions };
+        return { repo, branches, sessions, ...(collection === undefined ? {} : { collection }) };
       }),
     );
+    if (collectionError !== null) {
+      io.err(`Shadow collection state is unavailable: ${describeError(collectionError)}\n`);
+    }
     io.out(
       options.json
         ? renderJson(views, budget)
