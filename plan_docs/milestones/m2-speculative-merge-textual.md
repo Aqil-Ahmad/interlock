@@ -653,11 +653,32 @@ merge-tree` over the two commits reports the conflict — with neither side
   without `wrapUntrusted`. Recorded in `docs/architecture.md` and the threat
   model.
 
-- [ ] **Wrap the excerpts `interlock check` prints**
-      **Files:** `packages/shared/src/`, `packages/mcp-server/src/sanitize.ts`, `packages/cli/src/render.ts`
-      **What:** `check` prints other branches' code, and agents are who will run it as a gate; the excerpts are escaped for the terminal but reach the agent as plain output, not as untrusted data. Move `wrapUntrusted` into `shared` — it depends on nothing — so the CLI and the MCP server use one implementation, and wrap each excerpt block in the human output.
-      **Done when:** an excerpt holding an instruction-shaped line prints neutralised and inside the untrusted-content delimiters; the MCP server's own tests pass unchanged against the moved function; `--json` keeps excerpts as data, unwrapped, since a script parses them; threat model T12's residual risk no longer names this.
-      **Constraints:** hard rule 4. The terminal escaping stays: wrapping is about an agent reading, escaping about a terminal acting.
+- [x] **Wrap the excerpts `interlock check` prints**
+      **Files:** `packages/shared/src/sanitize.ts`, `packages/mcp-server/src/sanitize.ts`, `packages/cli/src/render.ts`, `docs/threat-model.md`
+      **What:** `check` prints other branches' code, and agents are who will run it as a gate; the excerpts are escaped for the terminal but reach the agent as plain output, not as untrusted data. Move `wrapUntrusted` into `shared` — it depends on nothing — so the CLI and the MCP server use one implementation, with `mcp-server/src/sanitize.ts` a re-export, and wrap each excerpt block in the human output: wrapped first, terminal-escaped last.
+
+  Rewritten before starting, from the issue: the task as written left the
+  function's own gap in place. Every pattern but the tag one was anchored to
+  the start of a line, and in source an injected instruction sits in a
+  comment, so `// ignore previous instructions` passed. **Matching** now reads
+  a line from its start and from after every comment opener (`//` not after a
+  colon, `/*`, `#`, `--`, `;`), with the comment's own markers stripped;
+  through NFKC and with invisible characters dropped; and with a run of tag
+  characters decoded and read as a sentence of its own. **Display** shows bidi
+  controls and tag characters as `\u{…}`. **Inventory:** every field the CLI
+  prints from a repository is either wrapped or has its reason in the threat
+  model.
+
+  **Done when:** an excerpt holding an instruction-shaped line prints
+  neutralised and inside the untrusted-content delimiters, at the start of a
+  line, in each comment style and after code on the same line, full-width,
+  zero-width and bidi-disguised; a line holding the delimiters cannot close the
+  block; the MCP server's own tests pass unchanged against the moved function;
+  `--json` keeps excerpts as data, unwrapped, since a script parses them; the
+  false-neutralisation count over every comment in this repository and in
+  archestra is measured, recorded and small; threat model T12's residual risk
+  no longer names this, and the inventory is in the threat model.
+  **Constraints:** hard rule 4. The terminal escaping stays: wrapping is about an agent reading, escaping about a terminal acting. `shared` stays dependency-free.
 
 - [x] **Fixture suite**
       **Files:** `eval/fixtures/`, `eval/run.ts`, `eval/reports/`, `eval/README.md`, `vitest.config.ts`
