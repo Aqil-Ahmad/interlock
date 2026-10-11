@@ -506,6 +506,25 @@ describe('interlock status', () => {
       expect(peak).toBeGreaterThan(1);
     });
 
+    it('still reports the branches when the daemon predates the budget route', async () => {
+      await serve({
+        '/api/health': { status: 200, body: { protocolVersion: 1 } },
+        '/api/repos': { status: 200, body: { repos: [] } },
+        '/api/budget': {
+          status: 404,
+          body: { error: { code: 'API_REQUEST_INVALID', message: 'No such route' } },
+        },
+      });
+
+      expect(await status('--data-dir', dataDir)).toBe(0);
+      expect(stdout()).not.toContain('False positives');
+      expect(stderr()).toContain('The false-positive budget is unavailable');
+      expect(stderr()).toContain('No such route');
+
+      expect(await status('--data-dir', dataDir, '--json')).toBe(0);
+      expect(JSON.parse(stdout())).toEqual({ repos: [] });
+    });
+
     it('prints the remedy the daemon sent rather than a status code', async () => {
       // The daemon answers a failure with the shape `InterlockError.toJSON`
       // produces, and the remedy is the only part a user can act on.

@@ -580,7 +580,7 @@ merge-tree` over the two commits reports the conflict — with neither side
   failing a gate.
 
   **Done when:** `POST /api/findings/:id/dismiss` and `interlock dismiss <id>
---reason wrong|known [--note <text>]` dismiss an open Finding; exits are 0
+--reason wrong|known [--note <text>]` dismiss an open or stale Finding; exits are 0
   dismissed, 64 for bad arguments, an unknown Finding, or one already resolved,
   already dismissed or with no identity, 69 for no daemon, 70 for anything else;
   dismissed content run again, or answered from the cache, raises nothing;

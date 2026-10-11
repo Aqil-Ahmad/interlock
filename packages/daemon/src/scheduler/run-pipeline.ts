@@ -1058,6 +1058,23 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         { causedBy: cause },
       );
     }
+    // A live dismissal is a Finding the cascade deletes too, and its
+    // `finding.dismissed` would otherwise have no end in the log.
+    for (const dismissal of await store.listDismissedFindings(repoId)) {
+      const { branchA, branchB } = dismissal.attribution;
+      if (branchA !== branch && branchB !== branch) continue;
+      if (!(await store.endDismissal(dismissal.id, now))) continue;
+      await bus.publish(
+        {
+          type: 'finding.resolved',
+          repoId,
+          at: now,
+          findingId: dismissal.id,
+          reason: 'branch-gone',
+        },
+        { causedBy: cause },
+      );
+    }
   };
 
   return {

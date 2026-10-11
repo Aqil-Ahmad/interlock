@@ -131,9 +131,18 @@ export function createDismissals(options: DismissalsOptions): Dismissals {
       note: request.note,
       dismissedAt,
     });
-    // Resolved by a run between the read and the write, which the write
-    // refused rather than dismissing over.
-    if (dismissed === null) throw notDismissable(id, 'The Finding was resolved meanwhile');
+    // Changed between the read and the write, which the write refused rather
+    // than dismissing over: a run resolved it, or another request dismissed it
+    // first. The refusal says which.
+    if (dismissed === null) {
+      const current = await store.getFinding(id);
+      throw notDismissable(
+        id,
+        current?.status === 'dismissed'
+          ? 'The Finding was dismissed meanwhile'
+          : 'The Finding was resolved meanwhile',
+      );
+    }
 
     // The event that raised it: what the dismissal is about, and through it
     // the run and the edit. The log keeps it while the Finding is live.

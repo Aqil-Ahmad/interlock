@@ -124,7 +124,18 @@ export async function runStatus(
 
   try {
     const client = await connectDaemon(options.dataDir);
-    const [repos, budget] = await Promise.all([client.repos(), client.budget()]);
+    // Apart from the branch report: a daemon started before the budget existed
+    // answers its route with a 404, and the report it can still give should not
+    // be lost to a section it cannot. Said on stderr rather than dropped, so a
+    // daemon that fails here for another reason is not mistaken for one with
+    // nothing counted.
+    const [repos, budget] = await Promise.all([
+      client.repos(),
+      client.budget().catch((error: unknown) => {
+        io.err(`The false-positive budget is unavailable: ${describeError(error)}\n`);
+        return undefined;
+      }),
+    ]);
     // Together rather than one after another: each carries its own timeout, so
     // a serial pass multiplies the worst case by the number of repositories
     // while the daemon answers all of them off one local socket pool.
@@ -138,7 +149,9 @@ export async function runStatus(
       }),
     );
     io.out(
-      options.json ? renderJson(views, budget) : `${renderStatus(views)}\n${renderBudget(budget)}`,
+      options.json
+        ? renderJson(views, budget)
+        : `${renderStatus(views)}${budget === undefined ? '' : `\n${renderBudget(budget)}`}`,
     );
     // Whatever it found. A report that failed the build because it had
     // something to report would be used once and then piped to `true`.

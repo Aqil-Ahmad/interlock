@@ -315,6 +315,31 @@ describe('dismissals', () => {
     expect(records.filter((record) => record.type === 'finding.dismissed')).toEqual([]);
   });
 
+  it('says so when another request dismissed it between reading it and writing the dismissal', async () => {
+    const finding = conflict();
+    await raise(finding);
+    // A second request lands its dismissal after this one read the Finding open.
+    const racing = {
+      getFinding: async (id: FindingId) => {
+        const read = await store.getFinding(id);
+        if (read?.status === 'open') {
+          await store.dismissFinding(id, { reason: 'known', note: null, dismissedAt: AT });
+        }
+        return read;
+      },
+      dismissFinding: store.dismissFinding.bind(store),
+      raisedEventOf: store.raisedEventOf.bind(store),
+    } as unknown as Store;
+    const raced = createDismissals({ store: racing, bus, logger: createLogger('test') });
+
+    expect(await refusal(raced.dismiss(finding.id, { reason: 'wrong', note: null }))).toEqual({
+      code: 'FINDING_NOT_DISMISSABLE',
+      message: 'The Finding was dismissed meanwhile',
+    });
+    expect((await store.getFinding(finding.id))?.dismissal?.reason).toBe('known');
+    expect(records.filter((record) => record.type === 'finding.dismissed')).toEqual([]);
+  });
+
   describe('the budget', () => {
     const now = Date.parse(AT);
 

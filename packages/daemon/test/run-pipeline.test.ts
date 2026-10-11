@@ -1131,6 +1131,26 @@ describe('run pipeline', () => {
       expect((await store.listOpenFindings((await repo()).id))[0]!.id).not.toBe(dismissed.id);
     });
 
+    it('ends with its branch, and the log says so before the rows go', async () => {
+      const dismissed = await dismissOpen();
+      const b = await branchNamed('b');
+      const endedDuringDelete: (string | null | undefined)[] = [];
+      bus.on('finding.resolved', async (event) => {
+        endedDuringDelete.push((await store.getFinding(event.findingId))?.resolvedAt);
+      });
+
+      git(root, 'worktree', 'remove', '--force', join(base, 'b'));
+      git(root, 'branch', '-D', 'b');
+      await observe().catch(() => undefined);
+
+      const resolved = published('finding.resolved').at(-1)!;
+      expect(resolved.payload).toMatchObject({ findingId: dismissed.id, reason: 'branch-gone' });
+      expect(resolved.causedBy).toBe(published('branch.disappeared').at(-1)!.id);
+      expect(published('branch.disappeared').at(-1)!.payload).toMatchObject({ branchRefId: b.id });
+      // Still stored when the event was handled, and already ended.
+      expect(endedDuringDelete).toEqual([expect.any(String)]);
+    });
+
     it('keeps its pair planned while nothing else would, so a run can end it', async () => {
       const dismissed = await dismissOpen();
       // Back to the base: nothing in common between the two sides any more.

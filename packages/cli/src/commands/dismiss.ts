@@ -28,8 +28,8 @@ const EXIT_SOFTWARE = 70;
 const USAGE = [
   'Usage: interlock dismiss <finding id> --reason <wrong|known> [options]',
   '',
-  'Dismiss an open Finding. It is not raised again while both sides of its file',
-  'are unchanged; once either side changes, it can be raised again.',
+  'Dismiss an open or stale Finding. It is not raised again while both sides of',
+  'its file are unchanged; once either side changes, it can be raised again.',
   '`interlock check` prints each Finding with its id.',
   '',
   'Reasons:',
