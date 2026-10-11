@@ -94,7 +94,7 @@ The false-positive budget is counted from those dismissals: per UTC hour, analyz
 | Telling merge-induced errors from pre-existing ones        | `core/src/analyzers`              | baseline diff across base, both branches and the merge |
 | Naming which branch broke which half                       | `core/src/analyzers`              | attribution against both ChangeSets                    |
 | Not being ignored by agents                                | `mcp-server` + `core/src/advisor` | ranking + rate limits                                  |
-| Not being an attack surface                                | `mcp-server/src/sanitize.ts`      | untrusted content wrapped as data                      |
+| Not being an attack surface                                | `shared/src/sanitize.ts`          | untrusted content wrapped as data                      |
 
 ## Data flow invariants
 

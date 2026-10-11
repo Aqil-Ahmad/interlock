@@ -1,3 +1,4 @@
+import { wrapUntrusted } from '@interlock/shared';
 import type {
   AgentSession,
   BranchRef,
@@ -358,6 +359,12 @@ function lineRange(startLine: number, endLine: number): string {
  * Everything the repository chose — branch names, paths, excerpts, the merge
  * base it named — goes through `safeText`, a line at a time, so an excerpt
  * keeps its shape and no line of it can move the cursor.
+ *
+ * Each excerpt is also quoted as untrusted data. `check` is a gate agents run,
+ * so what it prints is read by a model, and an excerpt is another branch's code
+ * — a comment in it can be written to the agent reading it. Names and paths are
+ * one escaped line each and stay unwrapped, which `docs/threat-model.md` keeps
+ * as a residual risk.
  */
 export function renderCheck(report: CheckReport): string {
   const a = safeText(report.a.name);
@@ -395,8 +402,11 @@ export function renderCheck(report: CheckReport): string {
       }
       for (const span of side.spans) {
         lines.push(`  ${name}  ${path}:${lineRange(span.startLine, span.endLine)}`);
-        for (const text of span.excerpt.split('\n')) {
-          if (span.excerpt === '') break;
+        if (span.excerpt === '') continue;
+        // Wrapped first and escaped last: the wrapping is for an agent reading
+        // the output, the escaping for the terminal that acts on it, and the
+        // terminal sees the text after everything else has.
+        for (const text of wrapUntrusted(span.excerpt).split('\n')) {
           lines.push(`  ${' '.repeat(width)}    │ ${safeText(text)}`);
         }
       }
