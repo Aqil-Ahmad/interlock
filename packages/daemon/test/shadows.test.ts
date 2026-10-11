@@ -334,6 +334,11 @@ describe('shadow registry', () => {
 
     it('names each phase as the collection reaches it, with when it began, and keeps the last one’s measures', async () => {
       const shadows = registry();
+      // A loose object the collection packs, so the sizes before and after differ.
+      const shadow = await shadows.get(repo, repoId);
+      execFileSync('git', ['--git-dir', shadow.gitDir, 'hash-object', '-w', '--stdin'], {
+        input: 'loose\n',
+      });
       const seen: { phase: string; since: string | null }[] = [];
       const record = (): void => {
         const { phase, since } = shadows.state(repoId);
@@ -375,6 +380,7 @@ describe('shadow registry', () => {
         { phase: 'holding', since: at(T0 + 3_000) },
       ]);
       expect(report).toMatchObject({ quietMs: 2_000, pausedMs: 4_500, durationMs: 7_500 });
+      expect(report.before.loose).toBeGreaterThan(report.after.loose);
       expect(shadows.state(repoId)).toStrictEqual({
         phase: 'idle',
         since: null,
