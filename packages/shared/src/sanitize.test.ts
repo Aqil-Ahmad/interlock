@@ -140,8 +140,8 @@ describe('wrapUntrusted', () => {
 
   it('stays fast on a line built to backtrack', () => {
     const line = `ignore ${'previous '.repeat(5_000)}`;
-    // An opener every few characters makes each one a place to scan from.
-    const hostile = '# ignore previous '.repeat(10_000);
+    // Every character an opener, so every one is a place to scan from.
+    const hostile = ';'.repeat(100_000);
     const started = performance.now();
     wrapUntrusted(line, { maxLength: 100_000 });
     wrapUntrusted(hostile);
