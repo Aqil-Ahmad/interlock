@@ -4,6 +4,29 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-06 — false-positive budget
+
+- **Task rewritten before starting.** The issue's approach held — dismiss a conflict at its content, suppress in reconciliation, count in a table retention never prunes, "delivered" not measured — with gaps that would have shipped a rate nobody could read. The rewrite is in the milestone.
+- **Found — the task named the wrong files.** `core/src/advisor/` plays no part, and "delivered" counts nothing until something delivers; reported as not measured, never 0.
+- **Decided — a dismissal is the key at each side's blob, by branch id.** Compared by branch id because a Finding's attribution may name the pair the other way round from the pair. A Finding with no `textualFindingKey` is refused: dismissed alone, it could not be matched again and would last one run.
+- **Decided — a dismissal lasts while its conflict reproduces at that content.** A run or hit that does not find it ends it (`resolvedAt` set, status kept), so retention can take it; the conflict returning later, even at the same content, is a new Finding. An agent reverting and re-applying a change will therefore see it again — saying it twice was preferred to a suppression nobody can see the end of.
+- **Decided — a dismissed Finding is written only by dismissing and ending it.** A run that read the Finding open before a dismissal landed would otherwise write it back open over the dismissal.
+- **Decided — cohorts by raise.** A dismissal is counted in the hour its Finding was first raised, so a window's rate is of the Findings raised in it: never above 100%, and an old window's rate can still rise. Counting dismissals when made would mix cohorts in a short window.
+- **Decided — hour buckets.** "Last 24 hours" is the current UTC hour and the 23 before it, and the report prints the instant that starts; a day bucket would have printed one window and computed another.
+- **Decided — the whole id, no prefix,** and `check` prints it. ULIDs made in one millisecond share ten characters, so a prefix is ambiguous exactly when Findings arrive together.
+- **Decided — `--reason` is required.** A default would decide the rate for whoever did not think about it.
+- **Decided — undismiss is out of scope.** A mistaken dismissal ends as soon as either side changes.
+- **Decided — exit codes for `dismiss`** follow `status` and `check`: 0, 64 for bad arguments or a Finding that is unknown, resolved, already dismissed or has no identity, 69 no daemon, 70 anything else. Two error codes so the CLI decides by code: `FINDING_NOT_FOUND` (404), `FINDING_NOT_DISMISSABLE` (409).
+- **Decided — a live dismissal is live state** for retention and for the shadow's keep refs alike, as an open Finding is; an ended one is not. The counters table is never pruned: a row per rule per active hour.
+- **Decided — daemon-wide, not per repository.** A false positive is a detector's bug.
+- **Found — `check` would have called a pair with a dismissed conflict clean.** Its answer was the open Findings alone, so "merge cleanly" was printed over a conflict that stands. It now lists live dismissals beside open Findings. **Flagged for a decision:** they do not fail the gate (exit 0), since a dismissal that kept failing `check` would be useless; the conservative alternative is exit 1.
+- **Decided — the body cap is 4 KiB, not the 1 KiB first written.** A 500-character note JSON may spell at six bytes a character; 1 KiB would refuse valid notes.
+- **Decided — no protocol bump,** as for `check`: a newer CLI asking an older daemon for `/api/budget` gets a 404 and `status` exits 70, the same as `check` against a daemon without its route.
+- **Flagged for a human decision — security posture.** `POST /api/findings/:id/dismiss` is the API's third write route: it changes a Finding, suppresses its conflict while the content holds, and moves the counts (threat model T13). Same token, loopback only, a 4 KiB validated body, the reason an enum, the note bounded and escaped.
+- **Found — 16 tests fail on `dev` as root.** Every one depends on `chmod` making a file unreadable, which root reads anyway; this session ran as root and could not switch user. The same 16, and no others, fail with this change.
+- **Review — three fixes and a documentation correction.** `interlock status` keeps the branch report and says on stderr that the budget is unavailable when the daemon predates `/api/budget`, rather than failing outright (the protocol version stays 1, as for every earlier additive route); a live dismissal ends with `finding.resolved` (`branch-gone`) when its branch goes, before the cascade deletes it; a dismissal refused because another request won says `dismissed meanwhile`; the docs and help say an open **or stale** Finding can be dismissed, which is what the store allows.
+- **Mutation: 47 mutations, 41 caught, then 43 after fixes.** Two survivors were missing tests, both added and caught on re-run: a dismissal matched on content alone would hide the same conflict at another path, and the zero-raised line bypassed the "no data" helper. Four are equivalent: a null key always comes with null content, which is still checked; `endDismissal` refusing needs a second concurrent run of one pair, which the scheduler never starts; and both of `dismiss`'s error paths print only messages that already escape or never echo input.
+
 ## 2026-10-04 — review of `interlock check`
 
 - **Decided by a human — the second write route stands.** The same token, loopback only, a small validated body, branch names never handed to git, and only the work the scheduler does unasked.

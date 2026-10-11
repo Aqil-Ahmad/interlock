@@ -31,6 +31,12 @@ export interface Finding {
   readonly updatedAt: string;
   /** Set when the finding stopped reproducing. */
   readonly resolvedAt: string | null;
+  /**
+   * Why a human dismissed it, on a `dismissed` Finding and nowhere else.
+   * Absent rather than null so an analyzer, which never dismisses, never has
+   * to say so.
+   */
+  readonly dismissal?: FindingDismissal;
 }
 
 export const SEVERITIES = ['info', 'low', 'medium', 'high'] as const;
@@ -44,6 +50,31 @@ export type Severity = (typeof SEVERITIES)[number];
  */
 export const FINDING_STATUSES = ['open', 'stale', 'resolved', 'dismissed'] as const;
 export type FindingStatus = (typeof FINDING_STATUSES)[number];
+
+/**
+ * `wrong` — a false positive: the conflict is not real. The only reason the
+ * false-positive rate counts.
+ * `known` — real, and not worth hearing about again at this content.
+ */
+export const DISMISSAL_REASONS = ['wrong', 'known'] as const;
+export type DismissalReason = (typeof DISMISSAL_REASONS)[number];
+
+/** The longest note a dismissal keeps. A reason, not a document. */
+export const MAX_DISMISSAL_NOTE_LENGTH = 500;
+
+/**
+ * A human's verdict on a Finding.
+ *
+ * It holds for that conflict at that content: the same conflict found again
+ * with either side's file unchanged stays dismissed, and one found with either
+ * side changed is a new Finding.
+ */
+export interface FindingDismissal {
+  readonly reason: DismissalReason;
+  /** Free text from whoever dismissed it; escaped before any terminal shows it. */
+  readonly note: string | null;
+  readonly dismissedAt: string;
+}
 
 export interface Attribution {
   readonly branchA: BranchRefId;

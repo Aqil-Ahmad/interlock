@@ -1,5 +1,6 @@
 import { notImplemented } from '@interlock/shared';
 import { checkCommand } from './check.js';
+import { dismissCommand } from './dismiss.js';
 import { hookCommand } from './hook.js';
 import { statusCommand } from './status.js';
 import type { Command } from './command.js';
@@ -14,6 +15,8 @@ import type { Command } from './command.js';
 export type { Command } from './command.js';
 export { checkCommand, runCheck } from './check.js';
 export type { CheckIo } from './check.js';
+export { dismissCommand, runDismiss } from './dismiss.js';
+export type { DismissIo } from './dismiss.js';
 export { MAX_STDIN_BYTES, hookCommand, readBounded, runHook } from './hook.js';
 export type { HookIo } from './hook.js';
 export { runStatus, statusCommand } from './status.js';
@@ -27,6 +30,7 @@ export const COMMANDS: readonly Command[] = [
   statusCommand,
   hookCommand,
   checkCommand,
+  dismissCommand,
   {
     name: 'watch',
     summary: 'Follow findings live in the terminal',

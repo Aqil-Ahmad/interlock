@@ -8,6 +8,7 @@ import type {
   SpeculativeRunId,
 } from '../ids.js';
 import type { AgentKind } from '../models/agent-session.js';
+import type { DismissalReason } from '../models/finding.js';
 import type { AnalyzerKind, AnalyzerVerdict } from '../models/speculative-run.js';
 
 /**
@@ -210,10 +211,32 @@ export interface FindingRaised extends EventBase {
   readonly rule: string;
 }
 
+/**
+ * A Finding stopped reproducing, or its branch went. A dismissed Finding whose
+ * conflict stops reproducing ends with one too.
+ *
+ * `dismissed` is never published: a dismissal is `finding.dismissed`, and is a
+ * verdict on a conflict that still stands, not the conflict going away. It
+ * stays in the union because the log is a wire format.
+ */
 export interface FindingResolved extends EventBase {
   readonly type: 'finding.resolved';
   readonly findingId: FindingId;
   readonly reason: 'no-longer-reproduces' | 'branch-gone' | 'dismissed';
+}
+
+/**
+ * A human dismissed a Finding. Caused by the Finding's own `finding.raised`,
+ * so the dismissal traces back through the run to the edit behind it.
+ */
+export interface FindingDismissed extends EventBase {
+  readonly type: 'finding.dismissed';
+  readonly findingId: FindingId;
+  /** The run that raised it: what retention keeps this event by, with the Finding's own. */
+  readonly runId: SpeculativeRunId;
+  readonly kind: AnalyzerKind;
+  readonly rule: string;
+  readonly reason: DismissalReason;
 }
 
 export interface AdviceDelivered extends EventBase {
@@ -261,6 +284,7 @@ export type InterlockEvent =
   | RunFinished
   | FindingRaised
   | FindingResolved
+  | FindingDismissed
   | AdviceDelivered
   | DaemonStarted
   | DaemonStopping

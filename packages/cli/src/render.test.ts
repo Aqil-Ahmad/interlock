@@ -4,6 +4,7 @@ import type {
   AgentSessionId,
   BranchRef,
   BranchRefId,
+  Finding,
   FindingId,
   Repo,
   RepoId,
@@ -11,12 +12,15 @@ import type {
   SpeculativeRunId,
 } from '@interlock/shared';
 import { describe, expect, it } from 'vitest';
-import type { CheckReport } from './client/index.js';
+import type { BudgetReport, BudgetWindow, CheckReport } from './client/index.js';
 import {
   branchState,
   findingView,
+  renderBudget,
   renderCheck,
   renderCheckJson,
+  renderDismissal,
+  renderDismissalJson,
   renderJson,
   renderStatus,
   safeText,
@@ -396,6 +400,7 @@ describe('renderCheck', () => {
         resolvedAt: null,
       },
     ],
+    dismissed: [],
   });
 
   it('escapes every piece of the repository it prints, excerpts a line at a time', () => {
@@ -420,5 +425,206 @@ describe('renderCheck', () => {
     for (const control of CONTROLS) expect(json).not.toContain(control);
     const parsed = JSON.parse(json) as { a: { name: string } };
     expect(parsed.a.name).toBe('one\u001b[2J');
+  });
+
+  it('prints each Finding’s whole id, which is what `dismiss` takes', () => {
+    const shown = report();
+    expect(renderCheck(shown)).toContain(`\n  finding ${shown.findings[0]!.id}\n`);
+  });
+
+  /** The report's conflict, dismissed with a note and a path the repository chose. */
+  const dismissedReport = (): CheckReport => {
+    const shown = report();
+    const finding: Finding = {
+      ...shown.findings[0]!,
+      status: 'dismissed',
+      evidence: [...shown.findings[0]!.evidence, mergeConflict('src/\u001b[31mx.ts')],
+      dismissal: { reason: 'wrong', note: 'n', dismissedAt: '2026-01-02T00:00:00.000Z' },
+    };
+    return { ...shown, clean: true, findings: [], dismissed: [finding] };
+  };
+
+  it('never calls a pair holding a dismissed conflict clean, and lists it escaped', () => {
+    const shown = dismissedReport();
+    const text = renderCheck(shown);
+
+    expect(text).not.toContain('merge cleanly');
+    expect(text).toContain('one\\x1b[2J and two: no open conflicts, 1 dismissed');
+    expect(text).toContain(
+      `  overlapping-edit  src/\\x1b[31mx.ts  as wrong  finding ${shown.dismissed[0]!.id}\n`,
+    );
+    for (const control of CONTROLS) expect(text).not.toContain(control);
+  });
+
+  it('lists dismissed conflicts beside open ones, and carries them in JSON', () => {
+    const shown = { ...dismissedReport(), clean: false, findings: report().findings };
+    expect(renderCheck(shown)).toContain('and two: 1 conflict');
+    expect(renderCheck(shown)).toContain(
+      'Dismissed, and not raised while both sides stay unchanged:',
+    );
+
+    const parsed = JSON.parse(renderCheckJson(shown)) as {
+      dismissed: { rule: string; reason: string; note: string }[];
+    };
+    expect(parsed.dismissed).toMatchObject([
+      { rule: 'overlapping-edit', reason: 'wrong', note: 'n' },
+    ]);
+  });
+});
+
+/** A merge-conflict evidence entry at a path, with a blob on each side. */
+function mergeConflict(path: string): Finding['evidence'][number] {
+  return {
+    type: 'merge-conflict',
+    mergeBaseSha: 'b'.repeat(40),
+    commitA: 'c'.repeat(40),
+    commitB: 'd'.repeat(40),
+    path,
+    conflictTypes: ['CONFLICT (contents)'],
+    base: null,
+    sideA: { path, mode: '100644', oid: '1'.repeat(40) },
+    sideB: { path, mode: '100644', oid: '2'.repeat(40) },
+  };
+}
+
+describe('renderBudget', () => {
+  const window = (overrides: Partial<BudgetWindow> = {}): BudgetWindow => ({
+    hours: 24,
+    since: '2026-10-05T15:00:00.000Z',
+    until: '2026-10-06T14:35:12.000Z',
+    raised: 0,
+    dismissedWrong: 0,
+    dismissedKnown: 0,
+    rate: null,
+    delivered: null,
+    rules: [],
+    ...overrides,
+  });
+  const rule = (name: string, raised: number, wrong: number) => ({
+    kind: 'textual' as const,
+    rule: name,
+    raised,
+    dismissedWrong: wrong,
+    dismissedKnown: 0,
+    rate: raised === 0 ? null : wrong / raised,
+  });
+
+  it('says no data for a window with nothing raised, never 0%, and delivered as not measured', () => {
+    const text = renderBudget({
+      windows: [window(), window({ hours: 168, since: '2026-09-29T15:00:00.000Z' })],
+    });
+
+    expect(text).toContain(
+      '  last 24 hours  since 2026-10-05 15:00 UTC  0 raised, rate: no data\n',
+    );
+    expect(text).toContain(
+      '  last 7 days    since 2026-09-29 15:00 UTC  0 raised, rate: no data\n',
+    );
+    expect(text).toContain('  delivered      not measured\n');
+    expect(text).not.toMatch(/0%|delivered +0/u);
+    expect(text).toContain('No rule had a Finding dismissed as wrong in the last 7 days.');
+  });
+
+  it('gives the counts and the rate, and lists the rules most dismissed as wrong', () => {
+    const rules = [
+      rule('modify-delete', 4, 3),
+      rule('overlapping-edit', 10, 0),
+      ...['a', 'b', 'c', 'd', 'e'].map((name) => rule(`rule-${name}`, 2, 1)),
+    ];
+    const budget: BudgetReport = {
+      windows: [
+        window({ raised: 3, dismissedWrong: 0, dismissedKnown: 1, rate: 0 }),
+        window({ hours: 168, raised: 20, dismissedWrong: 8, dismissedKnown: 2, rate: 0.4, rules }),
+      ],
+    };
+
+    const text = renderBudget(budget);
+
+    expect(text).toContain('3 raised, 0 dismissed as wrong (0%), 1 as known\n');
+    expect(text).toContain('20 raised, 8 dismissed as wrong (40%), 2 as known\n');
+    expect(text).toContain(
+      'Most dismissed as wrong, last 7 days:\n    modify-delete  3 of 4 (75%)\n',
+    );
+    expect(text).not.toContain('overlapping-edit');
+    expect(text).toContain('    rule-d         1 of 2 (50%)\n    … and 1 more\n');
+    expect(text).not.toContain('rule-e');
+  });
+
+  it('escapes a rule name, which comes from the daemon', () => {
+    const text = renderBudget({
+      windows: [
+        window({ raised: 1, dismissedWrong: 1, rate: 1, rules: [rule(`x${ESC}[2J`, 1, 1)] }),
+      ],
+    });
+    expect(text).not.toContain(ESC);
+    expect(text).toContain('x\\x1b[2J  1 of 1 (100%)');
+  });
+
+  it('carries the budget in the status JSON, delivered as null', () => {
+    const budget: BudgetReport = { windows: [window()] };
+    const parsed = JSON.parse(renderJson([], budget)) as { budget: BudgetReport };
+    expect(parsed.budget).toEqual(budget);
+    expect(parsed.budget.windows[0]!.delivered).toBeNull();
+  });
+});
+
+describe('renderDismissal', () => {
+  const dismissed = (note: string | null): Finding => ({
+    id: ulid<FindingId>(),
+    runId: ulid<SpeculativeRunId>(),
+    kind: 'textual',
+    rule: 'overlapping-edit',
+    severity: 'medium',
+    confidence: 1,
+    status: 'dismissed',
+    title: 't',
+    description: '',
+    attribution: {
+      branchA: ulid<BranchRefId>(),
+      branchB: ulid<BranchRefId>(),
+      originBranch: null,
+      rationale: '',
+    },
+    evidence: [mergeConflict(`cfg${RLO}.ts`)],
+    firstSeenAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+    resolvedAt: null,
+    dismissal: { reason: 'known', note, dismissedAt: '2026-01-02T00:00:00.000Z' },
+  });
+
+  it('says what was dismissed and how long it lasts, the path and the note escaped', () => {
+    const finding = dismissed(`line one ${ESC}]0;pwned\u0007\n${CSI}31m two`);
+    const text = renderDismissal(finding);
+
+    for (const control of [ESC, CSI, RLO, '\u0007']) expect(text).not.toContain(control);
+    expect(text).toBe(
+      [
+        `Dismissed ${finding.id} as known: overlapping-edit at cfg\\u{202e}.ts`,
+        'It stays dismissed while both sides of cfg\\u{202e}.ts are unchanged.',
+        'note: line one \\x1b]0;pwned\\x07',
+        '      \\x9b31m two',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  it('prints no note line without a note, and the same facts as JSON', () => {
+    const finding = dismissed(null);
+    expect(renderDismissal(finding)).not.toContain('note:');
+
+    const json = renderDismissalJson({
+      ...finding,
+      dismissal: { ...finding.dismissal!, note: `a${ESC}` },
+    });
+    expect(json).not.toContain(ESC);
+    expect(JSON.parse(json)).toEqual({
+      id: finding.id,
+      kind: 'textual',
+      rule: 'overlapping-edit',
+      path: `cfg${RLO}.ts`,
+      reason: 'known',
+      note: `a${ESC}`,
+      dismissedAt: '2026-01-02T00:00:00.000Z',
+    });
   });
 });

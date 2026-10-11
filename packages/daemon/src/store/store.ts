@@ -2,19 +2,22 @@ import { chmodSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { StatementSync } from 'node:sqlite';
-import { InterlockError, isInterlockError, silentLogger } from '@interlock/shared';
+import { ANALYZER_KINDS, InterlockError, isInterlockError, silentLogger } from '@interlock/shared';
 import type {
   AgentSession,
   AnalyzerResult,
   BranchRef,
   ChangeSet,
+  EventId,
   EventRecord,
   Evidence,
   Finding,
+  FindingDismissal,
   FindingId,
   Logger,
   MergePair,
   Repo,
+  RepoId,
   SpeculativeRun,
 } from '@interlock/shared';
 import { ensureDataDir } from '../data-dir.js';
@@ -27,6 +30,8 @@ import {
   evidenceParams,
   findingParams,
   mergePairParams,
+  num,
+  oneOf,
   repoParams,
   runParams,
   sessionParams,
@@ -114,15 +119,58 @@ export interface Store {
   upsertRun(run: SpeculativeRun): Promise<void>;
   getRun(id: SpeculativeRun['id']): Promise<SpeculativeRun | null>;
 
-  upsertFinding(finding: Finding): Promise<void>;
+  /**
+   * Write a Finding, and say whether it was written.
+   *
+   * Never over a dismissed one, which only {@link Store.dismissFinding} and
+   * {@link Store.endDismissal} write: a run that read the Finding open before
+   * a dismissal landed would otherwise write it back open, and the dismissal
+   * would be lost without anyone being told.
+   */
+  upsertFinding(finding: Finding): Promise<boolean>;
+  /**
+   * Write a Finding a run raised for the first time, and count it, in one
+   * transaction: a raise the counts missed would be a rate computed over the
+   * wrong denominator.
+   */
+  raiseFinding(finding: Finding): Promise<void>;
   getFinding(id: Finding['id']): Promise<Finding | null>;
+  /**
+   * Dismiss an open or stale Finding and count the dismissal, in one
+   * transaction, counted in the hour the Finding was first raised.
+   *
+   * Null for a Finding that is not there or is neither open nor stale —
+   * decided in the statement that writes, so a run resolving it at the same
+   * moment cannot be dismissed over.
+   */
+  dismissFinding(id: Finding['id'], dismissal: FindingDismissal): Promise<DismissedFinding | null>;
+  /**
+   * End a dismissal whose conflict stopped reproducing at its content: the
+   * Finding stays dismissed, gains a `resolvedAt`, stops suppressing, and is
+   * retention's to take. False when it was not a live dismissal.
+   */
+  endDismissal(id: Finding['id'], at: string): Promise<boolean>;
   /** Findings that reproduce on the latest snapshots; stale ones are excluded. */
   listOpenFindings(repoId: Repo['id']): Promise<Finding[]>;
   /**
-   * Findings still in play, open or stale: what retention keeps however old,
-   * and so what a shadow must keep the evidence of.
+   * Dismissed Findings whose conflict has not stopped reproducing since: the
+   * dismissals still holding a conflict back.
+   */
+  listDismissedFindings(repoId: Repo['id']): Promise<Finding[]>;
+  /**
+   * Findings still in play — open, stale, or dismissed and still holding their
+   * conflict back: what retention keeps however old, and so what a shadow must
+   * keep the evidence of.
    */
   listLiveFindings(repoId: Repo['id']): Promise<Finding[]>;
+  /** The `finding.raised` event that first raised a Finding, while the log holds it. */
+  raisedEventOf(id: Finding['id']): Promise<EventId | null>;
+  /**
+   * Raised and dismissed counts per kind and rule, summed over every UTC hour
+   * from `sinceHour` on — the first 13 characters of an ISO timestamp. Never
+   * pruned, so any window is answerable however long ago its Findings went.
+   */
+  findingCounts(sinceHour: string): Promise<FindingCount[]>;
 
   /** Append-only: there is no update or delete path for events. */
   appendEvent(record: EventRecord): Promise<void>;
@@ -168,6 +216,23 @@ export interface Store {
   prune(before: string, options?: PruneOptions): Promise<PruneReport>;
 
   close(): Promise<void>;
+}
+
+/** A Finding just dismissed, and the repository it belongs to, which a Finding does not carry. */
+export interface DismissedFinding {
+  readonly finding: Finding;
+  readonly repoId: RepoId;
+}
+
+/** One rule's counts over a window. */
+export interface FindingCount {
+  readonly kind: Finding['kind'];
+  readonly rule: string;
+  /** Distinct Findings first raised in the window. */
+  readonly raised: number;
+  /** Of those, how many have been dismissed as `wrong`, and as `known`. */
+  readonly dismissedWrong: number;
+  readonly dismissedKnown: number;
 }
 
 export interface PruneOptions {
@@ -342,6 +407,14 @@ function open(options: StoreOptions): Store {
  * can claim one branch — a stale one that never fired its end hook and the one
  * really driving it — and the model has room for a single answer.
  */
+/**
+ * A Finding retention keeps however old, and whose evidence a shadow keeps:
+ * open, stale, or dismissed and still holding its conflict back. A live
+ * dismissal is state, not history — pruned, its conflict would be raised again
+ * on the next run, as though nobody had dismissed it.
+ */
+const LIVE_FINDING = `(f.status IN ('open', 'stale') OR (f.status = 'dismissed' AND f.resolved_at IS NULL))`;
+
 const BRANCH_REF_COLUMNS = `
   b.*,
   (SELECT s.id FROM agent_sessions s
@@ -377,6 +450,16 @@ class SqliteStore implements Store {
     readonly runById: StatementSync;
     readonly findingIdsForRun: StatementSync;
     readonly upsertFinding: StatementSync;
+    readonly findingStatus: StatementSync;
+    readonly countRaised: StatementSync;
+    readonly countDismissed: StatementSync;
+    readonly dismissFinding: StatementSync;
+    readonly findingRepo: StatementSync;
+    readonly endDismissal: StatementSync;
+    readonly dismissedFindings: StatementSync;
+    readonly dismissedFindingEvidence: StatementSync;
+    readonly raisedEvent: StatementSync;
+    readonly findingCounts: StatementSync;
     readonly deleteEvidence: StatementSync;
     readonly insertEvidence: StatementSync;
     readonly findingById: StatementSync;
@@ -487,8 +570,8 @@ class SqliteStore implements Store {
       ),
 
       upsertFinding: db.prepare(`
-        INSERT INTO findings (id, run_id, kind, rule, severity, confidence, status, title, description, branch_a, branch_b, origin_branch, attribution_rationale, first_seen_at, updated_at, resolved_at)
-        VALUES (:id, :run_id, :kind, :rule, :severity, :confidence, :status, :title, :description, :branch_a, :branch_b, :origin_branch, :attribution_rationale, :first_seen_at, :updated_at, :resolved_at)
+        INSERT INTO findings (id, run_id, kind, rule, severity, confidence, status, title, description, branch_a, branch_b, origin_branch, attribution_rationale, first_seen_at, updated_at, resolved_at, dismissal_reason, dismissal_note, dismissed_at)
+        VALUES (:id, :run_id, :kind, :rule, :severity, :confidence, :status, :title, :description, :branch_a, :branch_b, :origin_branch, :attribution_rationale, :first_seen_at, :updated_at, :resolved_at, :dismissal_reason, :dismissal_note, :dismissed_at)
         ON CONFLICT (id) DO UPDATE SET
           kind                  = excluded.kind,
           rule                  = excluded.rule,
@@ -502,7 +585,60 @@ class SqliteStore implements Store {
           origin_branch         = excluded.origin_branch,
           attribution_rationale = excluded.attribution_rationale,
           updated_at            = excluded.updated_at,
-          resolved_at           = excluded.resolved_at`),
+          resolved_at           = excluded.resolved_at,
+          dismissal_reason      = excluded.dismissal_reason,
+          dismissal_note        = excluded.dismissal_note,
+          dismissed_at          = excluded.dismissed_at`),
+      findingStatus: db.prepare('SELECT status FROM findings WHERE id = ?'),
+      countRaised: db.prepare(`
+        INSERT INTO finding_counts (hour, kind, rule, raised) VALUES (:hour, :kind, :rule, 1)
+        ON CONFLICT (hour, kind, rule) DO UPDATE SET raised = raised + 1`),
+      countDismissed: db.prepare(`
+        INSERT INTO finding_counts (hour, kind, rule, dismissed_wrong, dismissed_known)
+        VALUES (:hour, :kind, :rule, :wrong, :known)
+        ON CONFLICT (hour, kind, rule) DO UPDATE SET
+          dismissed_wrong = dismissed_wrong + excluded.dismissed_wrong,
+          dismissed_known = dismissed_known + excluded.dismissed_known`),
+      dismissFinding: db.prepare(`
+        UPDATE findings SET
+          status           = 'dismissed',
+          dismissal_reason = :reason,
+          dismissal_note   = :note,
+          dismissed_at     = :at,
+          updated_at       = :at
+        WHERE id = :id AND status IN ('open', 'stale')`),
+      findingRepo: db.prepare(`
+        SELECT p.repo_id FROM findings f
+          JOIN speculative_runs r ON r.id = f.run_id
+          JOIN merge_pairs p ON p.id = r.merge_pair_id
+        WHERE f.id = ?`),
+      endDismissal: db.prepare(`
+        UPDATE findings SET resolved_at = :at, updated_at = :at
+        WHERE id = :id AND status = 'dismissed' AND resolved_at IS NULL`),
+      dismissedFindings: db.prepare(`
+        SELECT f.* FROM findings f
+          JOIN speculative_runs r ON r.id = f.run_id
+          JOIN merge_pairs p ON p.id = r.merge_pair_id
+        WHERE p.repo_id = ? AND f.status = 'dismissed' AND f.resolved_at IS NULL
+        ORDER BY f.first_seen_at, f.id`),
+      dismissedFindingEvidence: db.prepare(`
+        SELECT e.finding_id, e.body FROM evidence e
+          JOIN findings f ON f.id = e.finding_id
+          JOIN speculative_runs r ON r.id = f.run_id
+          JOIN merge_pairs p ON p.id = r.merge_pair_id
+        WHERE p.repo_id = ? AND f.status = 'dismissed' AND f.resolved_at IS NULL
+        ORDER BY e.finding_id, e.ordinal`),
+      raisedEvent: db.prepare(
+        "SELECT id FROM events WHERE finding_id = ? AND type = 'finding.raised' ORDER BY id LIMIT 1",
+      ),
+      findingCounts: db.prepare(`
+        SELECT kind, rule,
+          sum(raised) AS raised,
+          sum(dismissed_wrong) AS dismissed_wrong,
+          sum(dismissed_known) AS dismissed_known
+        FROM finding_counts WHERE hour >= ?
+        GROUP BY kind, rule
+        ORDER BY kind, rule`),
       deleteEvidence: db.prepare('DELETE FROM evidence WHERE finding_id = ?'),
       insertEvidence: db.prepare(
         'INSERT INTO evidence (finding_id, ordinal, type, body) VALUES (:finding_id, :ordinal, :type, :body)',
@@ -529,14 +665,14 @@ class SqliteStore implements Store {
         SELECT f.* FROM findings f
           JOIN speculative_runs r ON r.id = f.run_id
           JOIN merge_pairs p ON p.id = r.merge_pair_id
-        WHERE p.repo_id = ? AND f.status IN ('open', 'stale')
+        WHERE p.repo_id = ? AND ${LIVE_FINDING}
         ORDER BY f.first_seen_at, f.id`),
       liveFindingEvidence: db.prepare(`
         SELECT e.finding_id, e.body FROM evidence e
           JOIN findings f ON f.id = e.finding_id
           JOIN speculative_runs r ON r.id = f.run_id
           JOIN merge_pairs p ON p.id = r.merge_pair_id
-        WHERE p.repo_id = ? AND f.status IN ('open', 'stale')
+        WHERE p.repo_id = ? AND ${LIVE_FINDING}
         ORDER BY e.finding_id, e.ordinal`),
 
       appendEvent: db.prepare(
@@ -559,7 +695,7 @@ class SqliteStore implements Store {
           findings    = excluded.findings,
           created_at  = excluded.created_at`),
 
-      // The events a run that still holds an open or stale Finding needs are its
+      // The events a run that still holds a live Finding needs are its
       // own and everything they lead back to through `caused_by`: the
       // `pair.scheduled` it answered and the edit behind that. Without them an
       // old open Finding keeps its run and loses its explanation. Computed in
@@ -571,7 +707,7 @@ class SqliteStore implements Store {
       pruneEvents: db.prepare(`
         WITH RECURSIVE kept(id) AS (
           SELECT id FROM events
-          WHERE run_id IN (SELECT run_id FROM findings WHERE status IN ('open', 'stale'))
+          WHERE run_id IN (SELECT f.run_id FROM findings f WHERE ${LIVE_FINDING})
           UNION
           SELECT e.caused_by FROM events e JOIN kept k ON e.id = k.id
           WHERE e.caused_by IS NOT NULL)
@@ -579,16 +715,17 @@ class SqliteStore implements Store {
           SELECT id FROM events
           WHERE at < :cutoff AND id NOT IN (SELECT id FROM kept)
           ORDER BY at LIMIT :limit)`),
-      // A run holding an open or stale finding is live state, however old it is:
-      // stale means "not re-verified yet", so dropping it would silently retract
-      // a warning rather than resolve it.
+      // A run holding a live finding is live state, however old it is: stale
+      // means "not re-verified yet", so dropping it would silently retract a
+      // warning rather than resolve it, and a dismissal still holding its
+      // conflict back, dropped, would let the conflict be raised again.
       pruneRuns: db.prepare(`
         DELETE FROM speculative_runs WHERE id IN (
           SELECT r.id FROM speculative_runs r
           WHERE r.finished_at IS NOT NULL AND r.finished_at < :cutoff
             AND NOT EXISTS (
               SELECT 1 FROM findings f
-              WHERE f.run_id = r.id AND f.status IN ('open', 'stale'))
+              WHERE f.run_id = r.id AND ${LIVE_FINDING})
           LIMIT :limit)`),
       // Unfinished, and started before both the cutoff and the process that owns
       // the store — so abandoned by a daemon that died mid-run, not in flight.
@@ -600,7 +737,7 @@ class SqliteStore implements Store {
           WHERE r.finished_at IS NULL AND r.started_at < :cutoff
             AND NOT EXISTS (
               SELECT 1 FROM findings f
-              WHERE f.run_id = r.id AND f.status IN ('open', 'stale'))
+              WHERE f.run_id = r.id AND ${LIVE_FINDING})
           LIMIT :limit)`),
       // Only superseded ones. A branch that has been idle longer than the
       // retention window still has a current change set, and it is the one thing
@@ -713,28 +850,98 @@ class SqliteStore implements Store {
     });
   }
 
-  upsertFinding(finding: Finding): Promise<void> {
+  upsertFinding(finding: Finding): Promise<boolean> {
+    return settled(() =>
+      this.#transaction(() => {
+        const current = this.#statements.findingStatus.get(finding.id);
+        if (current !== undefined && text(current, 'status') === 'dismissed') return false;
+        this.#writeFinding(finding);
+        return true;
+      }),
+    );
+  }
+
+  raiseFinding(finding: Finding): Promise<void> {
     return settled(() => {
       this.#transaction(() => {
-        this.#statements.upsertFinding.run(findingParams(finding));
-        // Replaced rather than merged: evidence is owned by the finding and
-        // addressed by position, so a shorter list would otherwise keep the tail
-        // of the longer one it replaced.
-        this.#statements.deleteEvidence.run(finding.id);
-        finding.evidence.forEach((evidence, ordinal) => {
-          this.#statements.insertEvidence.run(evidenceParams(finding.id, ordinal, evidence));
+        this.#writeFinding(finding);
+        this.#statements.countRaised.run({
+          hour: hourOf(finding.firstSeenAt),
+          kind: finding.kind,
+          rule: finding.rule,
         });
       });
     });
   }
 
-  getFinding(id: Finding['id']): Promise<Finding | null> {
+  dismissFinding(id: Finding['id'], dismissal: FindingDismissal): Promise<DismissedFinding | null> {
+    return settled(() =>
+      this.#transaction(() => {
+        const changed = this.#statements.dismissFinding.run({
+          id,
+          reason: dismissal.reason,
+          note: dismissal.note,
+          at: dismissal.dismissedAt,
+        }).changes;
+        if (Number(changed) === 0) return null;
+        const finding = this.#findingById(id)!;
+        this.#statements.countDismissed.run({
+          hour: hourOf(finding.firstSeenAt),
+          kind: finding.kind,
+          rule: finding.rule,
+          wrong: dismissal.reason === 'wrong' ? 1 : 0,
+          known: dismissal.reason === 'known' ? 1 : 0,
+        });
+        const repo = returned(this.#statements.findingRepo.get(id));
+        return { finding, repoId: text(repo, 'repo_id') as RepoId };
+      }),
+    );
+  }
+
+  endDismissal(id: Finding['id'], at: string): Promise<boolean> {
+    return settled(() => Number(this.#statements.endDismissal.run({ id, at }).changes) > 0);
+  }
+
+  raisedEventOf(id: Finding['id']): Promise<EventId | null> {
     return settled(() => {
-      const row = this.#statements.findingById.get(id);
-      if (row === undefined) return null;
-      const evidence = this.#statements.evidenceForFinding.all(id).map(toEvidence);
-      return toFinding(row, evidence);
+      const row = this.#statements.raisedEvent.get(id);
+      return row === undefined ? null : (text(row, 'id') as EventId);
     });
+  }
+
+  findingCounts(sinceHour: string): Promise<FindingCount[]> {
+    return settled(() =>
+      this.#statements.findingCounts.all(sinceHour).map((row): FindingCount => ({
+        kind: oneOf(row, 'kind', ANALYZER_KINDS),
+        rule: text(row, 'rule'),
+        raised: num(row, 'raised'),
+        dismissedWrong: num(row, 'dismissed_wrong'),
+        dismissedKnown: num(row, 'dismissed_known'),
+      })),
+    );
+  }
+
+  /** Inside a transaction the caller holds. */
+  #writeFinding(finding: Finding): void {
+    this.#statements.upsertFinding.run(findingParams(finding));
+    // Replaced rather than merged: evidence is owned by the finding and
+    // addressed by position, so a shorter list would otherwise keep the tail
+    // of the longer one it replaced.
+    this.#statements.deleteEvidence.run(finding.id);
+    finding.evidence.forEach((evidence, ordinal) => {
+      this.#statements.insertEvidence.run(evidenceParams(finding.id, ordinal, evidence));
+    });
+  }
+
+  getFinding(id: Finding['id']): Promise<Finding | null> {
+    return settled(() => this.#findingById(id));
+  }
+
+  #findingById(id: Finding['id']): Finding | null {
+    const row = this.#statements.findingById.get(id);
+    if (row === undefined) return null;
+    const evidence = this.#statements.evidenceForFinding.all(id).map(toEvidence);
+    return toFinding(row, evidence);
   }
 
   listOpenFindings(repoId: Repo['id']): Promise<Finding[]> {
@@ -742,6 +949,16 @@ class SqliteStore implements Store {
       this.#findingsWith(
         this.#statements.openFindings,
         this.#statements.openFindingEvidence,
+        repoId,
+      ),
+    );
+  }
+
+  listDismissedFindings(repoId: Repo['id']): Promise<Finding[]> {
+    return settled(() =>
+      this.#findingsWith(
+        this.#statements.dismissedFindings,
+        this.#statements.dismissedFindingEvidence,
         repoId,
       ),
     );
@@ -952,4 +1169,17 @@ class SqliteStore implements Store {
 function instant(value: string): string | null {
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
+}
+
+/** The UTC hour an instant falls in, as `finding_counts` keys it. */
+function hourOf(value: string): string {
+  const normalised = instant(value);
+  if (normalised === null) {
+    throw new InterlockError('STORE_UNAVAILABLE', 'A Finding has no valid first-seen time', {
+      details: { firstSeenAt: value },
+      remedy: 'Report this with the daemon log.',
+      infra: true,
+    });
+  }
+  return normalised.slice(0, 13);
 }

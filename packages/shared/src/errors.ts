@@ -46,6 +46,10 @@ export const INTERLOCK_ERROR_CODES = [
   'ANALYZER_INFRA_FAILURE',
   /** A check that did not land before its deadline: the daemon is busy, not the pair clean. */
   'CHECK_TIMEOUT',
+  /** A Finding id that names no Finding the store holds. */
+  'FINDING_NOT_FOUND',
+  /** A Finding that cannot be dismissed: resolved, dismissed already, or with nothing to match it by. */
+  'FINDING_NOT_DISMISSABLE',
   'STORE_UNAVAILABLE',
   'STORE_MIGRATION_FAILED',
   'DAEMON_UNREACHABLE',

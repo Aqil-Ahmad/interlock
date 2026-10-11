@@ -97,6 +97,7 @@ describe('a check', () => {
         return Promise.resolve([main, one, two, three]);
       },
       listOpenFindings: () => Promise.resolve([...findings]),
+      listDismissedFindings: () => Promise.resolve([]),
     } as unknown as Store;
     const checks = createChecks({
       store,

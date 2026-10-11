@@ -16,10 +16,19 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InterlockError, createLogger, resolveConfig, tokenPath, ulid } from '@interlock/shared';
-import type { BranchRefId, InterlockConfig, LogRecord, RepoId } from '@interlock/shared';
+import type {
+  BranchRefId,
+  Finding,
+  FindingId,
+  InterlockConfig,
+  LogRecord,
+  RepoId,
+} from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApiServer, ensureToken } from '../src/api/index.js';
 import type { CheckRequest, Checks } from '../src/check.js';
+import { createDismissals } from '../src/dismiss.js';
+import type { DismissRequest, Dismissals } from '../src/dismiss.js';
 import type { ApiServer, Bound } from '../src/api/index.js';
 import { EventBus } from '../src/bus/index.js';
 import { createSessionRegistry } from '../src/hooks/index.js';
@@ -41,6 +50,8 @@ const ROUTES = [
   '/api/repos',
   '/api/repos/x/branches',
   '/api/repos/x/check',
+  '/api/budget',
+  '/api/findings/x/dismiss',
   '/api/nope',
 ] as const;
 
@@ -56,6 +67,8 @@ describe('localhost API', () => {
   /** What the check route runs, or null for a daemon still starting. */
   let checks: Checks | null;
   let asked: { repoId: RepoId; request: CheckRequest; signal: AbortSignal }[];
+  /** What the dismiss route runs: the real dismissals unless a test stands one in. */
+  let dismiss: Dismissals['dismiss'];
 
   /**
    * Driven through `node:http` rather than `fetch`, because `Host` is a
@@ -141,6 +154,8 @@ describe('localhost API', () => {
     const bus = new EventBus({ logger });
     sessions = createSessionRegistry({ store, bus, logger, staleAfterMs: 60_000 });
     asked = [];
+    const real = createDismissals({ store, bus, logger });
+    dismiss = (id, request) => real.dismiss(id, request);
     checks = {
       run: (repoId, request, signal) => {
         asked.push({ repoId, request, signal });
@@ -151,10 +166,18 @@ describe('localhost API', () => {
           mergeBaseSha: 'a'.repeat(40),
           clean: true,
           findings: [],
+          dismissed: [],
         });
       },
     };
-    api = createApiServer({ config, store, sessions, checks: () => checks, logger });
+    api = createApiServer({
+      config,
+      store,
+      sessions,
+      checks: () => checks,
+      dismissals: { dismiss: (id, request) => dismiss(id, request) },
+      logger,
+    });
     bound = await api.start();
   });
 
@@ -325,10 +348,11 @@ describe('localhost API', () => {
     expect(logs.filter((record) => record.level === 'error')).toStrictEqual([]);
   });
 
-  it('serves two POST routes, the session hook and a check, and nothing else', async () => {
+  it('serves three POST routes, the session hook, a check and a dismissal, and nothing else', async () => {
     // Everything else stays GET-only, so nothing becomes writable by accident.
     expect((await call('/api/repos', { token: bound.token, method: 'POST' })).status).toBe(405);
-    for (const path of ['/api/sessions', '/api/repos/x/check']) {
+    expect((await call('/api/budget', { token: bound.token, method: 'POST' })).status).toBe(405);
+    for (const path of ['/api/sessions', '/api/repos/x/check', `/api/findings/${ulid()}/dismiss`]) {
       const get = await call(path, { token: bound.token });
       expect(get.status).toBe(405);
       expect(get.headers.allow).toBe('POST');
@@ -447,6 +471,117 @@ describe('localhost API', () => {
 
       await stopped;
     });
+  });
+
+  describe('the dismiss route', () => {
+    let dismissed: { id: string; request: DismissRequest }[];
+    const id = ulid<FindingId>();
+    const post = (body: unknown, raw?: string, path = `/api/findings/${id}/dismiss`) =>
+      call(path, {
+        token: bound.token,
+        method: 'POST',
+        ...(raw === undefined ? { body } : { raw }),
+      });
+
+    /** Stand in for the dismissals, recording what reached them. */
+    const recording = (): void => {
+      dismissed = [];
+      dismiss = (findingId, request) => {
+        dismissed.push({ id: findingId, request });
+        return Promise.resolve({ id: findingId } as unknown as Finding);
+      };
+    };
+
+    it('dismisses the Finding in the path with the reason and note in the body', async () => {
+      recording();
+      const response = await post({ reason: 'wrong', note: 'rerere' });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ finding: { id } });
+      expect(dismissed).toEqual([{ id, request: { reason: 'wrong', note: 'rerere' } }]);
+    });
+
+    it('answers a Finding the store does not hold with 404', async () => {
+      const response = await post({ reason: 'wrong' });
+      expect(response.status).toBe(404);
+      expect(response.body).toMatchObject({ error: { code: 'FINDING_NOT_FOUND' } });
+    });
+
+    it('answers a Finding it cannot dismiss with 409', async () => {
+      dismiss = () => Promise.reject(new InterlockError('FINDING_NOT_DISMISSABLE', 'resolved'));
+      const response = await post({ reason: 'known' });
+      expect(response.status).toBe(409);
+      expect(response.body).toMatchObject({ error: { code: 'FINDING_NOT_DISMISSABLE' } });
+    });
+
+    it('needs the token like every route, before reading the body', async () => {
+      recording();
+      const response = await call(`/api/findings/${id}/dismiss`, {
+        token: null,
+        method: 'POST',
+        body: { reason: 'wrong' },
+      });
+      expect(response.status).toBe(401);
+      expect(dismissed).toEqual([]);
+    });
+
+    it('refuses a path segment that is not a Finding id, and dismisses nothing', async () => {
+      recording();
+      for (const segment of ['nope', id.slice(0, 12), '..']) {
+        const response = await post(
+          { reason: 'wrong' },
+          undefined,
+          `/api/findings/${segment}/dismiss`,
+        );
+        expect(response.status, segment).toBe(400);
+      }
+      expect(dismissed).toEqual([]);
+    });
+
+    it.each([
+      [{}, 'reason must be one of wrong, known'],
+      [{ reason: 'false-positive' }, 'reason must be one of wrong, known'],
+      [{ reason: 'wrong', note: '' }, 'note must be non-empty text'],
+      [{ reason: 'wrong', note: 'x'.repeat(501) }, 'longer than 500'],
+      [{ reason: 'wrong', by: 'me' }, 'unknown field "by"'],
+      [[], 'must be a JSON object'],
+    ])('refuses %j, and dismisses nothing', async (body, problem) => {
+      recording();
+      const response = await post(body);
+      expect(response.status).toBe(400);
+      expect(response.body).toMatchObject({ error: { code: 'API_REQUEST_INVALID' } });
+      const { problems } = (response.body as { error: { details: { problems: string[] } } }).error
+        .details;
+      expect(problems.join('; ')).toContain(problem);
+      expect(dismissed).toEqual([]);
+    });
+
+    it('takes the longest note however JSON spells it, and refuses a body past its cap', async () => {
+      recording();
+      // Every character escaped, six bytes each: the most a valid note can be.
+      const escaped = JSON.stringify({ reason: 'wrong', note: '\u0001'.repeat(500) });
+      expect(Buffer.byteLength(escaped)).toBeGreaterThan(3_000);
+      expect((await post(undefined, escaped)).status).toBe(200);
+
+      const response = await post(
+        undefined,
+        JSON.stringify({ reason: 'wrong', note: 'x'.repeat(5_000) }),
+      );
+      expect([0, 400]).toContain(response.status);
+      expect(dismissed).toHaveLength(1);
+    });
+  });
+
+  it('serves the false-positive budget, with nothing counted as no data and delivered unmeasured', async () => {
+    const response = await call('/api/budget', { token: bound.token });
+
+    expect(response.status).toBe(200);
+    const { windows } = (response.body as { budget: { windows: Record<string, unknown>[] } })
+      .budget;
+    expect(windows.map((window) => window.hours)).toEqual([24, 168]);
+    for (const window of windows) {
+      expect(window).toMatchObject({ raised: 0, rate: null, delivered: null, rules: [] });
+    }
   });
 
   it('registers a session from a hook payload and lists it back', async () => {

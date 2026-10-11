@@ -378,6 +378,9 @@ describe('interlock status', () => {
       writeFileSync(tokenPath(dataDir), 'stand-in\n', { mode: 0o600 });
     };
 
+    /** The budget a daemon with nothing counted answers, for a stand-in that gets that far. */
+    const BUDGET = { status: 200, body: { budget: { windows: [] } } };
+
     beforeEach(() => {
       peak = 0;
       inFlight = 0;
@@ -428,6 +431,7 @@ describe('interlock status', () => {
           body: { error: { code: 'REPO_NOT_FOUND', message: 'No such repository' } },
         },
         '/api/repos/gone/sessions': { status: 200, body: { sessions: [] } },
+        '/api/budget': BUDGET,
       });
 
       expect(await status('--data-dir', dataDir)).toBe(70);
@@ -494,11 +498,31 @@ describe('interlock status', () => {
       await serve({
         '/api/health': { status: 200, body: { protocolVersion: 1 } },
         '/api/repos': { status: 200, body: { repos } },
+        '/api/budget': BUDGET,
         ...perRepo,
       });
 
       expect(await status('--data-dir', dataDir)).toBe(0);
       expect(peak).toBeGreaterThan(1);
+    });
+
+    it('still reports the branches when the daemon predates the budget route', async () => {
+      await serve({
+        '/api/health': { status: 200, body: { protocolVersion: 1 } },
+        '/api/repos': { status: 200, body: { repos: [] } },
+        '/api/budget': {
+          status: 404,
+          body: { error: { code: 'API_REQUEST_INVALID', message: 'No such route' } },
+        },
+      });
+
+      expect(await status('--data-dir', dataDir)).toBe(0);
+      expect(stdout()).not.toContain('False positives');
+      expect(stderr()).toContain('The false-positive budget is unavailable');
+      expect(stderr()).toContain('No such route');
+
+      expect(await status('--data-dir', dataDir, '--json')).toBe(0);
+      expect(JSON.parse(stdout())).toEqual({ repos: [] });
     });
 
     it('prints the remedy the daemon sent rather than a status code', async () => {

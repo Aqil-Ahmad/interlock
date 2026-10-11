@@ -1,6 +1,6 @@
 import { InterlockError, dataDirFrom, isInterlockError } from '@interlock/shared';
 import { connectDaemon } from '../client/daemon-client.js';
-import { renderJson, renderStatus } from '../render.js';
+import { renderBudget, renderJson, renderStatus } from '../render.js';
 import type { RepoView } from '../render.js';
 import type { Command } from './command.js';
 import { describeError } from './describe.js';
@@ -27,7 +27,8 @@ const EXIT_SOFTWARE = 70;
 const USAGE = [
   'Usage: interlock status [options]',
   '',
-  'Show in-flight branches, their dirty state and touched files.',
+  'Show in-flight branches, their dirty state and touched files, and how many',
+  'Findings were dismissed as wrong over the last 24 hours and 7 days.',
   '',
   'Options:',
   '  --json              Emit the same facts as JSON',
@@ -123,7 +124,18 @@ export async function runStatus(
 
   try {
     const client = await connectDaemon(options.dataDir);
-    const repos = await client.repos();
+    // Apart from the branch report: a daemon started before the budget existed
+    // answers its route with a 404, and the report it can still give should not
+    // be lost to a section it cannot. Said on stderr rather than dropped, so a
+    // daemon that fails here for another reason is not mistaken for one with
+    // nothing counted.
+    const [repos, budget] = await Promise.all([
+      client.repos(),
+      client.budget().catch((error: unknown) => {
+        io.err(`The false-positive budget is unavailable: ${describeError(error)}\n`);
+        return undefined;
+      }),
+    ]);
     // Together rather than one after another: each carries its own timeout, so
     // a serial pass multiplies the worst case by the number of repositories
     // while the daemon answers all of them off one local socket pool.
@@ -136,7 +148,11 @@ export async function runStatus(
         return { repo, branches, sessions };
       }),
     );
-    io.out(options.json ? renderJson(views) : renderStatus(views));
+    io.out(
+      options.json
+        ? renderJson(views, budget)
+        : `${renderStatus(views)}${budget === undefined ? '' : `\n${renderBudget(budget)}`}`,
+    );
     // Whatever it found. A report that failed the build because it had
     // something to report would be used once and then piped to `true`.
     return EXIT_OK;

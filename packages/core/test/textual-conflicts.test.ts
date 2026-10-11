@@ -37,6 +37,7 @@ import {
   MAX_SPANS_PER_SIDE,
   classifyTextualConflicts,
   excerptOf,
+  textualFindingContent,
   textualFindingKey,
 } from '../src/merge/conflict-classifier.js';
 import { speculativeMerge } from '../src/merge/speculative-merge.js';
@@ -1252,6 +1253,93 @@ describe('textual conflicts', () => {
       expect(textualFindingKey({ ...finding, kind: 'typecheck' })).toBeNull();
       expect(
         textualFindingKey({
+          ...finding,
+          evidence: finding.evidence.filter((e) => e.type === 'span'),
+        }),
+      ).toBeNull();
+    });
+  });
+
+  describe('textualFindingContent', () => {
+    const run = async (
+      request: SpeculativeMergeRequest,
+      a: BranchRefId,
+      b: BranchRefId,
+    ): Promise<Finding> => {
+      const outcome = await textualAnalyzer.analyze({
+        ...(await context(request)),
+        branchA: a,
+        branchB: b,
+      });
+      return outcome.findings[0]!;
+    };
+
+    it('is the same for the same content merged either way round, and moves with either side', async () => {
+      const first = await pair(
+        () => write('f.txt', 'a\nb\nc\n'),
+        () => write('f.txt', 'A\nb\nc\n'),
+        () => write('f.txt', 'B\nb\nc\n'),
+      );
+      const seen = await run(first, branchA, branchB);
+      // The evidence's sides follow the attribution, so merged the other way
+      // round each side's blob sits in the other slot.
+      const swapped = await run(
+        { ...first, commitA: first.commitB, commitB: first.commitA },
+        branchB,
+        branchA,
+      );
+      git('checkout', '-q', 'one');
+      write('f.txt', 'A\nb\nc\nmore\n');
+      const movedA = await run({ ...first, commitA: commit('one again') }, branchA, branchB);
+      git('checkout', '-q', 'two');
+      write('f.txt', 'B\nb\nc\nmore\n');
+      const movedB = await run({ ...first, commitB: commit('two again') }, branchA, branchB);
+
+      expect(textualFindingContent(seen)).not.toBeNull();
+      expect(textualFindingContent(swapped)).toBe(textualFindingContent(seen));
+      // The key stays, which is why a dismissal cannot hold on the key alone.
+      expect(textualFindingKey(movedA)).toBe(textualFindingKey(seen));
+      expect(textualFindingContent(movedA)).not.toBe(textualFindingContent(seen));
+      expect(textualFindingContent(movedB)).not.toBe(textualFindingContent(seen));
+      expect(textualFindingContent(movedB)).not.toBe(textualFindingContent(movedA));
+    });
+
+    it('tells a side that deleted the file from one that kept it, by branch', async () => {
+      const request = await pair(
+        () => write('f.txt', 'a\n'),
+        () => write('f.txt', 'A\n'),
+        () => git('rm', '-q', 'f.txt'),
+      );
+      const deletedOnB = await run(request, branchA, branchB);
+      const merge = deletedOnB.evidence.find((e) => e.type === 'merge-conflict')!;
+      expect(merge).toMatchObject({ sideB: null });
+      const flipped: Finding = {
+        ...deletedOnB,
+        evidence: [{ ...merge, sideA: merge.sideB, sideB: merge.sideA }],
+      };
+
+      expect(textualFindingContent(deletedOnB)).toBe(
+        JSON.stringify(
+          [
+            [branchA, merge.sideA!.oid],
+            [branchB, null],
+          ].sort(([x], [y]) => (String(x) < String(y) ? -1 : 1)),
+        ),
+      );
+      expect(textualFindingContent(flipped)).not.toBe(textualFindingContent(deletedOnB));
+    });
+
+    it('is null for a Finding that is not textual, or carries no merge', async () => {
+      const request = await pair(
+        () => write('f.txt', 'a\n'),
+        () => write('f.txt', 'A\n'),
+        () => write('f.txt', 'B\n'),
+      );
+      const finding = await run(request, branchA, branchB);
+
+      expect(textualFindingContent({ ...finding, kind: 'typecheck' })).toBeNull();
+      expect(
+        textualFindingContent({
           ...finding,
           evidence: finding.evidence.filter((e) => e.type === 'span'),
         }),
