@@ -100,18 +100,43 @@ function readings(line: string): string[] {
   return [visible, ...hidden].map((text) => text.replace(IGNORABLE, '').normalize('NFKC'));
 }
 
+interface Start {
+  readonly text: string;
+  /** Whether a role marker read from here addresses the reader. */
+  readonly roles: boolean;
+}
+
 /**
  * Each place on a line an instruction could start: the line itself, and after
  * every comment opener.
+ *
+ * A role marker is not read after a `;` in mid-line. There it separates
+ * statements and fields, not a comment from code: in `{ id: string; user: User }`
+ * every field after the first read as a role marker, in TypeScript's commonest
+ * shape. A `;` comment at the start of a line is still read, and so is a marker
+ * behind any other opener.
  */
-function starts(text: string): string[] {
-  const found = [text];
-  for (const opener of text.matchAll(COMMENT_OPENER)) found.push(text.slice(opener.index));
-  return found.map((start) => start.replace(LEADING_MARKERS, ''));
+function starts(text: string): Start[] {
+  const found: Start[] = [{ text, roles: true }];
+  for (const opener of text.matchAll(COMMENT_OPENER)) {
+    found.push({ text: text.slice(opener.index), roles: opener[0] !== ';' });
+  }
+  return found.map((start) => ({ ...start, text: start.text.replace(LEADING_MARKERS, '') }));
 }
 
-function addressesReader(start: string): boolean {
-  if (ADDRESS.test(start) || ROLE.test(start)) return true;
+/**
+ * At most `length` UTF-16 units of `text`, never ending inside a surrogate
+ * pair: half a tag character is a lone surrogate, which no pattern here names
+ * and so would reach the reader unescaped.
+ */
+function cut(text: string, length: number): string {
+  const head = text.slice(0, length);
+  const last = head.charCodeAt(head.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head;
+}
+
+function addressesReader({ text: start, roles }: Start): boolean {
+  if (ADDRESS.test(start) || (roles && ROLE.test(start))) return true;
   const override = OVERRIDE.exec(start);
   if (override === null) return false;
   const rest = start.slice(override[0].length);
@@ -120,9 +145,7 @@ function addressesReader(start: string): boolean {
 }
 
 function instructionShaped(line: string): boolean {
-  return readings(line).some(
-    (text) => ROLE_TAG.test(text) || starts(text).some((start) => addressesReader(start)),
-  );
+  return readings(line).some((text) => ROLE_TAG.test(text) || starts(text).some(addressesReader));
 }
 
 /** A hidden character as text a reader can see, in the notation `safeText` uses. */
@@ -170,14 +193,14 @@ export function wrapUntrusted(content: string, options: SanitizeOptions = {}): s
       // Each side of an elided delimiter is read as a line of its own, because
       // that is where a block a model took to be closed would start a new one.
       return line.split(ELIDED).some((piece) => instructionShaped(piece))
-        ? `[neutralised instruction-like line] ${reveal(line.slice(0, 80))}`
+        ? `[neutralised instruction-like line] ${reveal(cut(line, 80))}`
         : reveal(line);
     })
     .join('\n');
 
   const truncated =
     content.length > maxLength || neutralised.length > maxLength
-      ? `${neutralised.slice(0, maxLength)}\n[…truncated…]`
+      ? `${cut(neutralised, maxLength)}\n[…truncated…]`
       : neutralised;
 
   return [
