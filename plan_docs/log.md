@@ -4,6 +4,14 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-12 — coverage gate, per package
+
+- **Task rewritten before starting.** "Turn the coverage gate on" said the gate and the CI coverage job had been removed; both are on `dev` (a global 82/82/85 floor, one matrix cell running `pnpm test:coverage`). The real gap was a single global floor, so the task now gives each package its own.
+- **Measured — statements / branches / lines / functions:** shared 96.19 / 92.11 / 97.69 / 94.87; core 98.55 / 94.92 / 99.32 / 98.75; daemon 95.53 / 89.00 / 96.55 / 96.13; cli 89.32 / 84.62 / 90.86 / 79.63; mcp-server 100 / 100 / 100 / 100. Floors are these rounded down. Measured as root, with the 16 unreadable-path tests failing, so a normal run sits at or slightly above them.
+- **Decided — functions floors for shared, core, daemon and cli; none for mcp-server.** The unwritten CLI commands and every MCP tool sit in an `index.ts`, which coverage excludes, so v8 never counts them; daemon's one stub, `purge`, is already inside its number. mcp-server gets none because all its tools are still stubs, so the number would follow them being written, not tested.
+- **Found — the gate bites.** On a throwaway branch with `packages/cli/test/check.test.ts` deleted, the run failed on all four cli floors (lines 87.15 < 90, functions 75.92 < 79, statements 85.11 < 89, branches 78.97 < 84) and on daemon's functions and branches, which the cli tests also drive, while the global floor passed. The branch was deleted. Run as `vitest run --coverage --coverage.reportOnFailure`, since as root the 16 tests above fail first and vitest skips the threshold check.
+- **Checked — no workflow change.** The CI coverage cell runs `pnpm test:coverage`, the script `pnpm verify` runs, so the per-package floors apply there as they are.
+
 ## 2026-10-06 — false-positive budget
 
 - **Task rewritten before starting.** The issue's approach held — dismiss a conflict at its content, suppress in reconciliation, count in a table retention never prunes, "delivered" not measured — with gaps that would have shipped a rate nobody could read. The rewrite is in the milestone.

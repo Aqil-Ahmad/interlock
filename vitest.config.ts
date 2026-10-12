@@ -56,22 +56,33 @@ export default defineConfig({
       // the denominator, where every file added to it walks the floor down.
       exclude: ['**/*.test.ts', '**/index.ts', '**/*.d.ts', 'packages/dashboard/**'],
       /**
-       * A floor against regression, not a target. Set just under what the tree
-       * measures so ordinary work never trips it, and raised when a milestone
-       * lands rather than lowered when a change misses.
+       * Floors against regression, not targets. Raised when a milestone lands,
+       * never lowered when a change misses.
        *
-       * No `functions` floor. A declared-but-unwritten function throws
-       * `notImplemented` and is never called, and that pattern is required
-       * here — nineteen of the thirty-nine uncovered functions are stubs, so
-       * the number tracks how much of the plan is unbuilt rather than how well
-       * the built code is tested, and following the rule would walk it into the
-       * floor. The three below move together with real code: a stub file
-       * contributes one statement, an untested real module contributes many.
+       * The global floor alone let one package decay while the others carried
+       * the average, so each package also has its own, set at its measured
+       * coverage rounded down to a whole percent.
+       *
+       * No global `functions` floor. A declared-but-unwritten function throws
+       * `notImplemented` and is never called, so wherever stubs are counted the
+       * number tracks how much of the plan is unbuilt rather than how well the
+       * built code is tested. A package gets a `functions` floor once stubs no
+       * longer make up its uncovered functions; the unwritten CLI commands sit
+       * in an `index.ts`, which is excluded above, so they do not count.
        */
       thresholds: {
         statements: 82,
         branches: 82,
         lines: 85,
+        'packages/shared/src/**': { statements: 96, branches: 92, lines: 97, functions: 94 },
+        'packages/core/src/**': { statements: 98, branches: 94, lines: 99, functions: 98 },
+        // `purge` is the one stub left, one function in four hundred, and it is
+        // already inside the measured number: writing it can only raise it.
+        'packages/daemon/src/**': { statements: 95, branches: 89, lines: 96, functions: 96 },
+        'packages/cli/src/**': { statements: 89, branches: 84, lines: 90, functions: 79 },
+        // No `functions` floor: every tool is still a stub, so the number would
+        // follow the tools being written rather than tested.
+        'packages/mcp-server/src/**': { statements: 100, branches: 100, lines: 100 },
       },
     },
   },
