@@ -4,6 +4,16 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-13 — toolchain detection
+
+- **Task expanded before starting.** The one-line "Toolchain detection" task is rewritten to M1's depth — reading from the object database, each manager's rule, every refusal with its reason, the cache — from the issue. "Expand this milestone" stays unticked.
+- **Decided — a typecheck override is a command, the detected typecheck is the in-process service.** The result's `runner` is `language-service` with projects or `command` with the override's string; how a command-style typecheck runs is left to the analyzer that reads it.
+- **Decided — answered per capability, and an override applies even where detection gave up.** A Bun tree with an `install` override has a supported install and an unsupported build; the override is the repository saying exactly what detection could not tell.
+- **Decided — no lockfile and no `packageManager` is unsupported, not npm.** Installing with the wrong manager resolves a different dependency tree.
+- **Decided — `yarn.lock` is never read; Berry is told by `git grep '^__metadata:'`.** Lockfiles are routinely megabytes, far past the 256 KiB read cap.
+- **Decided — the override's `test` command is not carried.** Nothing reads it before the targeted-tests analyzer; detection answers install, typecheck and build.
+- **Decided — one recursive `ls-tree` per detection.** Which nested manifests matter depends on workspace patterns only known once the root is read, and all of them key the cache. Its output is bounded by the runner's 32 MiB buffer, about 300,000 files.
+
 ## 2026-10-12 — coverage gate, per package
 
 - **Task rewritten before starting.** "Turn the coverage gate on" said the gate and the CI coverage job had been removed; both are on `dev` (a global 82/82/85 floor, one matrix cell running `pnpm test:coverage`). The real gap was a single global floor, so the task now gives each package its own.

@@ -10,6 +10,7 @@ Domain logic. Everything here is a function of its inputs; nothing here runs for
 | `src/merge/`     | speculative pairwise merges in the shadow's object database, textual conflict classification                                    |
 | `src/analyzers/` | the analyzer contract and its implementations                                                                                   |
 | `src/advisor/`   | Finding ranking                                                                                                                 |
+| `src/sandbox/`   | toolchain detection: package manager, typecheck projects and build, read from the tree without running anything                 |
 
 ## Constraints
 
