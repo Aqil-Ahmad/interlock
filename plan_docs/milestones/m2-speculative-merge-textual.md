@@ -600,11 +600,27 @@ merge-tree` over the two commits reports the conflict — with neither side
   for a human decision and recorded in the threat model. `interlock status`
   keeps never failing on Findings.
 
-- [ ] **Show a shadow collection in `interlock status`**
-      **Files:** `packages/daemon/src/api/`, `packages/cli/src/commands/status.ts`, `packages/cli/src/render.ts`
-      **What:** while a repository's shadow is repacked its checks are held off, and today only the daemon's log says why an edit's warning is late. Surface a collection in progress, and the last one's pause, per repository.
-      **Done when:** `interlock status` names a repository whose checks are held for a collection, with how long it has been; `--json` carries the same; the API carries it without a store migration, since it is live state.
-      **Constraints:** read the pause from the registry's own measure (`pausedMs`), not a guess. Worth doing once the bench records the pause at the default window: under realistic load it measured about a second.
+- [x] **Show a shadow collection in `interlock status`**
+      **Files:** `packages/daemon/src/shadows.ts`, `packages/daemon/src/api/`, `packages/daemon/src/daemon.ts`, `packages/cli/src/client/`, `packages/cli/src/commands/status.ts`, `packages/cli/src/render.ts`, `docs/architecture.md`
+      **What:** while a repository's shadow is repacked its checks are held off, and today only the daemon's log says why an edit's warning is late. Surface a collection in progress, the last one's pause, and a collection that keeps failing, per repository.
+      **Done when:** `interlock status` names a repository whose checks are held for a collection, with how long it has been; shows the last collection's pause; warns when collections are failing, with when the next attempt is; `--json` carries the same, and the phases that hold nothing up; the API carries it without a store migration, since it is live state, and a restarted daemon reads "no collection yet".
+
+  Rewritten before starting, from the issue. **One live record per
+  repository, owned by the registry:** the phase (`idle`, `pinning`,
+  `waiting-for-quiet`, `holding`) and when it began, set where the code already
+  changes state — before the pin, before the wait for quiet, inside `alone()`
+  once new holders wait, and `idle` in the `finally` that releases the gate, so
+  a failed or stopped collection never reads as holding; the last finished
+  collection (end, `pausedMs`, `quietMs`, sizes before and after); and the
+  collector's backoff (failures in a row, next attempt, last reason through
+  `redact()`). **Served from `GET /api/repos/:id/collection`**, read
+  synchronously, behind the same token; an unknown repository is
+  `REPO_NOT_FOUND`. **Human output:** only `holding` gets a line, since only it
+  delays a warning; a failing collection is a warning whatever the phase; the
+  last pause or "no shadow collection yet". The CLI validates the record field
+  by field, and a daemon without the route leaves the branch report intact, as
+  for the budget.
+  **Constraints:** read the pause from the registry's own measure (`pausedMs`), not a guess. A read-only `GET`, so the security posture does not change. Measured by the bench at about a second under realistic load.
 
 - [x] **`interlock check A B`**
       **Files:** `packages/cli/src/commands/`, `packages/cli/src/client/`, `packages/cli/src/render.ts`, `packages/daemon/src/api/server.ts`, `packages/daemon/src/scheduler/`, `packages/daemon/src/watcher/`, `packages/daemon/src/check.ts`, `docs/architecture.md`, `docs/threat-model.md`

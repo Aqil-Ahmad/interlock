@@ -9,6 +9,7 @@ import { parseCheckRequest } from '../check.js';
 import type { Checks } from '../check.js';
 import { parseDismissRequest, parseFindingId } from '../dismiss.js';
 import type { Dismissals } from '../dismiss.js';
+import type { CollectionState } from '../shadows.js';
 import type { Store } from '../store/index.js';
 import { bearerToken, ensureToken, tokenMatches } from './token.js';
 
@@ -51,6 +52,11 @@ export interface ApiOptions {
   readonly checks?: () => Checks | null;
   /** What dismisses a Finding: the store and the bus, both up before the listener. */
   readonly dismissals: Dismissals;
+  /**
+   * Where a repository's shadow collection is: live state the registry holds
+   * in memory, read synchronously, so the answer needs no lock.
+   */
+  readonly collections: (repoId: RepoId) => CollectionState;
   readonly logger: Logger;
 }
 
@@ -258,7 +264,7 @@ export function createApiServer(options: ApiOptions): ApiServer {
 
     if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'repos') {
       const [, , id, tail] = segments;
-      if (tail === 'branches' || tail === 'sessions') {
+      if (tail === 'branches' || tail === 'sessions' || tail === 'collection') {
         // Checked rather than assumed: `listBranchRefs` answers an empty list
         // for a repository that does not exist, which reads as "no branches"
         // instead of "no such repository".
@@ -271,6 +277,8 @@ export function createApiServer(options: ApiOptions): ApiServer {
         }
         if (tail === 'branches') {
           send(response, 200, { branches: await store.listBranchRefs(id as RepoId) });
+        } else if (tail === 'collection') {
+          send(response, 200, { collection: options.collections(id as RepoId) });
         } else {
           send(response, 200, { sessions: await sessions.listLive(id as RepoId) });
         }

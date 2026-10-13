@@ -177,6 +177,20 @@ describe('interlock status', () => {
       ]);
     });
 
+    it('reports the repository’s shadow collection, from the daemon’s own registry', async () => {
+      expect(await status('--data-dir', dataDir, '--json')).toBe(0);
+      const parsed = JSON.parse(stdout()) as {
+        repos: { collection: { phase: string; last: unknown; failing: unknown } }[];
+      };
+      // The first retention pass may or may not have collected by now; either
+      // way the record is the daemon's, and nothing is failing.
+      expect(parsed.repos[0]?.collection).toMatchObject({ failing: null });
+
+      expect(await status('--data-dir', dataDir)).toBe(0);
+      expect(stdout()).toMatch(/no shadow collection yet|last shadow collection/u);
+      expect(stderr()).toBe('');
+    });
+
     it('shows an unreadable worktree as unknown rather than clean', async () => {
       // Reversible, unlike deleting it, and git reports the same `prunable` for
       // both — so the work is still there and nobody can look at it.
@@ -523,6 +537,88 @@ describe('interlock status', () => {
 
       expect(await status('--data-dir', dataDir, '--json')).toBe(0);
       expect(JSON.parse(stdout())).toEqual({ repos: [] });
+    });
+
+    describe('its shadow collections', () => {
+      const repos = ['one', 'two'].map((id) => ({
+        id,
+        rootPath: `/work/${id}`,
+        defaultBranch: 'main',
+        shadowPath: `/s/${id}`,
+        config: {},
+        discoveredAt: 'now',
+        lastSeenAt: 'now',
+      }));
+      const empty = (id: string): Record<string, { status: number; body: unknown }> => ({
+        [`/api/repos/${id}/branches`]: { status: 200, body: { branches: [] } },
+        [`/api/repos/${id}/sessions`]: { status: 200, body: { sessions: [] } },
+      });
+      const base = {
+        '/api/health': { status: 200, body: { protocolVersion: 1 } },
+        '/api/repos': { status: 200, body: { repos } },
+        '/api/budget': BUDGET,
+        ...empty('one'),
+        ...empty('two'),
+      };
+
+      it('names a repository whose checks are held and one failing, each on its own', async () => {
+        const since = new Date(Date.now() - 4_000).toISOString();
+        const holding = { phase: 'holding', since, last: null, failing: null };
+        const failing = {
+          phase: 'idle',
+          since: null,
+          last: null,
+          failing: { failures: 2, retryAt: '2026-10-11T14:00:00.000Z', reason: 'disk full' },
+        };
+        await serve({
+          ...base,
+          '/api/repos/one/collection': { status: 200, body: { collection: holding } },
+          '/api/repos/two/collection': { status: 200, body: { collection: failing } },
+        });
+
+        expect(await status('--data-dir', dataDir)).toBe(0);
+        const [one, two] = stdout().split('/work/two');
+        expect(one).toMatch(/checks held for shadow collection — \d/u);
+        expect(one).not.toContain('warning');
+        expect(two).toContain(
+          'warning: shadow collection failed 2 times in a row, next attempt 2026-10-11 14:00 UTC: disk full',
+        );
+        expect(two).not.toContain('checks held for');
+
+        expect(await status('--data-dir', dataDir, '--json')).toBe(0);
+        const parsed = JSON.parse(stdout()) as { repos: { id: string; collection: unknown }[] };
+        expect(parsed.repos.map((repo) => repo.collection)).toStrictEqual([holding, failing]);
+      });
+
+      it('still reports the branches when the daemon predates the route, and says so once', async () => {
+        await serve(base);
+
+        expect(await status('--data-dir', dataDir)).toBe(0);
+        expect(stdout()).toContain('/work/one');
+        expect(stdout()).not.toContain('shadow collection');
+        expect(stderr().match(/Shadow collection state is unavailable/gu)).toHaveLength(1);
+
+        expect(await status('--data-dir', dataDir, '--json')).toBe(0);
+        const parsed = JSON.parse(stdout()) as { repos: { collection: unknown }[] };
+        expect(parsed.repos.map((repo) => repo.collection)).toStrictEqual([null, null]);
+      });
+
+      it('refuses a record of another shape rather than printing what it cannot read', async () => {
+        const state = { phase: 'holding', since: null, last: null, failing: null };
+        await serve({
+          ...base,
+          '/api/repos/one/collection': { status: 200, body: { collection: state } },
+          '/api/repos/two/collection': {
+            status: 200,
+            body: { collection: { phase: 'idle', since: null, last: null, failing: null } },
+          },
+        });
+
+        expect(await status('--data-dir', dataDir)).toBe(0);
+        expect(stderr()).toContain('malformed shadow collection');
+        expect(stdout()).not.toContain('checks held');
+        expect(stdout()).toContain('no shadow collection yet');
+      });
     });
 
     it('prints the remedy the daemon sent rather than a status code', async () => {
