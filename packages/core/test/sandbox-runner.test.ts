@@ -530,7 +530,13 @@ describe.runIf(status.blocker === null)('sandbox runner: in Docker', () => {
       });
       try {
         const error = await rejection(
-          runner().run({ tree: makeTree(), argv: ['sleep', '600'], signal: controller.signal }),
+          // A wall clock far past the test's own timeout: only the abort can
+          // end this run in time.
+          runner({ config: config({ timeoutMs: 600_000 }) }).run({
+            tree: makeTree(),
+            argv: ['sleep', '600'],
+            signal: controller.signal,
+          }),
         );
         expect(error.code).toBe('REQUEST_CANCELLED');
         expect(controller.signal.aborted).toBe(true);
