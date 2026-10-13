@@ -573,6 +573,22 @@ describe.runIf(status.blocker === null)('sandbox runner: in Docker', () => {
       expect(result.stderrTruncated).toBe(false);
     });
 
+    it('flags a stream one byte over the cap, and not one exactly at it', async () => {
+      const capped = runner({ maxOutputBytes: 1024 });
+      const at = await capped.run({
+        tree: makeTree(),
+        argv: shellCommand("head -c 1024 /dev/zero | tr '\\0' a"),
+      });
+      expect(at.stdout).toHaveLength(1024);
+      expect(at.stdoutTruncated).toBe(false);
+      const over = await capped.run({
+        tree: makeTree('over'),
+        argv: shellCommand("head -c 1025 /dev/zero | tr '\\0' a"),
+      });
+      expect(over.stdout).toHaveLength(1024);
+      expect(over.stdoutTruncated).toBe(true);
+    });
+
     it('redacts secrets in output before returning it', async () => {
       const token = `ghp_${'a1B2'.repeat(9)}`;
       const result = await run(['echo', `token=${token}`]);
