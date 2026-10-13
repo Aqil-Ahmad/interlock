@@ -25,10 +25,78 @@ _which branch caused which half_ of each one.
       **Done when:** every task below carries a `Done when` naming an observable check, and nothing in it contradicts what earlier milestones learned.
 
 - [ ] **Docker sandbox runner**
-      **Files:** `packages/core/src/sandbox/` (create in this milestone, not before)
-      **What:** run a command against a materialised merged tree in a container.
-      **Done when:** the container has no network, runs non-root, drops capabilities, mounts the tree read-only with a writable tmpfs overlay, and is killed at CPU, memory, PID and wall-clock limits.
-      **Constraints:** merged code is agent-written and unreviewed. It never executes on the host, in any code path, including tests.
+      **Files:** `packages/core/src/sandbox/` (the runner and its `index.ts`), `packages/core/src/index.ts`, `packages/core/test/sandbox-runner.test.ts`, `packages/shared/src/config.ts` (default image), `packages/shared/src/errors.ts` (codes), ADR-0007, `docs/threat-model.md` (T2, T9), `docs/architecture.md`
+      **What:** the one primitive every execution analyzer uses: run an argument array against a merged tree inside Docker, under fixed isolation and limits, and return what happened. No analyzer is built here.
+
+  The build and test analyzers run merged, agent-written code nobody has
+  reviewed. Hard rule 2 says it never runs on the host, so the runner is the
+  only way it runs at all. How a check writes — the tree, a tmpfs, a per-slot
+  cache — is ADR-0007, written before the code.
+
+  **Done when:**
+  - _Isolation,_ each shown by a command run in the container: connecting
+    to an outside address fails; the uid is not 0; `CapEff` in
+    `/proc/self/status` is 0 and `NoNewPrivs` is 1; a write to the tree gets
+    `EROFS` and a write to the tmpfs succeeds; no host environment variable
+    reaches the container, and there is no Docker socket in it.
+  - _Limits,_ each killing the container and saying which fired: a fork bomb
+    is held at the PID limit and reported as it; a memory hog is killed and
+    reported as out of memory, read from `docker inspect` before the container
+    is removed, since exit 137 alone cannot tell an OOM kill from a kill
+    signal; a busy loop is killed at the wall-clock limit as
+    `SANDBOX_TIMEOUT`; aborting the run's `AbortSignal` kills the container.
+  - _Normal results:_ a non-zero exit is a result — exit code, stdout and
+    stderr capped with a flag when either was cut, both redacted — never an
+    error. What the exit means is the analyzer's call.
+  - _Infrastructure:_ Docker not installed, its daemon down, the image absent
+    and a mount Docker cannot reach each raise `SANDBOX_UNAVAILABLE` with a
+    remedy. None falls back to the host and none pulls: every run passes
+    `--pull=never`.
+  - _Orphans:_ every container carries a label naming its owner; one left by a
+    crashed daemon is found by that label and removed by `reapSandboxOrphans`.
+  - _Pinning:_ the default image in `config.ts` is pinned by digest, as T9
+    already claims.
+
+  **Edge cases and the tests they need:**
+  - A command string — a `.interlock.json` toolchain override — reaches Docker
+    only as `['sh', '-c', command]`, run inside the container. A test runs one
+    full of shell metacharacters and shows nothing on the host changed.
+  - A mount path with a comma or a quote: `--mount` is CSV, so fields are
+    quoted rather than joined. A test mounts such a path.
+  - A writable mount of anything the host later reads or runs is refused:
+    writable mounts only under the caller's cache root, which must not overlap
+    the tree or any read-only source. A socket or device is never a source.
+  - Dependency mounts sit read-only at their tree-relative positions under the
+    tree's mount point, so a relative pnpm workspace link resolves into the
+    merged tree, not the user's. The layout calculation is not built here.
+  - The daemon running as root: refused with a remedy rather than run as a
+    fixed uid, since a fixed uid cannot read the 0700 data dir without
+    loosening it (ADR-0007).
+  - Output over the cap, an aborted run, an orphan reaped, a command that
+    exits non-zero: each its own test.
+  - Containers made by tests carry the label and are removed in `afterEach`,
+    even when the test failed. The test image is pinned by digest too.
+
+  **Failure modes:** a container left running after its run — the runner
+  removes it on every path, including create and start failures; a limit
+  reported as an ordinary exit — classification reads `docker inspect` before
+  removal; an unreachable Docker reported as a clean run — it is an infra
+  error, never a result.
+
+  **Constraints:**
+  - Hard rule 2, including tests: no test runs a command outside Docker "to
+    compare".
+  - Hard rule 8: where flags differ from ADR-0004, raise it rather than choose.
+  - No shell on the host: `execFile` and `spawn` with argument arrays only.
+  - Hard rule 7: no new dependency in `core`; the Docker CLI is driven
+    directly. The runner is the second process call site, listed beside the
+    git runner in `test/support/call-sites.ts`.
+  - No silent skips: the sandbox suite reports why it skipped, and fails on
+    Linux CI when Docker is missing.
+  - Not built here: wiring `reapSandboxOrphans` into daemon start, the
+    per-slot cache's eviction wipe, and the dependency mount layout. Each is
+    the first task that needs it: the build analyzer for the first two, the
+    typecheck runner's sandboxed counterpart for the third.
 
 - [ ] **Toolchain detection**
       **Files:** `packages/core/src/sandbox/toolchain.ts`
