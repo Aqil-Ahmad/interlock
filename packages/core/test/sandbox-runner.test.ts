@@ -484,6 +484,7 @@ describe.runIf(status.blocker === null)('sandbox runner: in Docker', () => {
       );
       expect(error.code).toBe('SANDBOX_LIMIT');
       expect(error.details.limit).toBe('pids');
+      expect(error.message).toMatch(/limit of 32 processes/u);
       expect(error.infra).toBe(true);
       expect(labelledContainers(`${SANDBOX_LABEL}=${owner}`)).toStrictEqual([]);
     });
@@ -497,6 +498,7 @@ describe.runIf(status.blocker === null)('sandbox runner: in Docker', () => {
       );
       expect(error.code).toBe('SANDBOX_LIMIT');
       expect(error.details.limit).toBe('memory');
+      expect(error.message).toMatch(/out of memory at 96 MB/u);
     });
 
     it('kills a busy loop at the wall clock as SANDBOX_TIMEOUT, and leaves no container', async () => {
