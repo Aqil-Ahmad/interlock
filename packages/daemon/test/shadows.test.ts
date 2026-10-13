@@ -13,7 +13,7 @@ import {
   createShadowCollector,
   createShadowRegistry,
 } from '../src/shadows.js';
-import type { ShadowCollector } from '../src/shadows.js';
+import type { ShadowCollector, ShadowRegistry } from '../src/shadows.js';
 import { openStore } from '../src/store/index.js';
 import type { Store } from '../src/store/index.js';
 
@@ -294,6 +294,194 @@ describe('shadow registry', () => {
     });
   });
 
+  describe('the collection record', () => {
+    const deferred = (): { promise: Promise<void>; resolve: () => void } => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((settle) => {
+        resolve = settle;
+      });
+      return { promise, resolve };
+    };
+
+    /** Turns of the event loop until `probe` holds, for a callback git has yet to reach. */
+    const until = async (probe: () => boolean): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (!probe()) {
+        if (Date.now() > deadline) throw new Error('timed out');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    let clock: number;
+    const at = (ms: number): string => new Date(ms).toISOString();
+    const T0 = Date.parse('2026-10-11T12:00:00.000Z');
+
+    beforeEach(() => {
+      clock = T0;
+    });
+
+    const registry = (): ShadowRegistry =>
+      createShadowRegistry({ runner, dataDir: join(base, 'data'), now: () => clock });
+
+    it('reads as no collection yet before the first, as after a restart', () => {
+      expect(registry().state(repoId)).toStrictEqual({
+        phase: 'idle',
+        since: null,
+        last: null,
+        failing: null,
+      });
+    });
+
+    it('names each phase as the collection reaches it, with when it began, and keeps the last one’s measures', async () => {
+      const shadows = registry();
+      // A loose object the collection packs, so the sizes before and after differ.
+      const shadow = await shadows.get(repo, repoId);
+      execFileSync('git', ['--git-dir', shadow.gitDir, 'hash-object', '-w', '--stdin'], {
+        input: 'loose\n',
+      });
+      const seen: { phase: string; since: string | null }[] = [];
+      const record = (): void => {
+        const { phase, since } = shadows.state(repoId);
+        seen.push({ phase, since });
+      };
+      // A check holding the shadow, so the collection's hold has to wait for it.
+      const holding = deferred();
+      const started = deferred();
+      const run = shadows.use(repo, repoId, async () => {
+        started.resolve();
+        await holding.promise;
+      });
+      await started.promise;
+      const lull = deferred();
+      const collection = shadows.collect(repo, repoId, {
+        expireBefore: new Date(),
+        keep: () => {
+          record();
+          clock = T0 + 1_000;
+          return Promise.resolve([]);
+        },
+        quiet: () => {
+          record();
+          return lull.promise;
+        },
+      });
+      await until(() => seen.length === 2);
+      clock = T0 + 3_000;
+      lull.resolve();
+      await until(() => shadows.state(repoId).phase === 'holding');
+      record();
+      clock = T0 + 7_500;
+      holding.resolve();
+      const report = await Promise.all([run, collection]).then(([, collected]) => collected);
+
+      expect(seen).toStrictEqual([
+        { phase: 'pinning', since: at(T0) },
+        { phase: 'waiting-for-quiet', since: at(T0 + 1_000) },
+        { phase: 'holding', since: at(T0 + 3_000) },
+      ]);
+      expect(report).toMatchObject({ quietMs: 2_000, pausedMs: 4_500, durationMs: 7_500 });
+      expect(report.before.loose).toBeGreaterThan(report.after.loose);
+      expect(shadows.state(repoId)).toStrictEqual({
+        phase: 'idle',
+        since: null,
+        last: {
+          endedAt: at(T0 + 7_500),
+          pausedMs: 4_500,
+          quietMs: 2_000,
+          before: report.before,
+          after: report.after,
+        },
+        failing: null,
+      });
+    });
+
+    it('holds one repository while another reads idle', async () => {
+      const shadows = registry();
+      const other = '01JBQ0000000000000000OTHR' as RepoId;
+      const holding = deferred();
+      const started = deferred();
+      const run = shadows.use(repo, repoId, async () => {
+        started.resolve();
+        await holding.promise;
+      });
+      await started.promise;
+      const collection = shadows.collect(repo, repoId, {
+        expireBefore: new Date(),
+        keep: () => Promise.resolve([]),
+      });
+      await until(() => shadows.state(repoId).phase === 'holding');
+
+      expect(shadows.state(other)).toMatchObject({ phase: 'idle', since: null, last: null });
+
+      holding.resolve();
+      await Promise.all([run, collection]);
+      expect(shadows.state(other).last).toBeNull();
+      expect(shadows.state(repoId).last).not.toBeNull();
+    });
+
+    it('returns to idle when stopped while holding, keeping the last finished collection', async () => {
+      const shadows = registry();
+      await shadows.collect(repo, repoId, {
+        expireBefore: new Date(),
+        keep: () => Promise.resolve([]),
+      });
+      const finished = shadows.state(repoId).last;
+      expect(finished).not.toBeNull();
+
+      const holding = deferred();
+      const started = deferred();
+      const run = shadows.use(repo, repoId, async () => {
+        started.resolve();
+        await holding.promise;
+      });
+      await started.promise;
+      const controller = new AbortController();
+      clock = T0 + 60_000;
+      const collection = shadows.collect(repo, repoId, {
+        expireBefore: new Date(),
+        keep: () => Promise.resolve([]),
+        signal: controller.signal,
+      });
+      await until(() => shadows.state(repoId).phase === 'holding');
+      controller.abort();
+      holding.resolve();
+
+      await expect(collection).rejects.toThrow();
+      await run;
+      expect(shadows.state(repoId)).toStrictEqual({
+        phase: 'idle',
+        since: null,
+        last: finished,
+        failing: null,
+      });
+    });
+
+    it('returns to idle when the collection fails before it holds anything', async () => {
+      const shadows = registry();
+      const failed = shadows.collect(repo, repoId, {
+        expireBefore: new Date(),
+        keep: () => {
+          expect(shadows.state(repoId).phase).toBe('pinning');
+          return Promise.reject(new Error('the store is gone'));
+        },
+      });
+
+      await expect(failed).rejects.toThrow('the store is gone');
+      expect(shadows.state(repoId)).toMatchObject({ phase: 'idle', since: null, last: null });
+    });
+
+    it('carries a failure the collector reports until it reports one cleared', () => {
+      const shadows = registry();
+      const failure = { failures: 2, retryAt: at(T0), reason: 'disk full' };
+
+      shadows.reportFailure(repoId, failure);
+      expect(shadows.state(repoId)).toMatchObject({ phase: 'idle', failing: failure });
+
+      shadows.reportFailure(repoId, null);
+      expect(shadows.state(repoId).failing).toBeNull();
+    });
+  });
+
   describe('the collector', () => {
     let store: Store;
     let stored: Repo;
@@ -413,6 +601,73 @@ describe('shadow registry', () => {
       await collecting.pass(new Date(clock).toISOString());
       expect(logs.filter((l) => l.msg === 'collecting a shadow failed').at(-1)!).toMatchObject({
         failures: 1,
+      });
+    });
+
+    it('tells the registry a repository is failing, redacted, and clears it once one succeeds', async () => {
+      const secret = 'AKIA' + 'ABCDEFGHIJKLMNOP';
+      let failWith: string | null = `fatal: could not write with ${secret}`;
+      const throwing: GitRunner = {
+        run: (target, args, options) => {
+          if (args[0] === 'prune' && failWith !== null) return Promise.reject(new Error(failWith));
+          return pruning.run(target, args, options);
+        },
+      };
+      const shadows = createShadowRegistry({ runner: throwing, dataDir: join(base, 'data') });
+      const collecting = createShadowCollector({
+        shadows,
+        store,
+        runner: throwing,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      await collecting.pass(new Date(clock).toISOString());
+      clock += COLLECTION_BACKOFF_MS;
+      await collecting.pass(new Date(clock).toISOString());
+
+      const { failing } = shadows.state(stored.id);
+      expect(failing).toStrictEqual({
+        failures: 2,
+        retryAt: new Date(clock + 2 * COLLECTION_BACKOFF_MS).toISOString(),
+        reason: expect.stringContaining('[redacted]') as unknown,
+      });
+      expect(failing!.reason).not.toContain(secret);
+      expect(shadows.state(stored.id)).toMatchObject({ phase: 'idle', last: null });
+
+      failWith = null;
+      clock += 2 * COLLECTION_BACKOFF_MS;
+      await collecting.pass(new Date(clock).toISOString());
+      expect(shadows.state(stored.id).failing).toBeNull();
+      expect(shadows.state(stored.id).last).not.toBeNull();
+    });
+
+    it('reports nothing failing for a repository it stopped on request', async () => {
+      const controller = new AbortController();
+      const shadows = createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') });
+      const collecting = createShadowCollector({
+        shadows,
+        store,
+        runner: pruning,
+        heldTrees: () => [],
+        marginMs: HOUR,
+        quiet: () => {
+          controller.abort();
+          return new Promise(() => undefined);
+        },
+        logger: createLogger('test', { level: 'debug', sink: (record) => logs.push(record) }),
+        now: () => clock,
+      });
+
+      await collecting.pass(new Date(clock).toISOString(), controller.signal);
+
+      expect(shadows.state(stored.id)).toStrictEqual({
+        phase: 'idle',
+        since: null,
+        last: null,
+        failing: null,
       });
     });
 

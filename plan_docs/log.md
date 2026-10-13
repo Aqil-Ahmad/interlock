@@ -4,6 +4,17 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-11 — a shadow collection in `interlock status`
+
+- **Task rewritten before starting.** The milestone's criteria named the hold and the last pause only; the issue adds a failing collection's warning with its next attempt, the phases in `--json`, and "no collection yet" after a restart. All taken; the rewrite is in the milestone.
+- **Decided — the phase is set where the code changes state, never inferred from timings.** `holding` is entered inside `alone()` the moment new holders wait, which is the delay an edit meets; `pausedMs` starts just before, across the same wait. The `finally` that releases the gate sets `idle`, so a failed or stopped collection never reads as holding.
+- **Decided — one route, `GET /api/repos/:id/collection`,** beside branches and sessions, an unknown repository `REPO_NOT_FOUND`. Read-only and behind the same token: the security posture is unchanged. The API option is required, not defaulted to an idle record, which would let a missing wiring read as "never collected".
+- **Decided — the registry keeps the record; the collector only reports its backoff into it,** with the reason through `redact()`. The registry takes an injected clock, so the phase tests read exact instants.
+- **Decided — a daemon without the route keeps the branch report,** said once on stderr and `collection: null` in the JSON, as for the budget. A record of another shape is refused by field, never printed as `NaN s`.
+- **Decided — "no shadow collection yet" is left out beside a hold,** where it would contradict the line above it.
+- **Found — the same 16 root-only `chmod` tests fail on `dev` as root,** and no others with this change.
+- **Mutation: 54 mutations, 53 caught, then 54 after one fix.** The survivor swapped the last collection's sizes before and after: a test gap, since the fixture's shadow measured the same both sides. The phase test now writes a loose object the collection packs.
+
 ## 2026-10-06 — false-positive budget
 
 - **Task rewritten before starting.** The issue's approach held — dismiss a conflict at its content, suppress in reconciliation, count in a table retention never prunes, "delivered" not measured — with gaps that would have shipped a rate nobody could read. The rewrite is in the milestone.

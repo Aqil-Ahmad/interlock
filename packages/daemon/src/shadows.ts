@@ -1,5 +1,6 @@
 import { collectShadow, ensureShadow, isObjectId, openUserRepo, pinKeep } from '@interlock/core';
 import type { GitRunner, ShadowRepo, ShadowStoreSize, UserRepo } from '@interlock/core';
+import { redact } from '@interlock/shared';
 import type { Logger, Repo, RepoId } from '@interlock/shared';
 import type { Store } from './store/index.js';
 
@@ -63,6 +64,46 @@ export interface ShadowRegistry {
    * pointing every caller at the broken one.
    */
   forget(repoId: RepoId): void;
+  /**
+   * Where a repository's collection is, what the last one cost, and whether
+   * collections are failing. Live state, held here and nowhere else: a daemon
+   * that restarts has collected nothing yet.
+   */
+  state(repoId: RepoId): CollectionState;
+  /** What the collector's backoff says of a repository: failing, or null once one succeeds. */
+  reportFailure(repoId: RepoId, failure: CollectionFailure | null): void;
+}
+
+/**
+ * Where a collection is. Only `holding` keeps a check waiting: `pinning` moves
+ * refs beside the checks and `waiting-for-quiet` lets them run.
+ */
+export type CollectionPhase = 'idle' | 'pinning' | 'waiting-for-quiet' | 'holding';
+
+export interface CollectionState {
+  readonly phase: CollectionPhase;
+  /** When the phase began; null while idle. */
+  readonly since: string | null;
+  /** The last collection that finished, or null before the first. */
+  readonly last: FinishedCollection | null;
+  readonly failing: CollectionFailure | null;
+}
+
+/** A finished collection, by the registry's own measures of it. */
+export interface FinishedCollection {
+  readonly endedAt: string;
+  readonly pausedMs: number;
+  readonly quietMs: number;
+  readonly before: ShadowStoreSize;
+  readonly after: ShadowStoreSize;
+}
+
+export interface CollectionFailure {
+  /** Failures in a row; the count the backoff doubles on. */
+  readonly failures: number;
+  readonly retryAt: string;
+  /** The last failure's message, redacted: a git error can quote a remote URL's credentials. */
+  readonly reason: string;
 }
 
 /** What one collection kept, what it left, and what it cost the checks. */
@@ -86,6 +127,8 @@ export interface ShadowCollection {
 export interface ShadowRegistryOptions {
   readonly runner: GitRunner;
   readonly dataDir: string;
+  /** The clock every collection is measured by. */
+  readonly now?: () => number;
 }
 
 /**
@@ -106,12 +149,13 @@ interface Gate {
  * Run `work` with the shadow to itself: new holders wait from the moment this
  * asks, and `work` starts once the holders already in have left.
  */
-async function alone<T>(gate: Gate, work: () => Promise<T>): Promise<T> {
+async function alone<T>(gate: Gate, taken: () => void, work: () => Promise<T>): Promise<T> {
   while (gate.collecting !== null) await gate.collecting;
   let release!: () => void;
   gate.collecting = new Promise((resolve) => {
     release = resolve;
   });
+  taken();
   try {
     if (gate.holders > 0) {
       await new Promise<void>((resolve) => {
@@ -129,6 +173,17 @@ async function alone<T>(gate: Gate, work: () => Promise<T>): Promise<T> {
 export function createShadowRegistry(options: ShadowRegistryOptions): ShadowRegistry {
   const handles = new Map<RepoId, Promise<ShadowRepo>>();
   const gates = new Map<RepoId, Gate>();
+  const now = options.now ?? Date.now;
+  const states = new Map<RepoId, CollectionState>();
+
+  const stateOf = (repoId: RepoId): CollectionState =>
+    states.get(repoId) ?? { phase: 'idle', since: null, last: null, failing: null };
+  const update = (repoId: RepoId, change: Partial<CollectionState>): void => {
+    states.set(repoId, { ...stateOf(repoId), ...change });
+  };
+  const enter = (repoId: RepoId, phase: CollectionPhase, at: number): void => {
+    update(repoId, { phase, since: new Date(at).toISOString() });
+  };
 
   const gateOf = (repoId: RepoId): Gate => {
     let gate = gates.get(repoId);
@@ -186,7 +241,8 @@ export function createShadowRegistry(options: ShadowRegistryOptions): ShadowRegi
       });
       await previous;
       try {
-        const startedAt = Date.now();
+        const startedAt = now();
+        enter(repoId, 'pinning', startedAt);
         // Refreshed, not the cached handle: the fetch prunes a ref naming a
         // branch the user deleted, whose commit their `gc` may since have
         // removed — and one such ref stops the collection walking at all. A
@@ -203,33 +259,58 @@ export function createShadowRegistry(options: ShadowRegistryOptions): ShadowRegi
           ...(signal === undefined ? {} : { signal }),
         });
 
-        const quietFrom = Date.now();
+        const quietFrom = now();
+        enter(repoId, 'waiting-for-quiet', quietFrom);
         if (quiet !== undefined) await quiet();
         signal?.throwIfAborted();
-        const pausedFrom = Date.now();
-        const collected = await alone(gate, () =>
-          collectShadow(shadow, {
-            runner: options.runner,
-            expireBefore,
-            ...(signal === undefined ? {} : { signal }),
-          }),
+        const pausedFrom = now();
+        const collected = await alone(
+          gate,
+          // From the moment new holders wait, which is the delay an edit meets;
+          // `pausedMs` counts from just before, across the same wait.
+          () => enter(repoId, 'holding', now()),
+          () =>
+            collectShadow(shadow, {
+              runner: options.runner,
+              expireBefore,
+              ...(signal === undefined ? {} : { signal }),
+            }),
         );
-        return {
+        const endedAt = now();
+        const report: ShadowCollection = {
           kept: pinned.kept.length,
           unkeepable: pinned.unkeepable,
           before: collected.before,
           after: collected.after,
           quietMs: pausedFrom - quietFrom,
-          pausedMs: Date.now() - pausedFrom,
-          durationMs: Date.now() - startedAt,
+          pausedMs: endedAt - pausedFrom,
+          durationMs: endedAt - startedAt,
         };
+        update(repoId, {
+          last: {
+            endedAt: new Date(endedAt).toISOString(),
+            pausedMs: report.pausedMs,
+            quietMs: report.quietMs,
+            before: report.before,
+            after: report.after,
+          },
+        });
+        return report;
       } finally {
+        // Failed or stopped as much as finished: nothing holds the checks now.
+        update(repoId, { phase: 'idle', since: null });
         finished();
       }
     },
 
     forget(repoId: RepoId): void {
       handles.delete(repoId);
+    },
+
+    state: stateOf,
+
+    reportFailure(repoId: RepoId, failure: CollectionFailure | null): void {
+      update(repoId, { failing: failure });
     },
   };
 }
@@ -349,6 +430,7 @@ export function createShadowCollector(options: ShadowCollectorOptions): ShadowCo
         ...(signal === undefined ? {} : { signal }),
       });
       failing.delete(repo.id);
+      shadows.reportFailure(repo.id, null);
       log.info('collected the shadow', {
         repoId: repo.id,
         expireBefore: expireBefore.toISOString(),
@@ -375,12 +457,19 @@ export function createShadowCollector(options: ShadowCollectorOptions): ShadowCo
         COLLECTION_BACKOFF_MS * 2 ** (failures - 1),
         COLLECTION_BACKOFF_MAX_MS,
       );
-      failing.set(repo.id, { failures, retryAt: now() + waitMs });
+      const retryAt = now() + waitMs;
+      const reason = error instanceof Error ? error.message : String(error);
+      failing.set(repo.id, { failures, retryAt });
+      shadows.reportFailure(repo.id, {
+        failures,
+        retryAt: new Date(retryAt).toISOString(),
+        reason: redact(reason),
+      });
       log.warn('collecting a shadow failed', {
         repoId: repo.id,
         failures,
-        retryAt: new Date(now() + waitMs).toISOString(),
-        reason: error instanceof Error ? error.message : String(error),
+        retryAt: new Date(retryAt).toISOString(),
+        reason,
       });
     }
   };
