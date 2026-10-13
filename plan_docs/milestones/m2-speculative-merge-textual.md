@@ -600,11 +600,27 @@ merge-tree` over the two commits reports the conflict — with neither side
   for a human decision and recorded in the threat model. `interlock status`
   keeps never failing on Findings.
 
-- [ ] **Show a shadow collection in `interlock status`**
-      **Files:** `packages/daemon/src/api/`, `packages/cli/src/commands/status.ts`, `packages/cli/src/render.ts`
-      **What:** while a repository's shadow is repacked its checks are held off, and today only the daemon's log says why an edit's warning is late. Surface a collection in progress, and the last one's pause, per repository.
-      **Done when:** `interlock status` names a repository whose checks are held for a collection, with how long it has been; `--json` carries the same; the API carries it without a store migration, since it is live state.
-      **Constraints:** read the pause from the registry's own measure (`pausedMs`), not a guess. Worth doing once the bench records the pause at the default window: under realistic load it measured about a second.
+- [x] **Show a shadow collection in `interlock status`**
+      **Files:** `packages/daemon/src/shadows.ts`, `packages/daemon/src/api/`, `packages/daemon/src/daemon.ts`, `packages/cli/src/client/`, `packages/cli/src/commands/status.ts`, `packages/cli/src/render.ts`, `docs/architecture.md`
+      **What:** while a repository's shadow is repacked its checks are held off, and today only the daemon's log says why an edit's warning is late. Surface a collection in progress, the last one's pause, and a collection that keeps failing, per repository.
+      **Done when:** `interlock status` names a repository whose checks are held for a collection, with how long it has been; shows the last collection's pause; warns when collections are failing, with when the next attempt is; `--json` carries the same, and the phases that hold nothing up; the API carries it without a store migration, since it is live state, and a restarted daemon reads "no collection yet".
+
+  Rewritten before starting, from the issue. **One live record per
+  repository, owned by the registry:** the phase (`idle`, `pinning`,
+  `waiting-for-quiet`, `holding`) and when it began, set where the code already
+  changes state — before the pin, before the wait for quiet, inside `alone()`
+  once new holders wait, and `idle` in the `finally` that releases the gate, so
+  a failed or stopped collection never reads as holding; the last finished
+  collection (end, `pausedMs`, `quietMs`, sizes before and after); and the
+  collector's backoff (failures in a row, next attempt, last reason through
+  `redact()`). **Served from `GET /api/repos/:id/collection`**, read
+  synchronously, behind the same token; an unknown repository is
+  `REPO_NOT_FOUND`. **Human output:** only `holding` gets a line, since only it
+  delays a warning; a failing collection is a warning whatever the phase; the
+  last pause or "no shadow collection yet". The CLI validates the record field
+  by field, and a daemon without the route leaves the branch report intact, as
+  for the budget.
+  **Constraints:** read the pause from the registry's own measure (`pausedMs`), not a guess. A read-only `GET`, so the security posture does not change. Measured by the bench at about a second under realistic load.
 
 - [x] **`interlock check A B`**
       **Files:** `packages/cli/src/commands/`, `packages/cli/src/client/`, `packages/cli/src/render.ts`, `packages/daemon/src/api/server.ts`, `packages/daemon/src/scheduler/`, `packages/daemon/src/watcher/`, `packages/daemon/src/check.ts`, `docs/architecture.md`, `docs/threat-model.md`
@@ -653,11 +669,32 @@ merge-tree` over the two commits reports the conflict — with neither side
   without `wrapUntrusted`. Recorded in `docs/architecture.md` and the threat
   model.
 
-- [ ] **Wrap the excerpts `interlock check` prints**
-      **Files:** `packages/shared/src/`, `packages/mcp-server/src/sanitize.ts`, `packages/cli/src/render.ts`
-      **What:** `check` prints other branches' code, and agents are who will run it as a gate; the excerpts are escaped for the terminal but reach the agent as plain output, not as untrusted data. Move `wrapUntrusted` into `shared` — it depends on nothing — so the CLI and the MCP server use one implementation, and wrap each excerpt block in the human output.
-      **Done when:** an excerpt holding an instruction-shaped line prints neutralised and inside the untrusted-content delimiters; the MCP server's own tests pass unchanged against the moved function; `--json` keeps excerpts as data, unwrapped, since a script parses them; threat model T12's residual risk no longer names this.
-      **Constraints:** hard rule 4. The terminal escaping stays: wrapping is about an agent reading, escaping about a terminal acting.
+- [x] **Wrap the excerpts `interlock check` prints**
+      **Files:** `packages/shared/src/sanitize.ts`, `packages/mcp-server/src/sanitize.ts`, `packages/cli/src/render.ts`, `docs/threat-model.md`
+      **What:** `check` prints other branches' code, and agents are who will run it as a gate; the excerpts are escaped for the terminal but reach the agent as plain output, not as untrusted data. Move `wrapUntrusted` into `shared` — it depends on nothing — so the CLI and the MCP server use one implementation, with `mcp-server/src/sanitize.ts` a re-export, and wrap each excerpt block in the human output: wrapped first, terminal-escaped last.
+
+  Rewritten before starting, from the issue: the task as written left the
+  function's own gap in place. Every pattern but the tag one was anchored to
+  the start of a line, and in source an injected instruction sits in a
+  comment, so `// ignore previous instructions` passed. **Matching** now reads
+  a line from its start and from after every comment opener (`//` not after a
+  colon, `/*`, `#`, `--`, `;`), with the comment's own markers stripped;
+  through NFKC and with invisible characters dropped; and with a run of tag
+  characters decoded and read as a sentence of its own. **Display** shows bidi
+  controls and tag characters as `\u{…}`. **Inventory:** every field the CLI
+  prints from a repository is either wrapped or has its reason in the threat
+  model.
+
+  **Done when:** an excerpt holding an instruction-shaped line prints
+  neutralised and inside the untrusted-content delimiters, at the start of a
+  line, in each comment style and after code on the same line, full-width,
+  zero-width and bidi-disguised; a line holding the delimiters cannot close the
+  block; the MCP server's own tests pass unchanged against the moved function;
+  `--json` keeps excerpts as data, unwrapped, since a script parses them; the
+  false-neutralisation count over every comment in this repository and in
+  archestra is measured, recorded and small; threat model T12's residual risk
+  no longer names this, and the inventory is in the threat model.
+  **Constraints:** hard rule 4. The terminal escaping stays: wrapping is about an agent reading, escaping about a terminal acting. `shared` stays dependency-free.
 
 - [x] **Fixture suite**
       **Files:** `eval/fixtures/`, `eval/run.ts`, `eval/reports/`, `eval/README.md`, `vitest.config.ts`

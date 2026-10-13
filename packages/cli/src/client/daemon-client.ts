@@ -50,6 +50,47 @@ export interface DaemonClient {
   dismiss(findingId: string, request: DismissRequest): Promise<Finding>;
   /** How often Findings were dismissed as wrong, over each window the daemon reports. */
   budget(): Promise<BudgetReport>;
+  /** Where one repository's shadow collection is, what the last cost, and whether it is failing. */
+  collection(repoId: Repo['id']): Promise<CollectionState>;
+}
+
+/**
+ * What `GET /api/repos/:id/collection` answers: live state the daemon holds in
+ * memory, so a daemon that restarted has collected nothing yet.
+ */
+export interface CollectionState {
+  /** Only `holding` keeps checks waiting; the others run beside them. */
+  readonly phase: CollectionPhase;
+  /** When the phase began; null while idle. */
+  readonly since: string | null;
+  readonly last: FinishedCollection | null;
+  readonly failing: CollectionFailure | null;
+}
+
+export type CollectionPhase = 'idle' | 'pinning' | 'waiting-for-quiet' | 'holding';
+
+export interface FinishedCollection {
+  readonly endedAt: string;
+  /** How long the repository's checks were held off. */
+  readonly pausedMs: number;
+  /** How long it waited for a lull first, checks running meanwhile. */
+  readonly quietMs: number;
+  readonly before: ShadowStoreSize;
+  readonly after: ShadowStoreSize;
+}
+
+export interface ShadowStoreSize {
+  readonly loose: number;
+  readonly packed: number;
+  readonly kib: number;
+}
+
+export interface CollectionFailure {
+  /** Failures in a row. */
+  readonly failures: number;
+  /** When the next attempt is. */
+  readonly retryAt: string;
+  readonly reason: string;
 }
 
 /** What `POST /api/findings/:id/dismiss` takes. */
@@ -247,7 +288,95 @@ export async function connectDaemon(dataDir: string): Promise<DaemonClient> {
     async budget(): Promise<BudgetReport> {
       return (await request<{ budget: BudgetReport }>('/api/budget')).budget;
     },
+    async collection(repoId: Repo['id']): Promise<CollectionState> {
+      const encoded = encodeURIComponent(repoId);
+      const path = `/api/repos/${encoded}/collection`;
+      return parseCollection((await request<{ collection?: unknown }>(path)).collection, path);
+    },
   };
+}
+
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+
+const COLLECTION_PHASES: ReadonlySet<unknown> = new Set<CollectionPhase>([
+  'idle',
+  'pinning',
+  'waiting-for-quiet',
+  'holding',
+]);
+
+/**
+ * The collection record, checked field by field: its durations are printed
+ * as numbers and its instants parsed, and a shape another build sends would
+ * otherwise surface as `NaN s` in a report that looks sound.
+ *
+ * @throws InterlockError `API_REQUEST_INVALID` naming the field that is wrong.
+ */
+export function parseCollection(value: unknown, path: string): CollectionState {
+  const invalid = (field: string): InterlockError =>
+    new InterlockError('API_REQUEST_INVALID', 'The daemon sent a malformed shadow collection', {
+      details: { path, field },
+      remedy: 'Restart the daemon from the same build as this command.',
+    });
+  const record = (candidate: unknown, field: string): Record<string, unknown> => {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+      throw invalid(field);
+    }
+    return candidate as Record<string, unknown>;
+  };
+  const count = (candidate: unknown, field: string): number => {
+    if (typeof candidate !== 'number' || !Number.isInteger(candidate) || candidate < 0) {
+      throw invalid(field);
+    }
+    return candidate;
+  };
+  const instant = (candidate: unknown, field: string): string => {
+    // ISO 8601 as `toISOString` writes it, which is what the report slices.
+    if (typeof candidate !== 'string' || !ISO_INSTANT.test(candidate)) throw invalid(field);
+    return candidate;
+  };
+  const size = (candidate: unknown, field: string): ShadowStoreSize => {
+    const fields = record(candidate, field);
+    return {
+      loose: count(fields.loose, `${field}.loose`),
+      packed: count(fields.packed, `${field}.packed`),
+      kib: count(fields.kib, `${field}.kib`),
+    };
+  };
+
+  const state = record(value, 'collection');
+  if (!COLLECTION_PHASES.has(state.phase)) throw invalid('phase');
+  const phase = state.phase as CollectionPhase;
+  // Idle has no start, and every other phase has one: a holding phase with no
+  // start could not say how long the checks have waited.
+  const since = phase === 'idle' ? null : instant(state.since, 'since');
+  if (phase === 'idle' && state.since !== null) throw invalid('since');
+
+  let last: FinishedCollection | null = null;
+  if (state.last !== null) {
+    const fields = record(state.last, 'last');
+    last = {
+      endedAt: instant(fields.endedAt, 'last.endedAt'),
+      pausedMs: count(fields.pausedMs, 'last.pausedMs'),
+      quietMs: count(fields.quietMs, 'last.quietMs'),
+      before: size(fields.before, 'last.before'),
+      after: size(fields.after, 'last.after'),
+    };
+  }
+
+  let failing: CollectionFailure | null = null;
+  if (state.failing !== null) {
+    const fields = record(state.failing, 'failing');
+    const failures = count(fields.failures, 'failing.failures');
+    if (failures === 0) throw invalid('failing.failures');
+    if (typeof fields.reason !== 'string') throw invalid('failing.reason');
+    failing = {
+      failures,
+      retryAt: instant(fields.retryAt, 'failing.retryAt'),
+      reason: fields.reason,
+    };
+  }
+  return { phase, since, last, failing };
 }
 
 /** The port the daemon published, from a file it rewrites on every start. */

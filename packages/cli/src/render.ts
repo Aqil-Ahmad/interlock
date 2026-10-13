@@ -1,3 +1,4 @@
+import { wrapUntrusted } from '@interlock/shared';
 import type {
   AgentSession,
   BranchRef,
@@ -6,7 +7,7 @@ import type {
   Repo,
   SpanEvidence,
 } from '@interlock/shared';
-import type { BudgetReport, BudgetWindow, CheckReport } from './client/index.js';
+import type { BudgetReport, BudgetWindow, CheckReport, CollectionState } from './client/index.js';
 
 /**
  * Turning what the daemon reports into something a terminal can show.
@@ -22,6 +23,8 @@ export type BranchState = 'clean' | 'dirty' | 'unknown';
 export interface RenderOptions {
   /** Files listed under one branch before the rest are summarised. */
   readonly fileLimit?: number;
+  /** The instant a hold is measured to, in epoch milliseconds. */
+  readonly now?: number;
 }
 
 /**
@@ -107,6 +110,48 @@ export interface RepoView {
   readonly branches: readonly BranchRef[];
   /** Live agent sessions, joined onto branches by `sessionId`. */
   readonly sessions: readonly AgentSession[];
+  /** The shadow collection's live state; left out when the daemon could not say. */
+  readonly collection?: CollectionState;
+}
+
+/** A duration as a person reads it: `450 ms`, `1.2 s`, `42 s`, `3 min 5 s`. */
+export function durationText(ms: number): string {
+  if (ms < 1_000) return `${String(Math.max(0, Math.round(ms)))} ms`;
+  if (ms < 10_000) return `${(Math.floor(ms / 100) / 10).toFixed(1)} s`;
+  const seconds = Math.floor(ms / 1_000);
+  if (seconds < 60) return `${String(seconds)} s`;
+  return `${String(Math.floor(seconds / 60))} min ${String(seconds % 60)} s`;
+}
+
+/**
+ * A repository's collection, as far as a person needs it: a hold, because it
+ * is why a warning is late; a failing collection, because the shadow then
+ * grows with nobody told; and the last one's pause. Pinning and waiting for a
+ * lull hold nothing up, so they are left to `--json`.
+ */
+function collectionLines(collection: CollectionState, now: number): string[] {
+  const lines: string[] = [];
+  if (collection.phase === 'holding' && collection.since !== null) {
+    lines.push(
+      `  checks held for shadow collection — ${durationText(now - Date.parse(collection.since))}`,
+    );
+  }
+  if (collection.failing !== null) {
+    const { failures, retryAt, reason } = collection.failing;
+    // The reason is git's own message, which can quote a path the repository named.
+    lines.push(
+      `  warning: shadow collection failed ${String(failures)} time${failures === 1 ? '' : 's'} in a row, next attempt ${utcMinute(retryAt)}: ${safeText(reason)}`,
+    );
+  }
+  if (collection.last !== null) {
+    lines.push(
+      `  last shadow collection ${utcMinute(collection.last.endedAt)}, checks held ${durationText(collection.last.pausedMs)}`,
+    );
+  } else if (collection.phase !== 'holding') {
+    // Beside a hold it would read as a contradiction: the first is under way.
+    lines.push('  no shadow collection yet');
+  }
+  return lines;
 }
 
 /**
@@ -149,14 +194,14 @@ export function renderStatus(views: readonly RepoView[], options: RenderOptions 
   }
 
   const limit = options.fileLimit ?? DEFAULT_FILE_LIMIT;
+  const now = options.now ?? Date.now();
   const lines: string[] = [];
 
   for (const [index, view] of views.entries()) {
     if (index > 0) lines.push('');
-    lines.push(
-      `${safeText(view.repo.rootPath)}  (default ${safeText(view.repo.defaultBranch)})`,
-      '',
-    );
+    lines.push(`${safeText(view.repo.rootPath)}  (default ${safeText(view.repo.defaultBranch)})`);
+    if (view.collection !== undefined) lines.push(...collectionLines(view.collection, now));
+    lines.push('');
 
     if (view.branches.length === 0) {
       lines.push('  no branches');
@@ -219,6 +264,8 @@ export function renderJson(views: readonly RepoView[], budget?: BudgetReport): s
           id: view.repo.id,
           rootPath: view.repo.rootPath,
           defaultBranch: view.repo.defaultBranch,
+          // Null when the daemon could not say, which is not "never collected".
+          collection: view.collection ?? null,
           branches: view.branches.map((branch) => ({
             name: branch.name,
             ref: branch.ref,
@@ -358,6 +405,12 @@ function lineRange(startLine: number, endLine: number): string {
  * Everything the repository chose — branch names, paths, excerpts, the merge
  * base it named — goes through `safeText`, a line at a time, so an excerpt
  * keeps its shape and no line of it can move the cursor.
+ *
+ * Each excerpt is also quoted as untrusted data. `check` is a gate agents run,
+ * so what it prints is read by a model, and an excerpt is another branch's code
+ * — a comment in it can be written to the agent reading it. Names and paths are
+ * one escaped line each and stay unwrapped, which `docs/threat-model.md` keeps
+ * as a residual risk.
  */
 export function renderCheck(report: CheckReport): string {
   const a = safeText(report.a.name);
@@ -395,8 +448,11 @@ export function renderCheck(report: CheckReport): string {
       }
       for (const span of side.spans) {
         lines.push(`  ${name}  ${path}:${lineRange(span.startLine, span.endLine)}`);
-        for (const text of span.excerpt.split('\n')) {
-          if (span.excerpt === '') break;
+        if (span.excerpt === '') continue;
+        // Wrapped first and escaped last: the wrapping is for an agent reading
+        // the output, the escaping for the terminal that acts on it, and the
+        // terminal sees the text after everything else has.
+        for (const text of wrapUntrusted(span.excerpt).split('\n')) {
           lines.push(`  ${' '.repeat(width)}    │ ${safeText(text)}`);
         }
       }
