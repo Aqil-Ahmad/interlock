@@ -33,6 +33,14 @@ const DIRECTIVE = /instruction|prompt|rule/i;
 /** Lines that look like they are addressing the reading model rather than describing code. */
 const ADDRESS = /^\s*(?:you are|you must|you should|your task is|act as|pretend to be)\b/i;
 const ROLE = /^\s*(?:system|assistant|user)\s*:/i;
+/**
+ * A role marker after a mid-line `;`, which separates TypeScript fields as
+ * often as it opens a Lisp or assembly comment: read as a plain role marker,
+ * every field after the first in `{ id: string; user: User }` was one. A
+ * comment runs to the end of the line, so a marker counts here only when no
+ * field or statement punctuation follows it.
+ */
+const ROLE_AFTER_SEMICOLON = /^\s*(?:system|assistant|user)\s*:[^;{}=]*$/i;
 /** Unanchored: a role tag means the same wherever on the line it sits. */
 const ROLE_TAG = /<\/?(?:system|assistant|user|instructions?)>/i;
 
@@ -102,24 +110,21 @@ function readings(line: string): string[] {
 
 interface Start {
   readonly text: string;
-  /** Whether a role marker read from here addresses the reader. */
-  readonly roles: boolean;
+  /** What a role marker read from here looks like. */
+  readonly role: RegExp;
 }
 
 /**
  * Each place on a line an instruction could start: the line itself, and after
  * every comment opener.
- *
- * A role marker is not read after a `;` in mid-line. There it separates
- * statements and fields, not a comment from code: in `{ id: string; user: User }`
- * every field after the first read as a role marker, in TypeScript's commonest
- * shape. A `;` comment at the start of a line is still read, and so is a marker
- * behind any other opener.
  */
 function starts(text: string): Start[] {
-  const found: Start[] = [{ text, roles: true }];
+  const found: Start[] = [{ text, role: ROLE }];
   for (const opener of text.matchAll(COMMENT_OPENER)) {
-    found.push({ text: text.slice(opener.index), roles: opener[0] !== ';' });
+    found.push({
+      text: text.slice(opener.index),
+      role: opener[0] === ';' ? ROLE_AFTER_SEMICOLON : ROLE,
+    });
   }
   return found.map((start) => ({ ...start, text: start.text.replace(LEADING_MARKERS, '') }));
 }
@@ -135,8 +140,8 @@ function cut(text: string, length: number): string {
   return last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head;
 }
 
-function addressesReader({ text: start, roles }: Start): boolean {
-  if (ADDRESS.test(start) || (roles && ROLE.test(start))) return true;
+function addressesReader({ text: start, role }: Start): boolean {
+  if (ADDRESS.test(start) || role.test(start)) return true;
   const override = OVERRIDE.exec(start);
   if (override === null) return false;
   const rest = start.slice(override[0].length);
