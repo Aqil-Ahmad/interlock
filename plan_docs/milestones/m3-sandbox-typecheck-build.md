@@ -24,7 +24,7 @@ _which branch caused which half_ of each one.
       **What:** the tasks below are one line each. Rewrite them to the depth of `m1-watcher-and-git-core.md` — per-task edge cases, failure modes, the tests each needs, and the constraints it can breach by accident.
       **Done when:** every task below carries a `Done when` naming an observable check, and nothing in it contradicts what earlier milestones learned.
 
-- [ ] **Docker sandbox runner**
+- [x] **Docker sandbox runner**
       **Files:** `packages/core/src/sandbox/` (the runner and its `index.ts`), `packages/core/src/index.ts`, `packages/core/test/sandbox-runner.test.ts`, `packages/shared/src/config.ts` (default image), `packages/shared/src/errors.ts` (codes), ADR-0007, `docs/threat-model.md` (T2, T9), `docs/architecture.md`
       **What:** the one primitive every execution analyzer uses: run an argument array against a merged tree inside Docker, under fixed isolation and limits, and return what happened. No analyzer is built here.
 

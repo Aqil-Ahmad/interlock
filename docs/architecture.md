@@ -46,6 +46,8 @@ flowchart TB
 
 Two edges carry the security posture: the dotted edge to user worktrees is read-only, and everything executed runs inside the sandbox.
 
+The sandbox is a fresh container per command, created with `--pull=never` and removed on every path. The merged tree is mounted read-only at `/work` and dependencies read-only beneath it; a tmpfs at `/tmp` takes every write and disappears with the container, so nothing a command writes is ever read back by the host. It has no network and no capabilities, runs as the daemon's own uid — never root — and is held to CPU, memory, process and wall-clock limits. A command that exits non-zero is a result for its analyzer to judge; a limit firing or Docker being unreachable is an infrastructure error, never a verdict on the code.
+
 ## Package map
 
 | Package                 | Role                                                  | Depends on                      |
@@ -93,6 +95,7 @@ Each repository's shadow clone is collected in the retention pass: its refresh a
 | Snapshotting dirty state without touching the user's index | `core/src/git/worktree.ts`        | temporary index file; objects only                     |
 | Disk cost of shadow worktrees                              | `core/src/git/shadow.ts`          | one clone per repo, shared objects, quota + GC         |
 | Materialising merged trees cheaply                         | `core/src/git/worktree-pool.ts`   | LRU per-pair slots, `reset --hard` rewrites the delta  |
+| Running merged code without trusting it                    | `core/src/sandbox`                | read-only tree, tmpfs writes, limits read from Docker  |
 | Telling merge-induced errors from pre-existing ones        | `core/src/analyzers`              | baseline diff across base, both branches and the merge |
 | Naming which branch broke which half                       | `core/src/analyzers`              | attribution against both ChangeSets                    |
 | Not being ignored by agents                                | `mcp-server` + `core/src/advisor` | ranking + rate limits                                  |

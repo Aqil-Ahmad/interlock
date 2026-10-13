@@ -22,6 +22,10 @@ describe('resolveConfig', () => {
     expect(config.scheduler.debounceMs).toBe(DEFAULT_CONFIG.scheduler.debounceMs);
   });
 
+  it('pins the default sandbox image by digest, never by tag alone', () => {
+    expect(DEFAULT_CONFIG.sandbox.image).toMatch(/@sha256:[0-9a-f]{64}$/u);
+  });
+
   it('merges nested sections instead of replacing them', () => {
     const config = resolveConfig({ scheduler: { concurrency: 8 } });
     expect(config.scheduler.concurrency).toBe(8);
