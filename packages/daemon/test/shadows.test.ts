@@ -210,7 +210,14 @@ describe('shadow registry', () => {
     });
 
     it('waits for a quiet moment with the checks still running, and says how long each wait was', async () => {
-      const shadows = createShadowRegistry({ runner, dataDir: join(base, 'data') });
+      // The test's clock, not the wall's: a 50 ms timer can fire when
+      // `Date.now()` has moved 49.
+      let clock = Date.now();
+      const shadows = createShadowRegistry({
+        runner,
+        dataDir: join(base, 'data'),
+        now: () => clock,
+      });
       const lull = deferred();
       const asked = deferred();
       const collection = shadows.collect(repo, repoId, {
@@ -222,13 +229,13 @@ describe('shadow registry', () => {
       });
       await asked.promise;
       await expect(shadows.use(repo, repoId, () => Promise.resolve('ran'))).resolves.toBe('ran');
-      await new Promise((resolve) => setTimeout(resolve, 50));
 
+      clock += 2_000;
       lull.resolve();
       const report = await collection;
 
-      expect(report.quietMs).toBeGreaterThanOrEqual(50);
-      expect(report.durationMs).toBeGreaterThanOrEqual(report.quietMs + report.pausedMs);
+      expect(report.quietMs).toBe(2_000);
+      expect(report.durationMs).toBe(report.quietMs + report.pausedMs);
     });
 
     it('runs one collection of a repository at a time, pinning included', async () => {
@@ -710,7 +717,14 @@ describe('shadow registry', () => {
     it('waits for the checks to go quiet before collecting', async () => {
       let settleQuiet: (() => void) | undefined;
       const collecting = createShadowCollector({
-        shadows: createShadowRegistry({ runner: pruning, dataDir: join(base, 'data') }),
+        // The test's clock, not the wall's: a 50 ms timer can fire when
+        // `Date.now()` has moved 49, so a measured wait is read off a clock the
+        // test moves itself.
+        shadows: createShadowRegistry({
+          runner: pruning,
+          dataDir: join(base, 'data'),
+          now: () => clock,
+        }),
         store,
         runner: pruning,
         heldTrees: () => [],
@@ -728,12 +742,11 @@ describe('shadow registry', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(prunes).toBe(0);
 
+      clock += 2_000;
       settleQuiet!();
       await passing;
       expect(prunes).toBe(1);
-      expect(logs.find((l) => l.msg === 'collected the shadow')!.quietMs).toBeGreaterThanOrEqual(
-        50,
-      );
+      expect(logs.find((l) => l.msg === 'collected the shadow')!.quietMs).toBe(2_000);
     });
 
     it('collects anyway once the checks have not gone quiet for the whole wait', async () => {
