@@ -749,7 +749,8 @@ merge-tree` over the two commits reports the conflict — with neither side
   git runs with no global or system config, so neither the user's repository
   nor their configuration shapes a result.
 
-- [ ] **Turn the coverage gate on**
+- [x] **Coverage gate, per package**
       **Files:** `vitest.config.ts`, `.github/workflows/ci.yml`
-      **What:** restore the `packages/core/src/**` threshold at 80% lines and functions, and restore the `coverage` CI job that runs it.
-      **Done when:** CI fails when `core` drops below the threshold. Both were removed while `core` was mostly declarations — the gate measured nothing and the job discarded its own output. By now there is an implementation to measure.
+      **What:** the global floor and the CI coverage cell already exist; a single global floor lets one package decay while the others carry the average. Give each package under `packages/` its own statements, branches and lines floors at its measured coverage rounded down to a whole percent, and a functions floor wherever stubs no longer make up its uncovered functions, with a comment where one is absent. The global floor stays as it is.
+      **Done when:** a run where one package drops below its own floor fails `pnpm verify` and CI while the global number still passes, shown once on a throwaway branch and discarded; the CI coverage cell runs the same `test:coverage` script, so the floors apply there with no workflow change.
+      **Constraints:** floors only go up. No coverage-ignore comments, no new exclusions. `eval/` and `scripts/` stay outside coverage.
