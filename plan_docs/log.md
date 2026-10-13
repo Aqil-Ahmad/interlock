@@ -11,6 +11,7 @@ Short entries: done, decided, blocked. Newest first.
 - **Decided — functions floors for shared, core, daemon and cli; none for mcp-server.** The unwritten CLI commands and every MCP tool sit in an `index.ts`, which coverage excludes, so v8 never counts them; daemon's one stub, `purge`, is already inside its number. mcp-server gets none because all its tools are still stubs, so the number would follow them being written, not tested.
 - **Found — the gate bites.** On a throwaway branch with `packages/cli/test/check.test.ts` deleted, the run failed on all four cli floors (lines 87.15 < 90, functions 75.92 < 79, statements 85.11 < 89, branches 78.97 < 84) and on daemon's functions and branches, which the cli tests also drive, while the global floor passed. The branch was deleted. Run as `vitest run --coverage --coverage.reportOnFailure`, since as root the 16 tests above fail first and vitest skips the threshold check.
 - **Checked — no workflow change.** The CI coverage cell runs `pnpm test:coverage`, the script `pnpm verify` runs, so the per-package floors apply there as they are.
+- **Found — two shadow collection tests timed a 50 ms `setTimeout` against `Date.now()` and asserted at least 50,** which a timer firing one millisecond short of the wall clock failed once on macOS CI. Both now read the wait off the registry's injected clock and assert it exactly.
 
 ## 2026-10-11 — wrap the excerpts `interlock check` prints
 
