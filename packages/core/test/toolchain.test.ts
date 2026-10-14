@@ -495,7 +495,16 @@ describe('detectToolchain', () => {
     });
 
     it('refuses a reference that leaves the tree or names nothing in it', async () => {
-      for (const path of ['../outside', '/etc', 'missing', 'packages/a/tsconfig.base.json']) {
+      // `../packages/a` and `/packages/a` name a real project once clamped
+      // into the tree, so only refusing the climb itself keeps them out.
+      for (const path of [
+        '../outside',
+        '../packages/a',
+        '/etc',
+        '/packages/a',
+        'missing',
+        'packages/a/tsconfig.base.json',
+      ]) {
         const toolchain = await detect({
           'package.json': json(typescriptDev),
           'pnpm-lock.yaml': '',

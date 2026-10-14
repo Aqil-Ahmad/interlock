@@ -32,6 +32,8 @@ describe('stripJsonc', () => {
     expect(() => parse('{ "a": "open')).toThrow();
     expect(() => parse('{ "a": 1 /* open')).toThrow();
     expect(stripJsonc('// only a comment')).toBe('');
+    // An unclosed comment runs to the end, so nothing after its opener is read as JSON.
+    expect(parse('{ "a": 1 } /* } tail')).toEqual({ a: 1 });
   });
 
   it('is linear on input built to make a naive scanner backtrack', () => {
