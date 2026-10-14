@@ -253,15 +253,20 @@ exit 2
     ).toStrictEqual(['stats', 'kill', 'rm']);
   });
 
-  it('still kills the container at the wall clock when reading its pids fails', async () => {
-    const runner = runnerIn('hang-exec-dies', { config: config({ timeoutMs: 200 }) });
+  it('still samples the pids and kills the container when reading the pids events fails', async () => {
+    // The fake samples 3 processes: at this limit, the sample alone names it.
+    const runner = runnerIn('hang-exec-dies', {
+      pidsLimit: 3,
+      config: config({ timeoutMs: 200 }),
+    });
     const error = await rejection(runner.run({ tree: makeTree(), argv: ['true'] }));
-    expect(error.code).toBe('SANDBOX_TIMEOUT');
+    expect(error.code).toBe('SANDBOX_LIMIT');
+    expect(error.details.limit).toBe('pids');
     expect(
       calls()
         .filter((call) => /^(exec|stats|kill|rm) /u.test(call))
         .map((c) => c.split(' ')[0]),
-    ).toStrictEqual(['exec', 'kill', 'rm']);
+    ).toStrictEqual(['exec', 'stats', 'kill', 'rm']);
   });
 
   it('is not installed when Docker disappears mid-run, and the removal failing says nothing new', async () => {

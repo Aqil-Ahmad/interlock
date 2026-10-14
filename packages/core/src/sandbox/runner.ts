@@ -321,24 +321,30 @@ export function createSandboxRunner(options: SandboxRunnerOptions): SandboxRunne
             // Before the kill: both read a live container. One of the two
             // files exists, so `cat` exits non-zero and its output still counts.
             // Apart from the kill, which a failure here must not skip.
+            // Each read on its own, so a failed one still leaves the other.
+            let counted: string | null = null;
+            let stats: string | null = null;
             try {
               const events = await docker(
                 ['exec', name, 'cat', ...PIDS_EVENTS_FILES],
                 DIAGNOSTIC_CALL_TIMEOUT_MS,
               );
-              const counted = /^max \d+$/mu.test(events.stdout) ? events.stdout : null;
-              let stats: string | null = null;
-              if (counted === null) {
+              counted = /^max \d+$/mu.test(events.stdout) ? events.stdout : null;
+            } catch (error) {
+              log.warn('sandbox pids events not read', { name, error: String(error) });
+            }
+            if (counted === null) {
+              try {
                 const sampled = await docker(
                   ['stats', '--no-stream', '--format', '{{.PIDs}}', name],
                   DIAGNOSTIC_CALL_TIMEOUT_MS,
                 );
                 stats = sampled.exitCode === 0 ? sampled.stdout : null;
+              } catch (error) {
+                log.warn('sandbox pids stats not read', { name, error: String(error) });
               }
-              limitHit = pidsLimitHit(counted, stats, pidsLimit);
-            } catch (error) {
-              log.warn('sandbox pids not read', { name, error: String(error) });
             }
+            limitHit = pidsLimitHit(counted, stats, pidsLimit);
           }
           await docker(['kill', name]);
         })()
