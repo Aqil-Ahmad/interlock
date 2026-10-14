@@ -169,11 +169,13 @@ describe('typecheck service', () => {
       expect(asked.filter((path) => path === missing)).toHaveLength(1);
     });
 
-    it('treats a sibling directory that shares the tree’s prefix as outside it', () => {
+    it('decides containment on whole path segments', () => {
       write(base, { 'tree-other/x.ts': 'x' });
+      write(tree, { '..tree/y.ts': 'y' });
       const confinement = new Confinement(tree, deps, NODE_FILE_SYSTEM);
       expect(confinement.readFile(join(base, 'tree-other/x.ts'))).toBeUndefined();
-      expect(confinement.readFile(join(tree, '..tree/x.ts'))).toBeUndefined();
+      // `..tree` is a directory in the tree, not a way out of it.
+      expect(confinement.readFile(join(tree, '..tree/y.ts'))).toBe('y');
     });
 
     it('never asks the file system about a path outside its roots during a check', () => {
@@ -344,6 +346,29 @@ describe('typecheck service', () => {
       expect(codes(after)).toEqual([['two/src/index.ts', 2322]]);
     });
 
+    it('judges a referenced project’s file by its own project’s options', () => {
+      write(tree, {
+        'tsconfig.json': JSON.stringify({
+          files: [],
+          references: [{ path: 'lib' }, { path: 'app' }],
+        }),
+        // Lax: an untyped parameter is fine here, and `tsc -b` says nothing of it.
+        'lib/tsconfig.json': JSON.stringify({
+          compilerOptions: { composite: true, lib: ['es2022'], types: [], strict: false },
+          include: ['src'],
+        }),
+        'lib/src/index.ts': 'export function id(x) {\n  return x;\n}\n',
+        'app/tsconfig.json': JSON.stringify({
+          compilerOptions: { composite: true, lib: ['es2022'], types: [], strict: true },
+          include: ['src'],
+          references: [{ path: '../lib' }],
+        }),
+        'app/src/main.ts':
+          "import { id } from '../../lib/src/index';\nexport const app: string = id(1);\nexport function f(y) {\n  return y;\n}\n",
+      });
+      expect(codes(open().check())).toEqual([['app/src/main.ts', 7006]]);
+    });
+
     it('reports a referenced project’s file once, from the project that lists it', () => {
       write(tree, {
         'tsconfig.json': JSON.stringify({
@@ -463,12 +488,15 @@ describe('typecheck service', () => {
   describe('incremental state', () => {
     it('sees a file rewritten with the same size and modification time', () => {
       write(tree, { 'tsconfig.json': tsconfig(), 'src/a.ts': 'export const a: number = 1;\n' });
+      const path = join(tree, 'src/a.ts');
+      // Whole seconds, so setting the time back restores it exactly.
+      utimesSync(path, 1_700_000_000, 1_700_000_000);
       const service = open();
       expect(codes(service.check())).toEqual([]);
-      const path = join(tree, 'src/a.ts');
       const before = statSync(path);
       writeFileSync(path, 'export const a: string = 1;\n');
-      utimesSync(path, before.atime, before.mtime);
+      utimesSync(path, 1_700_000_000, 1_700_000_000);
+      expect(statSync(path)).toMatchObject({ size: before.size, mtimeMs: before.mtimeMs });
       expect(codes(service.check())).toEqual([['src/a.ts', 2322]]);
     });
 
@@ -500,6 +528,50 @@ describe('typecheck service', () => {
       expect(codes(service.check())).toEqual([['src/a.ts', 2307]]);
       write(tree, { 'src/b.ts': 'export const b = 1;\n' });
       expect(codes(service.check())).toEqual([]);
+    });
+
+    it('resolves an import outside include again once a merge adds its file', () => {
+      write(tree, {
+        'tsconfig.json': tsconfig(),
+        'src/a.ts': "import { b } from '../extra/b';\nexport const a: string = b;\n",
+      });
+      const service = open();
+      expect(codes(service.check())).toEqual([['src/a.ts', 2307]]);
+      write(tree, { 'extra/b.ts': 'export const b = 1;\n' });
+      expect(codes(service.check())).toEqual([['src/a.ts', 2322]]);
+    });
+
+    it('resolves every import again after a check that did not reach the semantic pass', () => {
+      write(tree, {
+        'tsconfig.json': tsconfig(),
+        'src/a.ts': "import { b } from '../extra/b';\nexport const a: string = b;\nconst c = (;\n",
+      });
+      const service = open();
+      expect(codes(service.check())).toEqual([['src/a.ts', 1109]]);
+      write(tree, { 'extra/b.ts': 'export const b = 1;\n' });
+      write(tree, { 'src/a.ts': "import { b } from '../extra/b';\nexport const a: string = b;\n" });
+      expect(codes(service.check())).toEqual([['src/a.ts', 2322]]);
+    });
+
+    it('resolves every import again after a check that was cancelled', () => {
+      write(tree, {
+        'tsconfig.json': tsconfig(),
+        'src/a.ts': "import { b } from '../extra/b';\nexport const a: string = b;\n",
+      });
+      const service = open();
+      expect(service.check({ isCancelled: () => true })).toEqual({ kind: 'cancelled' });
+      expect(codes(service.check())).toEqual([['src/a.ts', 2307]]);
+      write(tree, { 'extra/b.ts': 'export const b = 1;\n' });
+      expect(codes(service.check())).toEqual([['src/a.ts', 2322]]);
+    });
+
+    it('reports declaration errors only once nothing else is wrong, as tsc does', () => {
+      write(tree, {
+        'tsconfig.json': tsconfig({ declaration: true }),
+        'src/a.ts': 'export const make = () => class {\n  private x = 1;\n};\n',
+        'src/b.ts': 'export const b: number = "";\n',
+      });
+      expect(codes(open().check())).toEqual([['src/b.ts', 2322]]);
     });
 
     it('reuses declaration diagnostics only for files no change affected', () => {

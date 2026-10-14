@@ -421,8 +421,19 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
   let epoch = 0;
   /** Configs read during the current check, so a project referenced twice is parsed once. */
   let configs = new Map<string, ts.ParsedCommandLine>();
-  /** Set when the set of files changed, so module resolutions made before may be wrong now. */
-  let invalidated = false;
+  /**
+   * Files whose imports the last check could not resolve, or every file when
+   * it did not get as far as finding out.
+   *
+   * The language service re-resolves a file's imports only when the file
+   * changes or the root files do, and nothing watches the paths a failed
+   * lookup tried. So an import of a file outside `include` stays unresolved
+   * after a merge adds the file, unless its importer is named here: each check
+   * resolves these again, which costs only the files that were already broken.
+   */
+  let suspect: ReadonlySet<string> | 'all' = new Set();
+  /** Being gathered by the check in progress, for the next one. */
+  let gathering: Set<string> | 'all' = new Set();
 
   /** Each project's last reading, handed back while it reads the same. */
   const lastRead = new Map<string, ts.ParsedCommandLine>();
@@ -488,7 +499,7 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       // A slot holds no build output, so a reference is read as its sources,
       // as an editor reads it, rather than as declarations nobody built.
       useSourceOfProjectReferenceRedirect: () => true,
-      hasInvalidatedResolutions: () => invalidated,
+      hasInvalidatedResolutions: (path) => suspect === 'all' || suspect.has(canonicalName(path)),
     };
     const parsed = projectOf(configPath);
     const project: Project = {
@@ -524,6 +535,7 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
     if (checkOptions.cold === true) epoch += 1;
     confinement.forget();
     configs = new Map();
+    gathering = new Set();
     const token: ts.CancellationToken = {
       isCancellationRequested: checkOptions.isCancelled ?? (() => false),
       throwIfCancellationRequested: () => {
@@ -535,8 +547,13 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       },
     };
     try {
-      return { kind: 'checked', report: checkAll(token) };
+      const report = checkAll(token);
+      suspect = gathering;
+      return { kind: 'checked', report };
     } catch (error) {
+      // Cut short, it found out about only some files: the next check
+      // resolves every file again rather than trust what it did not reach.
+      suspect = 'all';
       if (error instanceof ts.OperationCanceledException) return { kind: 'cancelled' };
       throw error;
     }
@@ -570,12 +587,10 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
         projects.set(configPath, project);
       } else {
         const parsed = projectOf(configPath);
-        invalidated = !sameFiles(project.parsed.fileNames, parsed.fileNames);
         project.parsed = parsed;
         project.settings = { ...parsed.options, noEmit: true };
       }
       checkProject(project, owner, token, config, files);
-      invalidated = false;
     }
     // One in a file outside the tree — a default `lib` file at odds with
     // something — describes the environment, and is reported with the
@@ -626,16 +641,23 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
 
     const syntactic = owned.flatMap((file) => program.getSyntacticDiagnostics(file, token));
     files.push(...syntactic);
-    if (syntactic.length > 0) return;
-    const environment = [
-      ...program.getOptionsDiagnostics(token),
-      ...program.getGlobalDiagnostics(token),
-    ];
+    const environment =
+      syntactic.length > 0
+        ? []
+        : [...program.getOptionsDiagnostics(token), ...program.getGlobalDiagnostics(token)];
     config.push(...environment);
-    if (environment.length > 0) return;
+    if (syntactic.length > 0 || environment.length > 0) {
+      gathering = 'all';
+      return;
+    }
     if (project.pending) drainAffected(project, builder, token);
     const semantic = owned.flatMap((file) => builder.getSemanticDiagnostics(file, token));
     files.push(...semantic);
+    for (const diagnostic of semantic) {
+      if (gathering !== 'all' && UNRESOLVED.has(diagnostic.code)) {
+        gathering.add(canonicalName(diagnostic.file!.fileName));
+      }
+    }
     const options = program.getCompilerOptions();
     if (semantic.length === 0 && options.noEmit === true && emitsDeclarations(options)) {
       for (const file of owned) {
@@ -750,8 +772,15 @@ function sameReading(a: ts.ParsedCommandLine, b: ts.ParsedCommandLine): boolean 
   return essence(a) === essence(b);
 }
 
-function sameFiles(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((file, index) => file === b[index]);
+/**
+ * Codes of a module the compiler looked for and did not find, or found
+ * without types: each one a lookup that a file appearing could change.
+ */
+const UNRESOLVED: ReadonlySet<number> = new Set([2307, 2792, 7016]);
+
+/** A path as the compiler keys files: folded on a file system that ignores case. */
+function canonicalName(path: string): string {
+  return ts.sys.useCaseSensitiveFileNames ? path : path.toLowerCase();
 }
 
 function canonical(path: string, fileSystem: HostFileSystem): string {

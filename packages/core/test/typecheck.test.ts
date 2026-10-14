@@ -351,8 +351,9 @@ describe('type-check service', () => {
       async () => {
         const repo = await open(committed());
         const [cold, warm, changed] = await repo.inSlot({}, async (slot) => {
-          const request = { root: slot.path, dependencyRoot: checkout, fill: slot.fill };
-          const first = checked(await registry.check(request));
+          // Only the first check follows the fill; the rest see the tree as it left it.
+          const request = { root: slot.path, dependencyRoot: checkout, fill: 'delta' } as const;
+          const first = checked(await registry.check({ ...request, fill: slot.fill }));
           const second = checked(await registry.check(request));
           writeFileSync(
             join(slot.path, 'packages/shared/src/ids.ts'),
@@ -370,7 +371,9 @@ describe('type-check service', () => {
         expect(cold.report.projects).toContain('packages/daemon/tsconfig.json');
         expect([cold.warm, warm.warm, changed.warm]).toEqual([false, true, true]);
         expect(warm.report).toEqual(cold.report);
-        expect(warm.durationMs).toBeLessThan(cold.durationMs);
+        // Measured at about 1% of the cold check; a fifth is the margin for a
+        // loaded machine, and far below what rebuilding the programs costs.
+        expect(warm.durationMs).toBeLessThan(cold.durationMs / 5);
         expect(changed.durationMs).toBeLessThan(cold.durationMs);
         expect(changed.report.files.map((d) => [d.file, d.code])).toEqual([
           ['packages/shared/src/ids.ts', 2322],
