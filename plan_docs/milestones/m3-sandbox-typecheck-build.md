@@ -53,7 +53,7 @@ _which branch caused which half_ of each one.
     remedy. None falls back to the host and none pulls: every run passes
     `--pull=never`.
   - _Orphans:_ every container carries a label naming its owner; one left by a
-    crashed daemon is found by that label and removed by `reapSandboxOrphans`.
+    crashed daemon is found by that label and removed by `SandboxRunner.reapOrphans`.
   - _Pinning:_ the default image in `config.ts` is pinned by digest, as T9
     already claims.
 
@@ -93,7 +93,7 @@ _which branch caused which half_ of each one.
     git runner in `test/support/call-sites.ts`.
   - No silent skips: the sandbox suite reports why it skipped, and fails on
     Linux CI when Docker is missing.
-  - Not built here: wiring `reapSandboxOrphans` into daemon start, the
+  - Not built here: wiring `SandboxRunner.reapOrphans` into daemon start, the
     per-slot cache's eviction wipe, and the dependency mount layout. Each is
     the first task that needs it: the build analyzer for the first two, the
     typecheck runner's sandboxed counterpart for the third.

@@ -107,6 +107,13 @@ const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
  */
 const DOCKER_CALL_TIMEOUT_MS = 30_000;
 
+/**
+ * For reading the pids evidence before a timed-out container is killed. The
+ * kill waits on it, and the evidence only names which limit was hit, so it is
+ * not worth stretching the wall clock by a full call timeout on a slow daemon.
+ */
+const DIAGNOSTIC_CALL_TIMEOUT_MS = 5_000;
+
 interface DockerCallResult {
   readonly stdout: string;
   readonly stderr: string;
@@ -216,12 +223,15 @@ export function createSandboxRunner(options: SandboxRunnerOptions): SandboxRunne
     return unavailable('not-installed', { dockerPath });
   }
 
-  function docker(args: readonly string[]): Promise<DockerCallResult> {
+  function docker(
+    args: readonly string[],
+    timeoutMs = DOCKER_CALL_TIMEOUT_MS,
+  ): Promise<DockerCallResult> {
     return new Promise((resolve, reject) => {
       const child = execFile(
         dockerPath,
         args,
-        { env, timeout: DOCKER_CALL_TIMEOUT_MS, encoding: 'utf8', windowsHide: true },
+        { env, timeout: timeoutMs, encoding: 'utf8', windowsHide: true },
         (error, stdout, stderr) => {
           if (error === null) {
             resolve({ stdout, stderr, exitCode: 0 });
@@ -243,7 +253,7 @@ export function createSandboxRunner(options: SandboxRunnerOptions): SandboxRunne
           reject(
             unavailable('docker-failed', {
               command: args[0] ?? null,
-              timeoutMs: DOCKER_CALL_TIMEOUT_MS,
+              timeoutMs,
             }),
           );
         },
@@ -310,14 +320,25 @@ export function createSandboxRunner(options: SandboxRunnerOptions): SandboxRunne
           if (why === 'time') {
             // Before the kill: both read a live container. One of the two
             // files exists, so `cat` exits non-zero and its output still counts.
-            const events = await docker(['exec', name, 'cat', ...PIDS_EVENTS_FILES]);
-            const counted = /^max \d+$/mu.test(events.stdout) ? events.stdout : null;
-            let stats: string | null = null;
-            if (counted === null) {
-              const sampled = await docker(['stats', '--no-stream', '--format', '{{.PIDs}}', name]);
-              stats = sampled.exitCode === 0 ? sampled.stdout : null;
+            // Apart from the kill, which a failure here must not skip.
+            try {
+              const events = await docker(
+                ['exec', name, 'cat', ...PIDS_EVENTS_FILES],
+                DIAGNOSTIC_CALL_TIMEOUT_MS,
+              );
+              const counted = /^max \d+$/mu.test(events.stdout) ? events.stdout : null;
+              let stats: string | null = null;
+              if (counted === null) {
+                const sampled = await docker(
+                  ['stats', '--no-stream', '--format', '{{.PIDs}}', name],
+                  DIAGNOSTIC_CALL_TIMEOUT_MS,
+                );
+                stats = sampled.exitCode === 0 ? sampled.stdout : null;
+              }
+              limitHit = pidsLimitHit(counted, stats, pidsLimit);
+            } catch (error) {
+              log.warn('sandbox pids not read', { name, error: String(error) });
             }
-            limitHit = pidsLimitHit(counted, stats, pidsLimit);
           }
           await docker(['kill', name]);
         })()

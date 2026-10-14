@@ -159,7 +159,7 @@ case "$1" in
     esac
     echo created; exit 0 ;;
   start)
-    case "$mode" in hang|hang-bad-inspect) exec sleep 600 ;; esac
+    case "$mode" in hang|hang-bad-inspect|hang-exec-dies) exec sleep 600 ;; esac
     echo out; exit 0 ;;
   inspect)
     case "$mode" in
@@ -168,6 +168,9 @@ case "$1" in
       *) echo '{"ExitCode":0,"OOMKilled":false,"Error":""}' ;;
     esac
     exit 0 ;;
+  exec)
+    if [ "$mode" = hang-exec-dies ]; then kill -9 $$; fi
+    exit 2 ;;
   stats) echo 3; exit 0 ;;
   kill) kill -9 $$ ;;
   rm)
@@ -248,6 +251,17 @@ exit 2
         .filter((call) => /^(stats|kill|rm) /u.test(call))
         .map((c) => c.split(' ')[0]),
     ).toStrictEqual(['stats', 'kill', 'rm']);
+  });
+
+  it('still kills the container at the wall clock when reading its pids fails', async () => {
+    const runner = runnerIn('hang-exec-dies', { config: config({ timeoutMs: 200 }) });
+    const error = await rejection(runner.run({ tree: makeTree(), argv: ['true'] }));
+    expect(error.code).toBe('SANDBOX_TIMEOUT');
+    expect(
+      calls()
+        .filter((call) => /^(exec|stats|kill|rm) /u.test(call))
+        .map((c) => c.split(' ')[0]),
+    ).toStrictEqual(['exec', 'kill', 'rm']);
   });
 
   it('is not installed when Docker disappears mid-run, and the removal failing says nothing new', async () => {

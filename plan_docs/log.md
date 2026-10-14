@@ -6,6 +6,7 @@ Short entries: done, decided, blocked. Newest first.
 
 ## 2026-10-13 — Docker sandbox runner
 
+- **Review — the timeout kill no longer waits on its evidence.** A failing pids read skipped `docker kill`, and each read could hold it for the full 30 s call timeout; the reads now have their own try/catch and a 5 s timeout, and the kill always runs.
 - **Task rewritten before starting.** The one-line "Docker sandbox runner" task is expanded in M3 to M1's depth, from the issue: isolation and limits each shown inside a container, infra failures with remedies, orphans, the pinned image, and what is left to later tasks (wiring the orphan reap into daemon start, the cache's eviction wipe, the dependency layout).
 - **Measured — copying a 293 MB, 6,605-file tree into a tmpfs inside the container: 515, 411, 393, 377, 423 ms, median 411 ms.** Synthetic tree at archestra's size, Linux, Docker 29.8.2. An empty container's start and stop is about 285 ms.
 - **Decided, ADR-0007, left `proposed` for a human (hard rule 8):** the tree is read-only at `/work`, writes go to a tmpfs at `/tmp`, a writable per-slot cache only from under a caller-named cache root that overlaps nothing read-only, and the host only ever deletes a cache. ADR-0004's "tmpfs overlay" is not something Docker can do, and its posture does not mention a cache, so both wordings change.

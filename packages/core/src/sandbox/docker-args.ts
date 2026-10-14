@@ -141,6 +141,9 @@ export function planMounts(input: MountPlanInput): PlannedMount[] {
     planned.push({ source: mount.resolved.realPath, target, writable });
   }
 
+  // Read-only mounts only: writable ones all come from under the cache root,
+  // so two nested inside each other expose nothing a container could not
+  // already write.
   if (input.cacheRoot !== undefined) {
     for (const mount of planned) {
       if (!mount.writable && overlaps(input.cacheRoot, mount.source)) {
