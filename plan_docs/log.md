@@ -4,6 +4,19 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-13 — toolchain detection
+
+- **Review — `stripJsonc` was quadratic in trailing commas** (60,000 took 4 s), each one rebuilding the output; it now blanks one piece of an array. Checked against pnpm 11: a `pnpm-workspace.yaml` with no `packages:` is the root project alone, as the reader has it.
+- **Task expanded before starting.** The one-line "Toolchain detection" task is rewritten to M1's depth — reading from the object database, each manager's rule, every refusal with its reason, the cache — from the issue. "Expand this milestone" stays unticked.
+- **Decided — a typecheck override is a command, the detected typecheck is the in-process service.** The result's `runner` is `language-service` with projects or `command` with the override's string; how a command-style typecheck runs is left to the analyzer that reads it.
+- **Decided — answered per capability, and an override applies even where detection gave up.** A Bun tree with an `install` override has a supported install and an unsupported build; the override is the repository saying exactly what detection could not tell.
+- **Decided — no lockfile and no `packageManager` is unsupported, not npm.** Installing with the wrong manager resolves a different dependency tree.
+- **Decided — `yarn.lock` is never read; Berry is told by `git grep '^__metadata:'`.** Lockfiles are routinely megabytes, far past the 256 KiB read cap.
+- **Decided — the override's `test` command is not carried.** Nothing reads it before the targeted-tests analyzer; detection answers install, typecheck and build.
+- **Decided — one recursive `ls-tree` per detection.** Which nested manifests matter depends on workspace patterns only known once the root is read, and all of them key the cache. Its output is bounded by the runner's 32 MiB buffer, about 300,000 files.
+- **Mutation: 56 mutations, 48 caught, then 53 after tests.** Precedence, lockfile and Yarn-flavour logic, JSONC reader, size cap, references, workspaces, cache. Two mutations first missed their pattern after Prettier reflowed the code and were re-run. Four survivors were missing tests, all added: an unclosed block comment followed by text, a reference climbing out of the tree, one written absolute — each naming a real project once clamped — and a root with references and its own `files`, which is not a solution. Three are equivalent and stay as defence: a null blob size (`ls-tree -l` always sizes a blob), `hasOwn` against a plain lookup (`JSON.parse` never sets a prototype, and no key read is on `Object.prototype`), and keying root-file presence (each is already in the read-set a hit re-checks).
+- **Checked — `pnpm verify` and `pnpm test:untouched`.** Build, lint, format and typecheck pass; run as root, the same 16 `chmod` and stale-snapshot tests fail as on `dev` and no others, and every coverage floor holds under `--coverage.reportOnFailure`. `test:untouched` passes.
+
 ## 2026-10-12 — coverage gate, per package
 
 - **Task rewritten before starting.** "Turn the coverage gate on" said the gate and the CI coverage job had been removed; both are on `dev` (a global 82/82/85 floor, one matrix cell running `pnpm test:coverage`). The real gap was a single global floor, so the task now gives each package its own.
