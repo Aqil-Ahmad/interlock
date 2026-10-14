@@ -1,8 +1,9 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTypecheckRegistry } from '../src/analyzers/typecheck.js';
 import type {
@@ -21,6 +22,11 @@ import type { Files, Printed, SlotFixture } from './support/typecheck-fixtures.j
  * deliberately sees less than `tsc` would — a read outside the tree — the
  * test proves the read never happened, not merely that the answer differs.
  */
+
+const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+const TSX = join(ROOT, 'node_modules', '.bin', 'tsx');
+const TSCONFIG = join(ROOT, 'tsconfig.check.json');
+const HEAP_BOUND_CHECK = fileURLToPath(new URL('support/heap-bound-check.ts', import.meta.url));
 
 /** A strict project with no ambient types, so a fixture needs no `node_modules`. */
 const tsconfig = (extra: Record<string, unknown> = {}): string =>
@@ -463,17 +469,28 @@ describe('type-check service', () => {
     });
 
     it('does not keep a service whose heap has grown past its bound', async () => {
-      await registry.close();
-      // Below what any service needs, so the first check is already over it.
-      registry = createTypecheckRegistry({ maxHeapMb: 1 });
+      // The bound checked after a check is the one left when a process-wide
+      // `--max-old-space-size` overrides the worker's own limit, so the check
+      // runs in a process started with one, ample for any check. Without it,
+      // as on a runner with no `NODE_OPTIONS`, the worker's limit holds, and a
+      // bound below what any service needs ends the whole test process.
       const repo = await open(base);
       await repo.inSlot({}, async (slot) => {
-        const outcome = checked(
-          await registry.check({ root: slot.path, dependencyRoot: repo.user }),
+        const { stdout } = await promisify(execFile)(
+          TSX,
+          ['--tsconfig', TSCONFIG, HEAP_BOUND_CHECK, slot.path, repo.user],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, NODE_OPTIONS: '--max-old-space-size=4096' },
+          },
         );
+        const { outcome, live } = JSON.parse(stdout) as {
+          outcome: TypecheckOutcome;
+          live: number;
+        };
         // The answer stands; the service is not kept to give the next one.
-        expect(outcome.report).toMatchObject({ config: [], files: [] });
-        expect(registry.live).toBe(0);
+        expect(checked(outcome).report).toMatchObject({ config: [], files: [] });
+        expect(live).toBe(0);
       });
     });
 
