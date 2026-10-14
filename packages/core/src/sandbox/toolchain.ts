@@ -496,15 +496,17 @@ function parseJson(source: string, jsonc: boolean): unknown {
  * array.
  */
 export function stripJsonc(source: string): string {
-  let out = '';
+  // Pieces rather than one string: dropping a trailing comma replaces its
+  // piece, where rebuilding the string would copy everything before it.
+  const out: string[] = [];
   let index = 0;
-  /** Where the last comma outside a string was written into `out`, until something else follows it. */
+  /** The piece holding the last comma outside a string, until something else follows it. */
   let pendingComma = -1;
   while (index < source.length) {
     const char = source[index]!;
     if (char === '"') {
       const end = endOfString(source, index);
-      out += source.slice(index, end);
+      out.push(source.slice(index, end));
       index = end;
       pendingComma = -1;
     } else if (char === '/' && source[index + 1] === '/') {
@@ -513,22 +515,23 @@ export function stripJsonc(source: string): string {
     } else if (char === '/' && source[index + 1] === '*') {
       const end = source.indexOf('*/', index + 2);
       index = end === -1 ? source.length : end + 2;
-      out += ' ';
+      out.push(' ');
     } else if (char === ',') {
       pendingComma = out.length;
-      out += char;
+      out.push(char);
       index += 1;
     } else if ((char === '}' || char === ']') && pendingComma !== -1) {
-      out = out.slice(0, pendingComma) + ' ' + out.slice(pendingComma + 1) + char;
+      out[pendingComma] = ' ';
+      out.push(char);
       pendingComma = -1;
       index += 1;
     } else {
       if (!isJsonWhitespace(char)) pendingComma = -1;
-      out += char;
+      out.push(char);
       index += 1;
     }
   }
-  return out;
+  return out.join('');
 }
 
 /** Index just past the string opening at `start`, or the end of input for one never closed. */
@@ -619,6 +622,8 @@ async function detectPackageManager(
         `packageManager names ${pinned.manager}, but the only lockfile is ${lockfiles.join(' and ')}`,
       );
     }
+    // The pin decides the flavour over `.yarnrc.yml` and the lockfile header,
+    // as Corepack does: a classic pin over a Berry lockfile fails at install.
     const name =
       pinned.manager === 'yarn'
         ? majorOf(pinned.version) >= 2
@@ -845,6 +850,8 @@ function resolveReference(reader: TreeReader, from: string, target: string): str
   const joined = normalize(from === '' ? target : `${from}/${target}`);
   if (joined === null) return null;
   if (joined.endsWith('.json') && reader.listing.get(joined)?.type === 'blob') return joined;
+  // As tsc reads a reference: a path that is not a file names a directory,
+  // however it ends.
   const inside = joined === '' ? 'tsconfig.json' : `${joined}/tsconfig.json`;
   return reader.listing.has(inside) ? inside : null;
 }
@@ -1034,6 +1041,8 @@ export function readPnpmWorkspacePackages(
   };
   const lines = source.replace(/^\uFEFF/u, '').split(/\r?\n/u);
   const start = lines.findIndex((line) => /^packages\s*:/u.test(line));
+  // A file that only carries settings, a catalog say, is read by pnpm as a
+  // workspace of the root project alone.
   if (start === -1) return { list: [] };
 
   const inline = withoutComment(lines[start]!.slice(lines[start]!.indexOf(':') + 1)).trim();

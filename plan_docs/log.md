@@ -6,6 +6,7 @@ Short entries: done, decided, blocked. Newest first.
 
 ## 2026-10-13 — toolchain detection
 
+- **Review — `stripJsonc` was quadratic in trailing commas** (60,000 took 4 s), each one rebuilding the output; it now blanks one piece of an array. Checked against pnpm 11: a `pnpm-workspace.yaml` with no `packages:` is the root project alone, as the reader has it.
 - **Task expanded before starting.** The one-line "Toolchain detection" task is rewritten to M1's depth — reading from the object database, each manager's rule, every refusal with its reason, the cache — from the issue. "Expand this milestone" stays unticked.
 - **Decided — a typecheck override is a command, the detected typecheck is the in-process service.** The result's `runner` is `language-service` with projects or `command` with the override's string; how a command-style typecheck runs is left to the analyzer that reads it.
 - **Decided — answered per capability, and an override applies even where detection gave up.** A Bun tree with an `install` override has a supported install and an unsupported build; the override is the repository saying exactly what detection could not tell.

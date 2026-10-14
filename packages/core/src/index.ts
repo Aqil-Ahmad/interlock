@@ -2,8 +2,8 @@
  * `@interlock/core` — domain logic.
  *
  * Git and shadow operations, speculative merging, toolchain detection, the
- * analyzer pipeline and finding ranking. No servers, timers or watchers; those live in
- * `@interlock/daemon`, which composes what is exported here.
+ * analyzer pipeline and finding ranking. No servers, timers or watchers; those
+ * live in `@interlock/daemon`, which composes what is exported here.
  *
  * Submodules are importable directly (`@interlock/core/merge`).
  */

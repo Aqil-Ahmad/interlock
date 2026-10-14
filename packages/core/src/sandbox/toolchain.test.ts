@@ -42,6 +42,15 @@ describe('stripJsonc', () => {
     stripJsonc(hostile);
     expect(performance.now() - started).toBeLessThan(1_000);
   });
+
+  it('is linear in the number of trailing commas it drops', () => {
+    const commas = 60_000;
+    const source = `{"a":[${'[1,],'.repeat(commas)}1]}`;
+    const started = performance.now();
+    const parsed = JSON.parse(stripJsonc(source)) as { a: unknown[] };
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(parsed.a).toHaveLength(commas + 1);
+  });
 });
 
 describe('matchSegment', () => {
