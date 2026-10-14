@@ -10,6 +10,7 @@
  */
 export * from './analyzer.js';
 export * from './textual.js';
+export * from './typecheck.js';
 
 import type { Analyzer } from './analyzer.js';
 import { textualAnalyzer } from './textual.js';
