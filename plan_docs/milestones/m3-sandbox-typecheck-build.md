@@ -37,10 +37,115 @@ _which branch caused which half_ of each one.
       **Constraints:** the override's commands come from `.interlock.json`, which is repository content — a command string chosen by whoever writes the repository. Validation there proves it is a string and nothing more. It runs in the sandbox or it does not run.
 
 - [ ] **Typecheck runner**
-      **Files:** `packages/core/src/analyzers/typecheck.ts`
-      **What:** host the TypeScript LanguageService in-process, one instance per hot pooled pair, rooted at that pair's pool slot (ADR-0005). Return structured diagnostics — code, message, file, span. Do not spawn `tsc` per check: the measured process floor is 436 ms, which would dominate an incremental check costing 350 ms of real work.
-      **Done when:** the same slot checked twice reuses the live service and is measurably faster; a service is disposed when its pool slot is evicted; and memory per instance is measured and bounded, because four live compiler instances on a large repository is real RSS.
-      **Constraints:** **strip `plugins` from the resolved tsconfig before constructing the service.** TypeScript language-service plugins are loaded and executed by the host process, and the tsconfig here comes from an agent-written merged tree — an `extends` chain reaching into `node_modules` can introduce one. Loading it would execute repository code in the daemon, breaking hard rule 2 in the one place the sandbox does not cover. If plugins are ever genuinely needed, the service moves to a subprocess, not to the daemon. **Wire it through `ANALYZER_PIPELINE`, not beside it:** the daemon's `run-pipeline.ts` names `textualAnalyzer` directly — in the run and in the verdict fingerprint — so a second analyzer means folding that into the list the eval runner already reads, and adding the analyzer's floor to the fixture suite's regression test.
+      **Files:** `packages/core/src/analyzers/typecheck.ts`, `packages/core/src/analyzers/typecheck-service.ts`, `packages/core/src/analyzers/typecheck-worker.ts`, `packages/core/src/git/worktree-pool.ts`, `packages/core/package.json`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/store/verdict-key.ts`, ADR-0007
+      **What:** host the TypeScript language service inside the daemon, one live instance per hot pool slot (ADR-0005), each in a worker thread of its own (ADR-0007). A check of a slot returns structured diagnostics; later checks of the same slot reuse the service's incremental state. Do not spawn `tsc` per check: the measured process floor is 436 ms, against 350 ms of real work for an incremental check. And make the daemon run `ANALYZER_PIPELINE` generically. This task adds no typecheck analyzer to that list: raw diagnostics include every pre-existing error, and reporting them before the baseline differ exists would blow the false-positive budget on day one.
+
+  Rewritten before starting, from the issue. **Diagnostics** are code,
+  category, the flattened message, the file relative to the slot, start and
+  length, and one-based line and column, as `tsc` prints them. Option and
+  global diagnostics — a broken tsconfig, a missing `lib` — are a separate
+  list from file diagnostics: they say the project cannot be judged, not that
+  the code is wrong, and the baseline differ and infra handling treat them
+  differently. A diagnostic in a file outside the slot (a default `lib` file)
+  describes the environment and goes with them. **The comparison is `tsc`'s
+  own order and gates**: syntax errors stop the semantic check, options and
+  global errors stop it too, and declaration diagnostics are reported under
+  `--noEmit` only when `declaration` or `composite` is on and nothing else
+  was found. **A solution-style tsconfig is checked through its references**,
+  depth first, each project once, a cycle tolerated; a reference is read as
+  its sources, as an editor reads it, since a slot holds no build output; and
+  a file listed by a project is reported once, from that project, as `tsc -b`
+  reports it.
+
+  **Incremental state** is the language service's programs and a semantic
+  diagnostics builder per project, the propagation `tsc --incremental` uses.
+  A file's version is its inode, size, modification and change times —
+  `reset --hard` writes a changed file anew, so a rewrite moves at least one,
+  while an unchanged file's stat costs no read — plus an epoch a cold fill
+  bumps, since a tree written whole may hold a file whose stat matches the old
+  one. A tsconfig is read again on every check, as an added file changes what
+  `include` matches, and a reading equal to the last is answered with the last
+  one's object: the language service compares a reference's reading by
+  identity, and a fresh one rebuilds every program on every check. Declaration
+  diagnostics are cached per file and forgotten for each file the builder says
+  a change affected; left uncached, they type-check every file on every check.
+
+  **Read confinement** is explicit in the host, never through `ts.sys`. The
+  compiler sees one tree: the slot, with `node_modules` in it answered from the
+  same path in the dependency checkout. A link in the dependency checkout to a
+  path inside it but outside any `node_modules` — a pnpm workspace link —
+  resolves back into the slot, so a sibling package is checked as merged, not
+  as the user has it. Anything else outside the slot, the dependency
+  checkout's `node_modules` and Interlock's own `lib` directory does not exist:
+  a `..` or absolute path in `include`, `files`, `paths` or `typeRoots`, a link
+  in the slot pointing out of it, a link in `node_modules` pointing out of the
+  checkout. Include patterns are expanded by `ts.matchFiles`, over the
+  confined listings, so the file set is `tsc`'s.
+
+  **The registry** keeps one service per tree path, at most
+  `DEFAULT_LIVE_SERVICES` (the pool size) live, least recently used stopped
+  first and a busy one never; one check per service at a time. A service is
+  rooted at a path, not at a slot, so a later task can root one at a merge base
+  or one side. The pool calls `onEvict` before it removes a slot's files, and
+  awaits it; a failing hook is logged and the eviction goes ahead. The pool's
+  slot carries how its fill wrote it, for the cold epoch. The daemon stopping
+  is `close()`, which stops every worker.
+
+  **Cancellation** crosses threads through one shared `Int32`, polled by the
+  compiler's cancellation token, since the check is synchronous and nothing
+  posted to the worker is read until it returns. A cancelled check keeps the
+  service; the next check is whole.
+
+  **The generic pipeline** runs every entry of `ANALYZER_PIPELINE` in order,
+  each with a `run.analyzer-completed` caused by the merge. An analyzer that
+  does not apply is `clean`, as a clean merge always was for the textual one.
+  The first `infra-failure` fails the run as `analyzer:<name>`; a run
+  superseded between analyzers stops there. The run's key is a fingerprint of
+  every analyzer's name and version and the tools; each analyzer's verdict is
+  cached under its own fingerprint, and a hit needs every analyzer's verdict
+  from one run. A pipeline of one analyzer keeps the key it had, so verdicts
+  already stored stay valid.
+
+  **Done when:**
+  - a slot's diagnostics equal `tsc --noEmit -p` on the same tree, on
+    fixtures: a cross-branch call that no longer fits, a syntax error that
+    stops the semantic check, a declaration error, a solution of two projects,
+    a broken tsconfig; and this repository, checked through its solution
+    tsconfig, reports nothing, as `pnpm typecheck` does, and an error a merge
+    adds to `shared` is found warm;
+  - the same slot checked twice reuses the live service and is faster, with
+    cold, warm-unchanged and warm-one-file times recorded in `log.md` on this
+    repository and on archestra;
+  - evicting a slot stops its service; the number of live services is bounded;
+    memory per instance on archestra is recorded, and a service whose heap
+    passes its bound is not kept;
+  - a superseded run's signal cancels a check in progress through the
+    compiler's token, and the service survives it;
+  - a plugin in a tsconfig reached through `extends` from `node_modules`, which
+    would write a marker file when loaded, never writes it, and `plugins` is
+    absent from the resolved options;
+  - `include`, `files`, `typeRoots` and `paths` pointing outside the slot, and
+    a link in the slot pointing out of it, read nothing: each target is a FIFO,
+    which any read would hang on, and a recording file system shows no call
+    outside the three roots;
+  - a pnpm workspace link resolves into the slot: a fixture whose user copy
+    and merged copy of a sibling package differ reports the merged one's error;
+  - the longest event-loop stall during a large check is measured both in the
+    daemon's thread and in a worker, and the choice recorded in ADR-0007;
+  - a stub second analyzer in the pipeline runs, is recorded, is fingerprinted
+    — adding it, or bumping its version, is a miss — and the existing run
+    pipeline and cache tests pass unchanged.
+
+  **Constraints:** hard rule 2. A plugin is code the host process loads, so
+  `plugins` is stripped after the whole `extends` chain is resolved; if plugins
+  are ever needed the service moves to a subprocess, never back into the
+  daemon. The compiler is Interlock's own pinned `typescript`, never the
+  repository's `node_modules` copy, which is files an agent can write. Hard
+  rule 7: `typescript` in `core` is ADR-0007. T3: nothing reads outside the
+  three roots. Do not add a typecheck analyzer to `ANALYZER_PIPELINE` here;
+  when one joins with the baseline differ it needs reconciliation keys for its
+  Findings — reconciliation matches textual Findings only — and its toolchain
+  fingerprint must name the TypeScript version.
 
 - [ ] **Baseline differ**
       **Files:** `packages/core/src/analyzers/`

@@ -4,6 +4,10 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-14 — typecheck runner
+
+- **Task rewritten before starting.** "Typecheck runner" was a paragraph; it now carries the diagnostics shape, `tsc`'s gates, references, incremental state, read confinement, the registry, cancellation and the generic pipeline, each with a `Done when`, from the issue. "Expand this milestone" stays unticked.
+
 ## 2026-10-12 — coverage gate, per package
 
 - **Task rewritten before starting.** "Turn the coverage gate on" said the gate and the CI coverage job had been removed; both are on `dev` (a global 82/82/85 floor, one matrix cell running `pnpm test:coverage`). The real gap was a single global floor, so the task now gives each package its own.
