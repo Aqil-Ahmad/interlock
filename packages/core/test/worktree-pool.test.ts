@@ -507,6 +507,61 @@ describe('worktree pool', () => {
       expect(listed).not.toContain(second.path);
     });
 
+    it('calls the eviction hook while the slot is still on disk, and awaits it', async () => {
+      const commits = ['one', 'two'].map((name, i) =>
+        commitOn(name, baseSha, () => write(dir, `src/f${String(i)}.ts`, `${name}\n`)),
+      );
+      const seen: { path: string; present: boolean; after: boolean }[] = [];
+      const pool = open({
+        size: 1,
+        onEvict: async (eviction) => {
+          const entry = { path: eviction.path, present: existsSync(eviction.path), after: false };
+          seen.push(entry);
+          await settle();
+          // Still there once the hook has yielded: the discard waits for it.
+          entry.after = existsSync(eviction.path);
+        },
+      });
+      const first = ran(await look(pool, await request(newKey(), commits[0]!, baseSha))).value;
+      const second = ran(await look(pool, await request(newKey(), commits[1]!, baseSha)));
+
+      expect(second.evicted?.path).toBe(first.path);
+      expect(seen).toEqual([{ path: first.path, present: true, after: true }]);
+      expect(existsSync(first.path)).toBe(false);
+    });
+
+    it('evicts all the same when the hook fails, and says so', async () => {
+      const commits = ['one', 'two'].map((name, i) =>
+        commitOn(name, baseSha, () => write(dir, `src/f${String(i)}.ts`, `${name}\n`)),
+      );
+      const pool = open({
+        size: 1,
+        onEvict: () => {
+          throw new Error('the service would not stop');
+        },
+      });
+      const first = ran(await look(pool, await request(newKey(), commits[0]!, baseSha))).value;
+      const second = ran(await look(pool, await request(newKey(), commits[1]!, baseSha)));
+
+      expect(second.evicted?.path).toBe(first.path);
+      expect(existsSync(first.path)).toBe(false);
+      expect(records.find((record) => record.msg === 'pool eviction hook failed')).toMatchObject({
+        path: first.path,
+        reason: 'the service would not stop',
+      });
+    });
+
+    it('tells the check how its fill wrote the slot', async () => {
+      const a = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'one\n'));
+      const key = newKey();
+      const pool = open();
+      const cold = ran(await look(pool, await request(key, a, baseSha)));
+      const delta = ran(await look(pool, await request(key, a, baseSha)));
+
+      expect([cold.value.fill, delta.value.fill]).toEqual(['cold', 'delta']);
+      expect([cold.fill, delta.fill]).toEqual(['cold', 'delta']);
+    });
+
     it('can still evict a pair after checking it again', async () => {
       const one = commitOn('one', baseSha, () => write(dir, 'src/f1.ts', 'one\n'));
       const two = commitOn('two', baseSha, () => write(dir, 'src/f2.ts', 'two\n'));

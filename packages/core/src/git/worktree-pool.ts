@@ -92,6 +92,13 @@ export interface WorktreePoolOptions {
   /** Slots kept at once. Each is a full checkout, so this is a disk budget. */
   readonly size?: number;
   readonly logger?: Logger;
+  /**
+   * Called with each eviction before the slot's files are removed, and
+   * awaited: whatever holds the slot open — a type-check service rooted in it —
+   * is let go while the tree it reads is still whole. A hook that fails is
+   * logged and the eviction goes ahead.
+   */
+  readonly onEvict?: (eviction: SlotEviction) => Promise<void> | void;
 }
 
 /** One check's claim on a slot. */
@@ -123,6 +130,8 @@ export interface PoolSlot {
   /** The throwaway commit the slot's detached `HEAD` names. */
   readonly commitSha: string;
   readonly treeOid: string;
+  /** How this check's fill wrote the slot: `cold` wrote every file. */
+  readonly fill: 'cold' | 'delta';
 }
 
 /** What eviction threw away, so a scheduler can price it. */
@@ -284,6 +293,16 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
       buildStateAgeMs: entry.filledAt === null ? 0 : now - entry.filledAt,
       idleMs: now - entry.lastUsedAt,
     };
+    if (options.onEvict !== undefined) {
+      try {
+        await options.onEvict(eviction);
+      } catch (error) {
+        log.warn('pool eviction hook failed', {
+          path,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     discard(canonicalPool, entry.name);
     // Info, not debug: every eviction discards incremental compiler state and
     // forces a cold fill later, and the rate of them is a tuning signal.
@@ -546,6 +565,7 @@ export function createWorktreePool(shadow: ShadowRepo, options: WorktreePoolOpti
             repo: slotRepo(canonicalPool, name),
             commitSha,
             treeOid: request.merged.treeOid,
+            fill: filled.fill,
           });
           return { kind: 'ran', value, ...filled, evicted } as const;
         });

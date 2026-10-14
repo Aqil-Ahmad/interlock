@@ -71,3 +71,21 @@ export interface Toolchain {
 export function toolchainFingerprint(toolchain: Toolchain): string {
   return JSON.stringify([toolchain.analyzer, toolchain.version, ...toolchain.tools]);
 }
+
+/**
+ * A pipeline's toolchain as a string: every analyzer's name and version, in
+ * order, and the tools they run through. What a run's own key is made of, so
+ * an analyzer added to the pipeline, or any one's version bumped, is a miss
+ * for the whole run.
+ *
+ * Flat rather than nested, so that a pipeline of one analyzer has exactly that
+ * analyzer's {@link toolchainFingerprint}: names are strings and versions
+ * numbers, so the flat form cannot be read two ways, and verdicts stored under
+ * a single-analyzer pipeline keep their keys.
+ */
+export function pipelineFingerprint(
+  analyzers: readonly { readonly name: string; readonly version: number }[],
+  tools: readonly string[],
+): string {
+  return JSON.stringify([...analyzers.flatMap(({ name, version }) => [name, version]), ...tools]);
+}
