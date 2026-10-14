@@ -505,6 +505,9 @@ export function createSandboxRunner(options: SandboxRunnerOptions): SandboxRunne
             log.error('sandbox did not start', { name, reason, error: redact(verdict.error) });
             throw unavailable(reason, { command: 'start', error: redact(verdict.error) });
           }
+          case 'detached':
+            log.error('sandbox client ended before the container', { name, durationMs });
+            throw unavailable('docker-failed', { command: 'start', detached: true });
           case 'exited':
             log.debug('sandbox exited', { name, exitCode: verdict.exitCode, durationMs });
             return {

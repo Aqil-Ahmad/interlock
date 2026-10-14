@@ -345,6 +345,11 @@ export interface ContainerState {
   readonly oomKilled: boolean;
   /** Docker's own error starting the container; empty when it started. */
   readonly error: string;
+  /**
+   * Still running when inspected. Its exit code is then Docker's placeholder,
+   * 0, and says nothing about the command.
+   */
+  readonly running: boolean;
 }
 
 /** Read `{{json .State}}`; null when it is not the shape Docker documents. */
@@ -360,10 +365,16 @@ export function parseContainerState(json: string): ContainerState | null {
   const exitCode = state.ExitCode;
   const oomKilled = state.OOMKilled;
   const error = state.Error;
-  if (typeof exitCode !== 'number' || typeof oomKilled !== 'boolean' || typeof error !== 'string') {
+  const running = state.Running;
+  if (
+    typeof exitCode !== 'number' ||
+    typeof oomKilled !== 'boolean' ||
+    typeof error !== 'string' ||
+    typeof running !== 'boolean'
+  ) {
     return null;
   }
-  return { exitCode, oomKilled, error };
+  return { exitCode, oomKilled, error, running };
 }
 
 /** How a run ended, before its output is attached. */
@@ -371,6 +382,7 @@ export type RunVerdict =
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'limit'; readonly limit: 'memory' | 'pids' | 'time' }
   | { readonly kind: 'failed-to-start'; readonly error: string }
+  | { readonly kind: 'detached' }
   | { readonly kind: 'exited'; readonly exitCode: number };
 
 export interface RunFacts {
@@ -390,12 +402,17 @@ export interface RunFacts {
  * Docker's flag, not from exit 137, which a `kill -9` produces too. A fork bomb
  * is never killed by the kernel — `fork` just fails at the limit — so it runs
  * into the wall clock, and a container whose PID limit refused a fork is
- * reported as the PID limit, the cause, rather than the time.
+ * reported as the PID limit, the cause, rather than the time. A container
+ * still running once the attached client has gone — the client died, or a
+ * daemon with live restore dropped the connection — has not finished, so its
+ * exit code is not a result; after a kill it may still be stopping, which is
+ * why the limits and the abort are read first.
  */
 export function classifyRun(facts: RunFacts): RunVerdict {
   if (facts.aborted) return { kind: 'cancelled' };
   if (facts.state.oomKilled) return { kind: 'limit', limit: 'memory' };
   if (facts.timedOut) return { kind: 'limit', limit: facts.pidsLimitHit ? 'pids' : 'time' };
+  if (facts.state.running) return { kind: 'detached' };
   if (facts.state.error !== '') return { kind: 'failed-to-start', error: facts.state.error };
   return { kind: 'exited', exitCode: facts.state.exitCode };
 }

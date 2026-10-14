@@ -355,24 +355,32 @@ describe('unavailable', () => {
 describe('parseContainerState', () => {
   it("reads Docker's state", () => {
     expect(
-      parseContainerState('{"Status":"exited","ExitCode":3,"OOMKilled":false,"Error":""}'),
-    ).toStrictEqual({ exitCode: 3, oomKilled: false, error: '' });
+      parseContainerState(
+        '{"Status":"exited","Running":false,"ExitCode":3,"OOMKilled":false,"Error":""}',
+      ),
+    ).toStrictEqual({ exitCode: 3, oomKilled: false, error: '', running: false });
+    expect(
+      parseContainerState(
+        '{"Status":"running","Running":true,"ExitCode":0,"OOMKilled":false,"Error":""}',
+      ),
+    ).toStrictEqual({ exitCode: 0, oomKilled: false, error: '', running: true });
   });
 
   it.each([
     ['not JSON', 'nope'],
     ['not an object', '3'],
     ['null', 'null'],
-    ['no exit code', '{"OOMKilled":false,"Error":""}'],
-    ['no OOM flag', '{"ExitCode":0,"Error":""}'],
-    ['no error field', '{"ExitCode":0,"OOMKilled":false}'],
+    ['no exit code', '{"Running":false,"OOMKilled":false,"Error":""}'],
+    ['no OOM flag', '{"Running":false,"ExitCode":0,"Error":""}'],
+    ['no error field', '{"Running":false,"ExitCode":0,"OOMKilled":false}'],
+    ['no running flag', '{"ExitCode":0,"OOMKilled":false,"Error":""}'],
   ])('is null for %s', (_, json) => {
     expect(parseContainerState(json)).toBeNull();
   });
 });
 
 describe('classifyRun', () => {
-  const exited: ContainerState = { exitCode: 2, oomKilled: false, error: '' };
+  const exited: ContainerState = { exitCode: 2, oomKilled: false, error: '', running: false };
   const facts = { aborted: false, timedOut: false, pidsLimitHit: false, state: exited };
 
   it('is a result for any exit of its own, non-zero included', () => {
@@ -385,7 +393,7 @@ describe('classifyRun', () => {
         aborted: true,
         timedOut: true,
         pidsLimitHit: true,
-        state: { exitCode: 137, oomKilled: true, error: '' },
+        state: { exitCode: 137, oomKilled: true, error: '', running: true },
       }),
     ).toStrictEqual({ kind: 'cancelled' });
   });
@@ -413,8 +421,27 @@ describe('classifyRun', () => {
 
   it("is a failure to start when Docker recorded an error, never the command's exit", () => {
     expect(
-      classifyRun({ ...facts, state: { exitCode: 127, oomKilled: false, error: 'mounts denied' } }),
+      classifyRun({ ...facts, state: { ...exited, exitCode: 127, error: 'mounts denied' } }),
     ).toEqual({ kind: 'failed-to-start', error: 'mounts denied' });
+  });
+
+  it('is no result for a container still running, whatever exit code Docker shows', () => {
+    const running = { ...exited, exitCode: 0, running: true };
+    expect(classifyRun({ ...facts, state: running })).toEqual({ kind: 'detached' });
+    expect(classifyRun({ ...facts, state: { ...running, error: 'mounts denied' } })).toEqual({
+      kind: 'detached',
+    });
+  });
+
+  it('reads a limit or an abort first, since a killed container may still be stopping', () => {
+    const running = { ...exited, running: true };
+    expect(classifyRun({ ...facts, timedOut: true, state: running })).toEqual({
+      kind: 'limit',
+      limit: 'time',
+    });
+    expect(classifyRun({ ...facts, aborted: true, state: running })).toEqual({
+      kind: 'cancelled',
+    });
   });
 });
 

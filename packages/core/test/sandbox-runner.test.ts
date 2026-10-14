@@ -163,9 +163,10 @@ case "$1" in
     echo out; exit 0 ;;
   inspect)
     case "$mode" in
-      start-error) echo '{"ExitCode":127,"OOMKilled":false,"Error":"error while creating mount source path: mounts denied"}' ;;
+      start-error) echo '{"Running":false,"ExitCode":127,"OOMKilled":false,"Error":"error while creating mount source path: mounts denied"}' ;;
+      detached) echo '{"Running":true,"ExitCode":0,"OOMKilled":false,"Error":""}' ;;
       bad-inspect|hang-bad-inspect) echo "Error: No such object" >&2; exit 1 ;;
-      *) echo '{"ExitCode":0,"OOMKilled":false,"Error":""}' ;;
+      *) echo '{"Running":false,"ExitCode":0,"OOMKilled":false,"Error":""}' ;;
     esac
     exit 0 ;;
   exec)
@@ -217,6 +218,13 @@ exit 2
     );
     expect(error.code).toBe('SANDBOX_UNAVAILABLE');
     expect(error.details.reason).toBe('mount-unreachable');
+  });
+
+  it('is unavailable, never exit 0, when the client ends before the container does', async () => {
+    const error = await rejection(runnerIn('detached').run({ tree: makeTree(), argv: ['true'] }));
+    expect(error.code).toBe('SANDBOX_UNAVAILABLE');
+    expect(error.details.detached).toBe(true);
+    expect(calls().some((call) => call.startsWith('rm '))).toBe(true);
   });
 
   it('reads an image inspect it does not understand as a missing image', async () => {
