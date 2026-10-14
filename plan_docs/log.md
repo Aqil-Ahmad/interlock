@@ -13,6 +13,7 @@ Short entries: done, decided, blocked. Newest first.
 - **Decided — `yarn.lock` is never read; Berry is told by `git grep '^__metadata:'`.** Lockfiles are routinely megabytes, far past the 256 KiB read cap.
 - **Decided — the override's `test` command is not carried.** Nothing reads it before the targeted-tests analyzer; detection answers install, typecheck and build.
 - **Decided — one recursive `ls-tree` per detection.** Which nested manifests matter depends on workspace patterns only known once the root is read, and all of them key the cache. Its output is bounded by the runner's 32 MiB buffer, about 300,000 files.
+- **Mutation: 56 mutations, 48 caught, then 53 after tests.** Precedence, lockfile and Yarn-flavour logic, JSONC reader, size cap, references, workspaces, cache. Three survivors were missing tests — an unclosed block comment followed by text, a reference climbing out of the tree or written absolute that names a real project once clamped — and two were patterns Prettier had reflowed; a solution root with its own `files` was the third gap. Three are equivalent: a null blob size (`ls-tree -l` always sizes a blob), `hasOwn` against plain lookup (`JSON.parse` never sets a prototype, and no key read is on `Object.prototype`), and keying root-file presence (each is already in the read-set a hit re-checks); all three stay as defence.
 
 ## 2026-10-12 — coverage gate, per package
 
