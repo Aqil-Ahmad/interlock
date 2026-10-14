@@ -1,6 +1,6 @@
 # ADR-0007: Sandbox writes and caches
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-10-13
 
 ## Context
@@ -97,7 +97,7 @@ the read-only tree means re-deriving every claim above.
 tmpfs _overlay_; this records a tmpfs beside a read-only tree, since an overlay
 is not possible, and adds a writable per-slot cache mount ADR-0004 does not
 mention. Neither loosens what the host trusts, but both change the posture's
-wording, so this stays `proposed` until someone accepts it.
+wording; accepted by the maintainer on 2026-10-15.
 
 ## Alternatives considered
 
