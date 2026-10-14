@@ -53,9 +53,11 @@ _which branch caused which half_ of each one.
   `--noEmit` only when `declaration` or `composite` is on and nothing else
   was found. **A solution-style tsconfig is checked through its references**,
   depth first, each project once, a cycle tolerated; a reference is read as
-  its sources, as an editor reads it, since a slot holds no build output; and
-  a file listed by a project is reported once, from that project, as `tsc -b`
-  reports it.
+  its sources, as an editor reads it, since a slot holds no build output. The
+  compiler skips a referenced project's sources' semantic check in the
+  programs that import them, so each is judged under its own project's
+  options, as `tsc -b` judges it; a file two unrelated projects both list is
+  reported under each.
 
   **Incremental state** is the language service's programs and a semantic
   diagnostics builder per project, the propagation `tsc --incremental` uses.

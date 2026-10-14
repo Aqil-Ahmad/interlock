@@ -371,9 +371,10 @@ describe('type-check service', () => {
         expect(cold.report.projects).toContain('packages/daemon/tsconfig.json');
         expect([cold.warm, warm.warm, changed.warm]).toEqual([false, true, true]);
         expect(warm.report).toEqual(cold.report);
-        // Measured at about 1% of the cold check; a fifth is the margin for a
-        // loaded machine, and far below what rebuilding the programs costs.
-        expect(warm.durationMs).toBeLessThan(cold.durationMs / 5);
+        // Measured at about 1% of the cold check, and 12% once every check
+        // rebuilds its programs: a twentieth tells the two apart with room
+        // for a loaded machine.
+        expect(warm.durationMs).toBeLessThan(cold.durationMs / 20);
         expect(changed.durationMs).toBeLessThan(cold.durationMs);
         expect(changed.report.files.map((d) => [d.file, d.code])).toEqual([
           ['packages/shared/src/ids.ts', 2322],

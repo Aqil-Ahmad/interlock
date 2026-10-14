@@ -568,16 +568,6 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       projects.delete(configPath);
     }
 
-    // A file listed by a project is that project's to report: a referenced
-    // project's sources are in every program that imports them, and `tsc -b`
-    // reports each file's errors once, from the project it belongs to.
-    const owner = new Map<string, string>();
-    for (const configPath of order) {
-      for (const fileName of projectOf(configPath).fileNames) {
-        if (!owner.has(fileName)) owner.set(fileName, configPath);
-      }
-    }
-
     const config: ts.Diagnostic[] = [];
     const files: ts.Diagnostic[] = [];
     for (const configPath of order) {
@@ -590,7 +580,7 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
         project.parsed = parsed;
         project.settings = { ...parsed.options, noEmit: true };
       }
-      checkProject(project, owner, token, config, files);
+      checkProject(project, token, config, files);
     }
     // One in a file outside the tree — a default `lib` file at odds with
     // something — describes the environment, and is reported with the
@@ -617,7 +607,6 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
    */
   const checkProject = (
     project: Project,
-    owner: ReadonlyMap<string, string>,
     token: ts.CancellationToken,
     config: ts.Diagnostic[],
     files: ts.Diagnostic[],
@@ -635,11 +624,13 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       project.pending = true;
     }
     const builder = project.builder!;
-    const owned = program
-      .getSourceFiles()
-      .filter((file) => (owner.get(file.fileName) ?? project.configPath) === project.configPath);
+    // A referenced project's sources are in every program that imports them;
+    // the compiler skips their semantic check there, as `tsc -b` leaves them
+    // to their own project, and what else they report is reported the same
+    // way twice and deduplicated.
+    const sources = program.getSourceFiles();
 
-    const syntactic = owned.flatMap((file) => program.getSyntacticDiagnostics(file, token));
+    const syntactic = sources.flatMap((file) => program.getSyntacticDiagnostics(file, token));
     files.push(...syntactic);
     const environment =
       syntactic.length > 0
@@ -651,7 +642,7 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       return;
     }
     if (project.pending) drainAffected(project, builder, token);
-    const semantic = owned.flatMap((file) => builder.getSemanticDiagnostics(file, token));
+    const semantic = sources.flatMap((file) => builder.getSemanticDiagnostics(file, token));
     files.push(...semantic);
     for (const diagnostic of semantic) {
       if (gathering !== 'all' && UNRESOLVED.has(diagnostic.code)) {
@@ -660,7 +651,7 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
     }
     const options = program.getCompilerOptions();
     if (semantic.length === 0 && options.noEmit === true && emitsDeclarations(options)) {
-      for (const file of owned) {
+      for (const file of sources) {
         let found = project.declarations.get(file.fileName);
         if (found === undefined) {
           found = program.getDeclarationDiagnostics(file, token);

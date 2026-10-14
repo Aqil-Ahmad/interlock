@@ -452,18 +452,23 @@ describe('typecheck service', () => {
       });
     });
 
-    it('reports a file two projects list once, from the first', () => {
-      const project = { composite: true, lib: ['es2022'], types: [], strict: true };
+    it('reports a file two unrelated projects list under each one’s options', () => {
+      const project = (strict: boolean) =>
+        JSON.stringify({
+          compilerOptions: { composite: true, lib: ['es2022'], types: [], strict },
+          include: ['../shared'],
+        });
       write(tree, {
         'tsconfig.json': JSON.stringify({
           files: [],
-          references: [{ path: 'one' }, { path: 'two' }],
+          references: [{ path: 'lax' }, { path: 'strict' }],
         }),
-        'one/tsconfig.json': JSON.stringify({ compilerOptions: project, include: ['../shared'] }),
-        'two/tsconfig.json': JSON.stringify({ compilerOptions: project, include: ['../shared'] }),
-        'shared/a.ts': 'export const a: number = "";\n',
+        'lax/tsconfig.json': project(false),
+        'strict/tsconfig.json': project(true),
+        'shared/a.ts': 'export function f(x) {\n  return x;\n}\n',
       });
-      expect(codes(open().check())).toEqual([['shared/a.ts', 2322]]);
+      // `tsc -b` builds the file in both, and the strict one says so.
+      expect(codes(open().check())).toEqual([['shared/a.ts', 7006]]);
     });
 
     it('notices a file that has gone', () => {
@@ -544,23 +549,35 @@ describe('typecheck service', () => {
     it('resolves every import again after a check that did not reach the semantic pass', () => {
       write(tree, {
         'tsconfig.json': tsconfig(),
-        'src/a.ts': "import { b } from '../extra/b';\nexport const a: string = b;\nconst c = (;\n",
+        'src/a.ts': "import { b } from '../extra/b';\nexport const a: string = b;\n",
+        'src/c.ts': 'const c = (;\n',
       });
       const service = open();
-      expect(codes(service.check())).toEqual([['src/a.ts', 1109]]);
-      write(tree, { 'extra/b.ts': 'export const b = 1;\n' });
-      write(tree, { 'src/a.ts': "import { b } from '../extra/b';\nexport const a: string = b;\n" });
+      expect(codes(service.check())).toEqual([['src/c.ts', 1109]]);
+      // The importer is untouched: only the gate says its lookup is suspect.
+      write(tree, { 'extra/b.ts': 'export const b = 1;\n', 'src/c.ts': 'export const c = 1;\n' });
       expect(codes(service.check())).toEqual([['src/a.ts', 2322]]);
     });
 
     it('resolves every import again after a check that was cancelled', () => {
-      write(tree, {
+      const files: Record<string, string> = {
         'tsconfig.json': tsconfig(),
-        'src/a.ts': "import { b } from '../extra/b';\nexport const a: string = b;\n",
-      });
+        'src/a.ts': 'export const a = 1;\n',
+      };
+      // Enough files affected by a change to `a` for the checker to poll the
+      // token after the program is built.
+      for (let i = 0; i < 40; i++) {
+        files[`src/f${String(i)}.ts`] =
+          `import { a } from './a';\nexport const v${String(i)} = a;\n`;
+      }
+      write(tree, files);
       const service = open();
-      expect(service.check({ isCancelled: () => true })).toEqual({ kind: 'cancelled' });
-      expect(codes(service.check())).toEqual([['src/a.ts', 2307]]);
+      expect(codes(service.check())).toEqual([]);
+      // The cancelled check is the one that saw this import fail, after its
+      // program was built and before it could write the failure down.
+      write(tree, { 'src/a.ts': "import { b } from '../extra/b';\nexport const a: string = b;\n" });
+      let polls = 0;
+      expect(service.check({ isCancelled: () => (polls += 1) > 1 })).toEqual({ kind: 'cancelled' });
       write(tree, { 'extra/b.ts': 'export const b = 1;\n' });
       expect(codes(service.check())).toEqual([['src/a.ts', 2322]]);
     });
