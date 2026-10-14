@@ -9,6 +9,7 @@
  * An analyzer joins by implementing `Analyzer` and being appended here.
  */
 export * from './analyzer.js';
+export * from './baseline.js';
 export * from './textual.js';
 export * from './typecheck.js';
 
