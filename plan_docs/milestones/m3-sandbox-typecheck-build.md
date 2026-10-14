@@ -282,16 +282,92 @@ _which branch caused which half_ of each one.
   fingerprint must name the TypeScript version.
 
 - [ ] **Baseline differ**
-      **Files:** `packages/core/src/analyzers/`
-      **What:** a merged tree may already be broken for reasons that have nothing to do with the merge. Check the merge-base, branch A alone, branch B alone and the merged tree, then report only diagnostics present in the merge and absent from all three.
-      **Done when:** a repository whose `main` already has type errors produces zero findings for a merge that introduces none, and a genuinely merge-induced error is still reported.
-      **Constraints:** without this every finding is polluted by pre-existing noise, and the false-positive budget is blown on day one. Four compiler runs per pair is also four times the cost, so cache aggressively — A and B alone change only when their own snapshots change.
+      **Files:** `packages/core/src/analyzers/baseline.ts`, `analyzers/index.ts`, `analyzers/typecheck-paths.ts` (the compiler's version), `packages/core/test/baseline.test.ts`, `packages/core/test/support/semantic-fixtures.ts`, ADR-0005 (an amendment), `docs/architecture.md`
+      **What:** a merged tree is often already broken for reasons that have nothing to do with the merge: `main` has type errors, or one branch is broken on its own. Typecheck four trees of a pair — the merge base, A alone, B alone and the merge — and keep only the diagnostics the merge has and none of the other three has. That set is what the merge caused. Not built here: attributing a diagnostic to a branch (the attribution engine), and an analyzer in `ANALYZER_PIPELINE` (the typecheck analyzer).
+
+  **Where the trees come from.** The pair's slot and its service, cycled:
+  each of the merge base, A and B that the cache does not hold is written into
+  the slot by `reset --hard` and checked, then the merge. Each step is an
+  incremental check proportional to the difference between two trees, not a
+  cold one. The slot is back on the merge before the callback returns, on every
+  path, including a cancel and a failure. That changes what ADR-0005 says a slot
+  holds, so the amendment comes before the code. Every tree is checked from the
+  shadow and the pool, never from a user's worktree.
+
+  **Identity.** Line and column move between trees, so they are not part of it.
+  A diagnostic is its code, its file, its flattened message with the tree's own
+  path taken out, and the text of the span it covers, read from the tree's
+  object, never from disk. Files are compared under one name per rename class:
+  every rename between the merge base and each of A, B and the merge, found by
+  the same rename-detecting diff a ChangeSet is made with, run in the shadow
+  over the trees actually checked. The ChangeSet itself is null for a side with
+  no worktree, and can describe another snapshot than the one checked.
+
+  **Comparison.** Multisets, per identity: the merge's copies less the most any
+  explanation without the merge allows — the base's, A's, B's, or A's and B's
+  additions together. Over-explaining only drops a copy, which is the
+  direction the false-positive rule wants.
+
+  **Configuration diagnostics** stay apart from file diagnostics. An error in
+  the configuration of the base, A or B means that tree cannot be judged. One
+  only in the merge is returned as its own list, for the analyzer to report as
+  its own rule; it is never folded into the file set.
+
+  **The cache** holds each tree's report by its tree id, the dependency
+  checkout's tree, the compiler's version, the project and the comparison's
+  version: in memory and bounded, so no migration; a daemon restart pays one
+  check per tree again.
+
+  **Done when:**
+  - a repository whose `main` already has type errors yields no merge-induced
+    diagnostic for a merge that adds none, and a merge-induced error beside
+    them is still reported;
+  - a diagnostic already in A alone, or in B alone, is not merge-induced, even
+    when it moved lines in the merge;
+  - the three semantic pairs of `eval/fixtures/semantic.ts`, mirrored in
+    core's own test fixtures — a rename against a call to the old name, a
+    required parameter against a call without it, a moved export against an
+    import from the old module — each yield exactly one merge-induced
+    diagnostic, and their twins none;
+  - a diagnostic whose line moved because unrelated lines were added above it
+    is the same diagnostic;
+  - two copies of an error in the merge against one in the base leave one
+    merge-induced;
+  - a file renamed on one side is compared under its old name in the trees
+    that have it;
+  - each tree that cannot be checked — deps-dirty, a broken tsconfig in the
+    base, a worker crash — makes the whole result unavailable, never "nothing
+    merge-induced", and names the tree;
+  - checking the pair again with only B changed rechecks B and the merge and
+    neither the base nor A, shown by a counter, with the four-tree and B-only
+    timings on this repository in `log.md`;
+  - a configuration error only in the merge is returned apart from the files.
+
+  **Failure modes:** a pre-existing error reported as new because its identity
+  moved — a line number in the key, a path embedding the slot, a rename seen by
+  one tree's diff and not another's; a cached report served for a tree checked
+  under another dependency tree or compiler; a slot left holding a side after a
+  cancel or a failure, so the next delta fill starts from the wrong tree; an
+  unavailable tree read as an empty report.
+
+  **Constraints:** the false-positive rule — when the comparison is unsure a
+  diagnostic is new, it is not new; missing a real one is the lesser failure.
+  Hard rule 1: `test:untouched` keeps passing. Hard rule 2: the compiler stays
+  the confined service; nothing here runs repository code. No test of the
+  typecheck runner is weakened to make room. No new dependency in `core`.
+  `eval/` is read, never imported or edited.
 
 - [ ] **Attribution engine**
       **Files:** `packages/core/src/analyzers/`
       **What:** turn a new diagnostic into a statement about two branches. Intersect the error's location and the symbol it names against each branch's ChangeSet to decide which side removed or renamed the thing and which side referenced it.
       **Done when:** the M3 demo case produces "branch A renamed `processRefund`; branch B added a call to the old name" with both spans, rather than a compiler message with a line number.
       **Constraints:** this is the difference between a useful warning and a compiler dump, and it is the hardest engineering in the milestone. When attribution is ambiguous, report the finding with lower confidence rather than guessing a branch — a wrong accusation costs more agent trust than a vague one. **Rule names and span attribution follow the labels in `eval/fixtures/semantic.ts`,** which were written first and are read-only: the rules are `rename-vs-callsite`, `signature-vs-caller` and `moved-export-vs-import` — never a compiler code such as `TS2554` — and the spans put the branch that changed a declaration on that declaration, and the branch holding the stale reference on the reference. An analyzer that names its findings otherwise scores recall 0 against a set nobody can edit, and looks broken when it is not.
+
+- [ ] **Typecheck analyzer in the pipeline**
+      **Files:** `packages/core/src/analyzers/` (the analyzer), `analyzers/index.ts`, `packages/daemon/src/scheduler/run-pipeline.ts`, `eval/` (its floor)
+      **What:** the analyzer that combines the baseline differ with the attribution engine and joins `ANALYZER_PIPELINE`: a merge-induced diagnostic becomes a Finding with both spans, a configuration error only in the merge one of its own rule, and an unavailable tree `infra-failure`. Its toolchain fingerprint names the TypeScript version, and its Findings carry reconciliation keys. The daemon constructs the registry and the differ, wires the pool's `onEvict` to `release` and stops both on `close()`.
+      **Done when:** the M3 demo case is a Finding in a daemon run, the twins are clean, and its floor is in the fixture suite.
+      **Constraints:** adding a floor edits `eval/` and needs a human's approval (hard rule 6) before it is made.
 
 - [ ] **Build analyzer**
       **Files:** `packages/core/src/analyzers/build.ts`
