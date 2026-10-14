@@ -11,6 +11,7 @@ Domain logic. Everything here is a function of its inputs; nothing here runs for
 | `src/analyzers/` | the analyzer contract and its implementations                                                                                   |
 | `src/sandbox/`   | the Docker sandbox: the only place merged code runs                                                                             |
 | `src/advisor/`   | Finding ranking                                                                                                                 |
+| `src/sandbox/`   | toolchain detection: package manager, typecheck projects and build, read from the tree without running anything                 |
 
 ## Constraints
 

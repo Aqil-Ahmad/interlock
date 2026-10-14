@@ -98,11 +98,75 @@ _which branch caused which half_ of each one.
     the first task that needs it: the build analyzer for the first two, the
     typecheck runner's sandboxed counterpart for the third.
 
-- [ ] **Toolchain detection**
-      **Files:** `packages/core/src/sandbox/toolchain.ts`
-      **What:** identify the project's package manager and typechecker from `package.json` and `tsconfig.json`, with a per-repo config override.
-      **Done when:** pnpm, npm and yarn TypeScript projects are detected, and anything else reports `TOOLCHAIN_UNSUPPORTED` rather than guessing.
-      **Constraints:** the override's commands come from `.interlock.json`, which is repository content — a command string chosen by whoever writes the repository. Validation there proves it is a string and nothing more. It runs in the sandbox or it does not run.
+- [x] **Toolchain detection**
+      **Files:** `packages/core/src/sandbox/toolchain.ts`, `sandbox/index.ts`, `src/index.ts`, `sandbox/toolchain.test.ts`, `packages/core/test/toolchain.test.ts`, `docs/architecture.md`
+      **What:** from a tree in the shadow, work out the package manager (and the version `packageManager` pins), the install command a slow path would use, the TypeScript projects to typecheck and the build script — answered per capability, with the repository's `.interlock.json` `toolchain` override replacing detection for each command it sets.
+
+  Read from the object database by tree id through `GitRunner` — `ls-tree -r -l`
+  once, then `cat-file blob` — never from disk. It needs no pool slot, so it
+  answers for the merge, either side and the merge base alike; and a symlink is a
+  blob holding a path, so a `package.json` linked at a key file is refused by its
+  mode (`120000`) and never followed, where `fs.readFile` would have read the key.
+  A submodule entry is refused the same way.
+
+  The package manager comes from Corepack's `packageManager` first, then the
+  lockfile. `pnpm-lock.yaml` is pnpm, `package-lock.json` and
+  `npm-shrinkwrap.json` npm, `yarn.lock` Yarn: Berry when `packageManager` names
+  major 2 or later, when `.yarnrc.yml` exists, or when `yarn.lock` opens with
+  `__metadata:`, asked with `git grep` so a megabyte lockfile is never read into
+  memory. Berry is supported only with `nodeLinker: node-modules`; unset, it is
+  Plug'n'Play. Install is `pnpm install --frozen-lockfile`, `npm ci`,
+  `yarn install --frozen-lockfile` or `yarn install --immutable`; build is
+  `<manager> run build` when the root has a `build` script, and `none` when it has
+  not.
+
+  Typecheck needs `typescript` among the root's or a workspace package's
+  dependencies, and projects: a root `tsconfig.json`, unless it is a solution
+  (`"files": []` plus `references`), whose referenced projects are taken instead,
+  nested solutions expanded; with no root tsconfig, each workspace package's own.
+  Workspace packages come from each manager's own source — `pnpm-workspace.yaml`'s
+  `packages:` for pnpm, the `workspaces` field for npm and Yarn — so a package the
+  manager would not install is never named. The YAML is read by a small reader
+  that takes a block list of plain or quoted scalars, or a one-line flow list,
+  and refuses anything richer rather than reading part of it.
+
+  Edge cases and failure modes, each reported as `TOOLCHAIN_UNSUPPORTED` with a
+  reason naming what was found: no `package.json` (naming `deno.json` when that
+  is what stands in for one); Deno; Bun by lockfile or by `packageManager`;
+  `.pnp.cjs`; two managers' lockfiles that `packageManager` does not settle; a
+  `packageManager` that disagrees with the only lockfile; neither a lockfile nor
+  `packageManager` — never a guess at npm; a malformed or unknown
+  `packageManager`; a manifest over the size cap, malformed, not an object, a
+  symlink or a submodule; JSONC the reader cannot parse; a reference that leaves
+  the tree, names nothing in it, has no path, or nests past eight; a workspace
+  tsconfig that is a symlink, which the language service would follow on disk;
+  and JavaScript with no tsconfig, or no `typescript` dependency, for typecheck
+  alone. A reason never carries a value, key or nested path a file chose.
+
+  **Done when:** each of pnpm, npm, Yarn classic and Yarn Berry with
+  `node_modules` linking is detected with its manager, version, typecheck
+  projects, build and install command; each unsupported case above answers its
+  reason, and JavaScript without a tsconfig still detects its build; a
+  solution-style root yields its referenced projects and a monorepo without one
+  yields its workspace packages' tsconfigs; detection on a fixture built from this
+  repository's own manifests names its five referenced packages; an override of
+  one command changes that command alone and each answer says whether it was
+  detected or overridden; an oversized `package.json` is refused with no
+  `cat-file` run; `__proto__` keys cannot supply a field; JSONC comments and
+  trailing commas in `tsconfig.json` parse; a symlinked `package.json` or
+  `tsconfig.json` is refused and its target never appears in the answer; and a
+  second detection of a tree whose manifests did not change runs one `ls-tree`
+  and nothing else.
+  **Constraints:** detection never executes anything — no `pnpm --version`, no
+  `node -e`, no config file evaluated, here or anywhere. Override commands are
+  opaque: validation in `shared` proves they are strings, and here they are
+  carried whole, never split or interpreted, to reach execution only through the
+  sandbox runner. No new dependency in `core` (hard rule 7), so no YAML parser.
+  Workspace globs are matched by scanning, never translated to a regular
+  expression, because a pattern is repository content. The cache keys on the
+  blob ids of what was read and of every manifest whose mere presence changes
+  the answer; keying on the tree id would miss every check, since almost every
+  tree is new.
 
 - [ ] **Typecheck runner**
       **Files:** `packages/core/src/analyzers/typecheck.ts`
