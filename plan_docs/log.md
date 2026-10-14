@@ -4,6 +4,21 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-14 — daemon UX
+
+- **Moved forward from M6 on purpose.** "Daemon UX" depends on nothing in M3, and the M2 demo and dogfooding need a daemon that runs in the background and can be turned off. No other M6 task is touched; "Expand this milestone" stays unticked.
+- **Task rewritten before starting.** The one-line "Daemon UX" task is expanded in M6 to M1's depth, from the issue: the probe, the start handshake, pid confirmation, logs, autostart and purge, each with its tests and what it can breach.
+- **Blocked — loading a real launchd agent was not checked by hand.** This environment is Linux; the generated plist and the `launchctl` argv are tested through the injected runner, and the task stays unticked until someone loads one on macOS and records it here.
+- **Flagged for a human — a third process call site.** `packages/cli/src/processes.ts` spawns the daemon detached and runs `launchctl`/`systemctl`, with argument arrays and no shell; it is added to `ALLOWED_CALL_SITES`, which says adding to it is the review.
+- **Decided — the CLI depends on `@interlock/daemon` at run time,** loaded with a dynamic `import()` inside `interlock daemon` only, so `hook` and `status` do not pay for it. The purge and the hold probe live beside `holdDataDir` and `refuseDataDirInRepos`, and `start` resolves the daemon's entry point through the package. The alternative, a `purge` mode on `interlockd`, would have put a second argv parser and a confirmation prompt into the daemon.
+- **Decided — running is the hold plus the API, never the runtime file.** `isDataDirHeld` opens the lock read-only (`SQLITE_BUSY` is held) and creates nothing; running means held, health answering the token, and its pid equal to the runtime file's. Held but unconfirmed is its own answer (69) and nothing is signalled.
+- **Decided — `start` asks the daemon's own data-dir question first.** The log file it opens for the child's stdio would otherwise be the first thing written into a data dir inside a watched repository; it loads the config and runs `refuseDataDirInRepos` before writing. A config that does not load is reported by the CLI and nothing is launched; the death path is tested with a port already in use, whose remedy the daemon writes.
+- **Decided — the daemon writes its own capped log (`--log-to-file`),** opened at the first record, after the hold; stdout and stderr also go to the file for what precedes the logger. One previous file, 5 MiB each, 0600.
+- **Decided — purge refuses a data dir holding any top-level entry Interlock does not write,** beside the issue's checks (root, home or above it, no `daemon.lock`, inside a watched repository): a lock file alone in a shared directory would otherwise license deleting it. It also refuses a data dir that is a symlink, a known directory name that is not a directory, a config it cannot read, and a mount inside the tree. It walks with `lstat` and unlinks links, and the lock is unlinked last while still held.
+- **Decided — a refused purge exits 64,** like bad arguments: the data dir named is the wrong one. Declining at the prompt exits 0 with nothing deleted.
+- **Found — `node -e <script> --log-to-file` exits 9:** node reads a flag after the script as its own. Test launchers end their arguments with `--`.
+- **Found — the mount refusal can only be exercised as root on Linux;** the test mounts a tmpfs there and is skipped, titled with why, elsewhere.
+
 ## 2026-10-14 — typecheck runner
 
 - **Review — four fixes.** A cold fill now waits on the service until a check reaches the worker, so a cancelled cold check is not lost; checks queued on a stopped service fail with why it stopped, not "released"; `DEFAULT_PROJECT` and `siblingModule` moved to `typecheck-paths.ts`, so importing `@interlock/core` no longer loads `typescript`; a Finding of a kind no analyzer ran fails the run before anything is written. The daemon does not construct the registry yet: wiring it, `onEvict` and `close()` lands with the typecheck analyzer.

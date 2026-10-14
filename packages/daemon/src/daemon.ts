@@ -1,7 +1,8 @@
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createGitRunner } from '@interlock/core';
 import type { GitRunner } from '@interlock/core';
-import { INTERLOCK_PROTOCOL_VERSION, notImplemented } from '@interlock/shared';
+import { INTERLOCK_PROTOCOL_VERSION } from '@interlock/shared';
 import type { DaemonRuntime, EventRecord, InterlockConfig, Logger } from '@interlock/shared';
 import { createApiServer } from './api/index.js';
 import { createChecks } from './check.js';
@@ -12,6 +13,8 @@ import type { DataDirHold } from './data-dir.js';
 import type { ApiServer } from './api/index.js';
 import { EventBus } from './bus/index.js';
 import { createSessionRegistry } from './hooks/index.js';
+import { purgeDataDir } from './purge.js';
+import type { PurgeReport } from './purge.js';
 import { createRetention } from './retention.js';
 import type { Retention } from './retention.js';
 import { publishRuntime, unpublishRuntime } from './runtime-file.js';
@@ -58,8 +61,14 @@ export interface Daemon {
   start(): Promise<void>;
   /** Graceful stop: drain runs, dispose shadow worktrees, close the store. */
   stop(): Promise<void>;
-  /** Stop and delete all Interlock data on this machine. */
-  purge(): Promise<void>;
+  /**
+   * Stop, then delete this daemon's data dir: database, token, runtime file,
+   * logs, shadow clones and worktree pool.
+   *
+   * Refuses, before deleting anything, a directory that does not look like
+   * Interlock's or sits inside a watched repository.
+   */
+  purge(): Promise<PurgeReport>;
   /**
    * What was published for clients to find, or `null` when not running.
    *
@@ -156,11 +165,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return stopping;
     },
 
-    purge(): Promise<void> {
-      // Declared, not written: the kill switch belongs with the daemon UX work.
-      // Raised through a promise rather than thrown, because the signature says
-      // it returns one and a caller attaching `.catch` would never see it.
-      return Promise.resolve().then(() => notImplemented('purge'));
+    async purge(): Promise<PurgeReport> {
+      await this.stop();
+      // Takes the hold itself, so nothing starts between this stop and the
+      // deletion — this daemon included.
+      return purgeDataDir(config.dataDir, {
+        repos: () => config.repos,
+        runner: options.runner ?? createGitRunner(),
+        home: homedir(),
+        logger: log,
+      });
     },
   };
 

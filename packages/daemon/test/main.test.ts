@@ -4,7 +4,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
+  statSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -57,8 +59,8 @@ describe('interlockd', () => {
   };
 
   /** The daemon, as a process, with the environment the test chooses. */
-  const daemon = (): ReturnType<typeof spawn> =>
-    spawn(TSX, ['--tsconfig', TSCONFIG, MAIN], {
+  const daemon = (...args: string[]): ReturnType<typeof spawn> =>
+    spawn(TSX, ['--tsconfig', TSCONFIG, MAIN, ...args], {
       env: { ...process.env, INTERLOCK_DATA_DIR: dataDir },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -114,6 +116,36 @@ describe('interlockd', () => {
     // The part a person can act on, carried rather than flattened away.
     expect(record.remedy).toContain(configPath(dataDir));
     expect(existsSync(runtimePath(dataDir))).toBe(false);
+  }, 30_000);
+
+  it('refuses an option it does not take, before it touches the data dir', async () => {
+    const run = await finished(daemon('--log-to-fil'));
+    expect(run.code).toBe(1);
+    const record = JSON.parse(run.stderr.trim().split('\n').at(-1) ?? '{}') as { msg?: string };
+    expect(record.msg).toContain('--log-to-fil');
+    expect(readdirSync(dataDir)).toStrictEqual([]);
+  }, 30_000);
+
+  it('logs to the data dir, owner-only, with --log-to-file', async () => {
+    writeFileSync(configPath(dataDir), JSON.stringify({ repos: [], daemon: { port: 0 } }));
+    const child = daemon('--log-to-file');
+    const done = finished(child);
+    await until(() => publishedPid() !== null, 'the daemon to start');
+    strays.add(publishedPid()!);
+    child.kill('SIGTERM');
+    const run = await done;
+
+    expect(run.code).toBe(0);
+    // Records only in the file; stderr keeps what node itself prints.
+    expect(run.stderr).not.toContain('"daemon started"');
+    const path = join(dataDir, 'daemon.log');
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    const messages = readFileSync(path, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => (JSON.parse(line) as { msg: string }).msg);
+    expect(messages).toContain('daemon started');
+    expect(messages).toContain('daemon stopped');
   }, 30_000);
 
   it('refuses a relative INTERLOCK_DATA_DIR with a remedy naming the variable', async () => {

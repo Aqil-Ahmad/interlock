@@ -9,8 +9,8 @@ import {
 } from './support/call-sites.js';
 
 /**
- * The git runner and the sandbox runner are the only places Interlock spawns a
- * process.
+ * The git runner, the sandbox runner and the CLI's daemon launcher are the
+ * only places Interlock spawns a process.
  *
  * That is what makes the read-only promise checkable: one call site, one
  * allowlist, one place it can be broken. A prose rule decays the moment code is

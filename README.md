@@ -32,23 +32,36 @@ Enforced by types and tests, not promises:
 
 ## Quickstart
 
-> Not runnable yet — the scaffold has no implementations.
-
 ```bash
 git clone https://github.com/interlock-ai/interlock.git && cd interlock
 ./scripts/setup.sh          # checks prerequisites, installs, verifies
-pnpm verify                 # build + lint + format + typecheck + test
+pnpm build
+alias interlock="node $PWD/packages/cli/dist/main.js"
 ```
 
-Planned usage:
+Tell the daemon which repositories to watch, then run it in the background:
 
 ```bash
-interlock init              # set up a repo, install agent hooks
-interlock daemon start      # background service
-interlock status            # in-flight branches and open findings
-interlock check A B         # force-check a pair now
-open http://127.0.0.1:47317 # dashboard
+mkdir -p ~/.interlock
+echo '{ "repos": ["/path/to/your/repo"] }' > ~/.interlock/config.json
+
+interlock daemon start           # detached; logs to ~/.interlock/daemon.log
+interlock status                 # in-flight branches, dirty state, agent sessions
+interlock check feature-a feature-b   # merge a pair now and print what conflicts
+interlock daemon logs --follow   # what the daemon is doing
+interlock daemon autostart on    # start it at login (launchd or systemd)
 ```
+
+Turning it off:
+
+```bash
+interlock daemon stop            # stop it
+interlock daemon stop --purge    # stop it, remove autostart, delete everything Interlock stored
+```
+
+`INTERLOCK_DATA_DIR` points every command and the daemon at another data directory.
+
+Still to come: `interlock init` to set up a repository and its agent hooks, and the dashboard.
 
 ## Repository layout
 

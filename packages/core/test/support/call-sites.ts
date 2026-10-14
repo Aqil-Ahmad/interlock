@@ -4,8 +4,8 @@ import { join, relative, sep } from 'node:path';
 /**
  * Where a process may be spawned from.
  *
- * The git runner and the sandbox runner are the only places Interlock invokes
- * anything, and that is what makes its promises checkable: a short allowlist,
+ * The git runner, the sandbox runner and the CLI's daemon launcher are the
+ * only places Interlock invokes anything, and that is what makes its promises checkable: a short allowlist,
  * and nowhere else to break them. This walks shipped source and names anywhere
  * else that so much as mentions the module.
  */
@@ -21,6 +21,9 @@ import { join, relative, sep } from 'node:path';
 export const ALLOWED_CALL_SITES: ReadonlySet<string> = new Set([
   join('packages', 'core', 'src', 'git', 'repo-handle.ts'),
   join('packages', 'core', 'src', 'sandbox', 'runner.ts'),
+  // The CLI starting the daemon detached, and loading or unloading its login
+  // item. Neither runs repository code or git.
+  join('packages', 'cli', 'src', 'processes.ts'),
 ]);
 
 /**

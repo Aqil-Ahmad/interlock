@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { repositoryDirHolding, repositoryDirsOf } from '@interlock/core';
+import { createGitRunner, repositoryDirHolding, repositoryDirsOf } from '@interlock/core';
 import type { GitRunner, UserRepo } from '@interlock/core';
 import { InterlockError } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
@@ -53,7 +53,9 @@ export function ensureDataDir(path: string, logger: Logger): void {
 export async function refuseDataDirInRepos(
   dataDir: string,
   repos: readonly string[],
-  runner: GitRunner,
+  // Defaulted for the CLI, which asks the same question before it writes the
+  // daemon's log into the directory and has no runner of its own.
+  runner: GitRunner = createGitRunner(),
 ): Promise<void> {
   for (const path of repos) {
     // Read-only questions, and the runner reads nothing from a handle but
@@ -159,4 +161,45 @@ export function holdDataDir(path: string, logger: Logger): DataDirHold {
       db.close();
     },
   };
+}
+
+/**
+ * Whether a daemon holds the directory right now, asked without taking it.
+ *
+ * The question every client asks before it trusts the runtime file, which a
+ * crash leaves behind: the hold is released by the kernel however the daemon
+ * died, so it is the one answer that cannot be stale. Read-only and never
+ * creating anything — a lock file that is not there is a directory no daemon
+ * has started in, and asking must not change that.
+ *
+ * @throws InterlockError `CONFIG_INVALID` when the file is there and is not a
+ *         lock this code can read — the same answer `holdDataDir` gives it.
+ */
+export function isDataDirHeld(path: string): boolean {
+  const lockPath = join(path, DATA_DIR_LOCK_FILENAME);
+  if (!existsSync(lockPath)) return false;
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(lockPath, { readOnly: true, timeout: 0 });
+  } catch (error) {
+    throw unreadableLock(path, lockPath, error);
+  }
+  try {
+    // A read needs the shared lock, which the holder's exclusive one refuses.
+    db.exec('SELECT count(*) FROM sqlite_master');
+    return false;
+  } catch (error) {
+    if ((error as { errcode?: number }).errcode === SQLITE_BUSY) return true;
+    throw unreadableLock(path, lockPath, error);
+  } finally {
+    db.close();
+  }
+}
+
+function unreadableLock(path: string, lockPath: string, cause: unknown): InterlockError {
+  return new InterlockError('CONFIG_INVALID', 'The data directory lock could not be read', {
+    cause,
+    details: { dataDir: path, errcode: (cause as { errcode?: number }).errcode ?? null },
+    remedy: `If no Interlock daemon is running, delete ${lockPath} and start again.`,
+  });
 }

@@ -59,6 +59,10 @@ export const INTERLOCK_ERROR_CODES = [
   'STORE_UNAVAILABLE',
   'STORE_MIGRATION_FAILED',
   'DAEMON_UNREACHABLE',
+  /** A daemon that exited, or never answered, before it was up. */
+  'DAEMON_START_FAILED',
+  /** A data dir a purge will not delete: not Interlock's, or not safe to remove. */
+  'PURGE_REFUSED',
   'UNAUTHORIZED',
   'API_REQUEST_INVALID',
   /** The caller hung up before the answer: nothing was wrong with what it asked. */

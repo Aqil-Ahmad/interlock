@@ -586,9 +586,4 @@ describe('daemon', () => {
       await next.stop();
     }
   });
-
-  it('reports purge as unimplemented rather than deleting nothing quietly', async () => {
-    const error = await rejection(daemon.purge());
-    expect(error.code).toBe('NOT_IMPLEMENTED');
-  });
 });

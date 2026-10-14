@@ -604,6 +604,16 @@ export function runtimePath(dataDir: string = DEFAULT_DATA_DIR): string {
 }
 
 /**
+ * Where a daemon started in the background writes its log, 0600.
+ *
+ * One JSON record per line, capped in size with one previous file kept beside
+ * it under the same name and `.1`, so it cannot grow without bound.
+ */
+export function logPath(dataDir: string = DEFAULT_DATA_DIR): string {
+  return join(dataDir, 'daemon.log');
+}
+
+/**
  * Where the API bearer token lives, 0600.
  *
  * Separate from the runtime file because it is minted once and kept: agents and

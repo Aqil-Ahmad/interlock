@@ -94,6 +94,25 @@ export function safeText(value: string): string {
 }
 
 /**
+ * JSON text made inert for a terminal, and still the same JSON.
+ *
+ * `JSON.stringify` escapes C0 but passes DEL, C1 and the bidi controls through
+ * verbatim, and output meant for a pipe is printed to a terminal often enough.
+ * Each is rewritten as a `\u` escape, which a JSON reader decodes back to the
+ * same character — a guarantee `safeText`'s `\x` form cannot give.
+ */
+export function safeJson(json: string): string {
+  let out = '';
+  for (const character of json) {
+    const point = character.codePointAt(0) ?? 0;
+    // C0 is left alone: `JSON.stringify` has already escaped every one inside a
+    // string, so any still here is the indentation's own newline.
+    out += point > 0x7e && unsafe(point) ? `\\u${point.toString(16).padStart(4, '0')}` : character;
+  }
+  return out;
+}
+
+/**
  * Whether a branch's worktree is clean, dirty, or was not readable.
  *
  * `null` is the third state and never folds into the first: an unreachable
