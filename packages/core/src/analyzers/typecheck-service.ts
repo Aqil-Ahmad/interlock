@@ -116,6 +116,7 @@ export interface TypecheckService {
   dispose(): void;
 }
 
+/** As `typecheck-paths`, which this module cannot import. */
 export const DEFAULT_PROJECT = 'tsconfig.json';
 
 /** Node's file system, quietly: an unreadable path is an absent one. */
@@ -468,8 +469,6 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
   };
 
   const createProject = (configPath: string): Project => {
-    // Read only once a check asks the service for its program, by which time
-    // `project` below is assigned.
     // The last two members are read from the host by the language service, as
     // tsserver's projects supply them, though the public declarations list
     // them only on the compiler and watch hosts.
@@ -477,6 +476,8 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       useSourceOfProjectReferenceRedirect(): boolean;
       hasInvalidatedResolutions(path: string): boolean;
     } = {
+      // These read `project`, assigned below, and are called only once a
+      // check asks the service for its program.
       getCompilationSettings: () => project.settings,
       getScriptFileNames: () => project.parsed.fileNames,
       getProjectReferences: () => project.parsed.projectReferences,
@@ -788,15 +789,6 @@ function within(root: string, path: string): boolean {
 
 function hasNodeModules(path: string): boolean {
   return path.split(sep).includes(NODE_MODULES);
-}
-
-/**
- * A module beside `base` by name: `.ts` when `base` is run from source, as
- * under test, and `.js` once built. A worker is started by path, and type
- * stripping cannot follow a `.js` specifier back to a `.ts` file.
- */
-export function siblingModule(base: string, name: string): URL {
-  return new URL(`./${name}.${base.endsWith('.ts') ? 'ts' : 'js'}`, base);
 }
 
 /** The worker's side of the protocol {@link ./typecheck.ts} speaks. */

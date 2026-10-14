@@ -1016,6 +1016,13 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     found: readonly Finding[],
     causes: ReadonlyMap<AnalyzerKind, EventId>,
   ): Promise<Map<Finding, Finding['id']>> => {
+    // Before anything is written: a Finding raised with no event to name as
+    // its cause would break the trail from the log back to the analyzer.
+    for (const finding of found) {
+      if (!causes.has(finding.kind)) {
+        throw new Error(`a ${finding.kind} Finding came from no analyzer that ran`);
+      }
+    }
     // Only textual Findings have a key to be matched by, so only they are
     // reconciled against what is open, and only when the textual analyzer ran.
     const cause = causes.get('textual');

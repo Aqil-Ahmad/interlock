@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { InterlockError, silentLogger } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
 import { DEFAULT_POOL_SIZE } from '../git/worktree-pool.js';
-import { DEFAULT_PROJECT, siblingModule } from './typecheck-service.js';
+import { DEFAULT_PROJECT, siblingModule } from './typecheck-paths.js';
 import type {
   TypecheckReport,
   WorkerInit,
@@ -29,8 +29,8 @@ export type {
  * tree, which is what makes the second check cost the change rather than the
  * repository.
  *
- * Keyed by the tree's path. Today every tree is a pool slot, released when the
- * pool evicts it; a merge base or one side of a pair is a tree like any other.
+ * Keyed by the tree's path. A pool slot is released when the pool evicts it;
+ * a merge base or one side of a pair is a tree like any other.
  */
 
 /** Live services kept at once when the caller does not say: one per pool slot. */
@@ -126,6 +126,14 @@ interface Service {
   holders: number;
   checks: number;
   lastUsedAt: number;
+  /**
+   * A slot filled whole that no check has told the worker about yet. Kept on
+   * the service rather than the request: a cold check cancelled before it was
+   * sent leaves the tree just as rewritten for the next one.
+   */
+  coldPending: boolean;
+  /** Why the service was taken out, for checks still queued on it. */
+  ended: InterlockError | null;
 }
 
 /** The worker beside this module: `src` under test, `dist` once built. */
@@ -166,6 +174,7 @@ export function createTypecheckRegistry(options: TypecheckRegistryOptions = {}):
   /** Take a service out of the registry and fail whatever was waiting on it. */
   const drop = (service: Service, error: InterlockError): void => {
     if (services.get(service.root) === service) services.delete(service.root);
+    service.ended ??= error;
     for (const pending of service.pending.values()) pending.reject(error);
     service.pending.clear();
     wakeWaiters();
@@ -197,6 +206,8 @@ export function createTypecheckRegistry(options: TypecheckRegistryOptions = {}):
       holders: 0,
       checks: 0,
       lastUsedAt: Date.now(),
+      coldPending: false,
+      ended: null,
     };
     // A check is pending until its result: a message for one that is not
     // was failed already, by a release or the worker's death.
@@ -272,7 +283,9 @@ export function createTypecheckRegistry(options: TypecheckRegistryOptions = {}):
   const send = async (service: Service, request: TypecheckRequest): Promise<TypecheckOutcome> => {
     const { signal } = request;
     if (signal?.aborted === true) return { kind: 'cancelled' };
-    if (services.get(service.root) !== service) throw failure(service, 'it was released');
+    if (services.get(service.root) !== service) {
+      throw service.ended ?? failure(service, 'it was released');
+    }
     const id = (nextId += 1);
     const cancel = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
     const flag = new Int32Array(cancel);
@@ -285,7 +298,7 @@ export function createTypecheckRegistry(options: TypecheckRegistryOptions = {}):
       type: 'check',
       id,
       // A fresh service reads every file anyway.
-      cold: warm && request.fill === 'cold',
+      cold: warm && service.coldPending,
       cancel,
     };
     service.worker.ref();
@@ -294,6 +307,7 @@ export function createTypecheckRegistry(options: TypecheckRegistryOptions = {}):
         (resolve, reject) => {
           service.pending.set(id, { started: () => request.onStarted?.(), resolve, reject });
           service.worker.postMessage(message);
+          service.coldPending = false;
         },
       );
       service.checks += 1;
@@ -320,6 +334,10 @@ export function createTypecheckRegistry(options: TypecheckRegistryOptions = {}):
 
   return {
     async check(request: TypecheckRequest): Promise<TypecheckOutcome> {
+      if (request.fill === 'cold') {
+        const existing = services.get(request.root);
+        if (existing !== undefined) existing.coldPending = true;
+      }
       if (request.signal?.aborted === true) return { kind: 'cancelled' };
       const service = await claim(request);
       try {

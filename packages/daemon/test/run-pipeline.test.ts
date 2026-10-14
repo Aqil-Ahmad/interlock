@@ -1049,6 +1049,24 @@ describe('run pipeline', () => {
       expect(published('finding.raised').at(-1)!.causedBy).toBe(analyzed[0]!.id);
     });
 
+    it('raises nothing when a Finding names an analyzer that did not run', async () => {
+      const rogue = stub({
+        analyze: async (context) => {
+          const found = await textualAnalyzer.analyze(context);
+          return {
+            ...found,
+            findings: found.findings.map((f) => ({ ...f, kind: 'build' as const })),
+          };
+        },
+      });
+      const before = published('finding.raised').length;
+
+      await expect(
+        run(new AbortController().signal, using([textualAnalyzer, rogue])),
+      ).rejects.toThrow(/came from no analyzer that ran/u);
+      expect(published('finding.raised')).toHaveLength(before);
+    });
+
     it('answers from the cache only with every analyzer’s verdict', async () => {
       const second = stub();
       const pipelineOf = using([textualAnalyzer, second]);

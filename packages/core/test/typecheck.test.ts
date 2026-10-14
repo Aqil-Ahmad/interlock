@@ -4,13 +4,15 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Worker } from 'node:worker_threads';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTypecheckRegistry } from '../src/analyzers/typecheck.js';
 import type {
   TypecheckOutcome,
   TypecheckRegistry,
   TypecheckReport,
 } from '../src/analyzers/typecheck.js';
+import type { WorkerRequest } from '../src/analyzers/typecheck-service.js';
 import { byPlace, slotFixture, tscDiagnostics } from './support/typecheck-fixtures.js';
 import type { Files, Printed, SlotFixture } from './support/typecheck-fixtures.js';
 
@@ -460,6 +462,32 @@ describe('type-check service', () => {
       });
     });
 
+    it('tells the worker of a cold fill whose own check was cancelled before it was sent', async () => {
+      const repo = await open(base);
+      await repo.inSlot({}, async (slot) => {
+        const request = { root: slot.path, dependencyRoot: repo.user };
+        checked(await registry.check(request));
+        const superseded = new AbortController();
+        superseded.abort();
+        expect(
+          await registry.check({ ...request, fill: 'cold', signal: superseded.signal }),
+        ).toEqual({ kind: 'cancelled' });
+        // What reaches the worker, since a rewrite on this file system changes
+        // a file's version anyway and the report alone cannot tell.
+        const sent = vi.spyOn(Worker.prototype, 'postMessage');
+        try {
+          checked(await registry.check(request));
+          expect(sent.mock.calls.map(([message]) => message as WorkerRequest)).toEqual([
+            expect.objectContaining({ type: 'check', cold: true }),
+          ]);
+          checked(await registry.check(request));
+          expect(sent.mock.calls.at(-1)?.[0]).toMatchObject({ cold: false });
+        } finally {
+          sent.mockRestore();
+        }
+      });
+    });
+
     it('refuses checks once closed', async () => {
       const repo = await open(base);
       await registry.close();
@@ -517,6 +545,20 @@ describe('type-check service', () => {
         registry.check({ root: undefined as unknown as string, dependencyRoot: tmpdir() }),
       ).rejects.toMatchObject({ code: 'ANALYZER_INFRA_FAILURE', infra: true });
       expect(registry.live).toBe(0);
+    });
+
+    it('fails a check queued behind a worker that died with why it died', async () => {
+      const broken = { root: undefined as unknown as string, dependencyRoot: tmpdir() };
+      const [first, queued] = await Promise.allSettled([
+        registry.check(broken),
+        registry.check(broken),
+      ]);
+      expect(first.status).toBe('rejected');
+      expect(queued.status).toBe('rejected');
+      const reason = (settled: PromiseSettledResult<unknown>): unknown =>
+        settled.status === 'rejected' ? (settled.reason as Error).message : null;
+      expect(reason(queued)).toBe(reason(first));
+      expect(reason(queued)).not.toMatch(/released/u);
     });
 
     it('waits for a busy service rather than start one past its bound', async () => {

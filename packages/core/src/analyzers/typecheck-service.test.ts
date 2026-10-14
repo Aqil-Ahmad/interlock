@@ -16,12 +16,13 @@ import ts from 'typescript';
 import {
   Confinement,
   createTypecheckService,
+  DEFAULT_PROJECT,
   matchFilesOf,
   NODE_FILE_SYSTEM,
   readProject,
   serveTypecheck,
-  siblingModule,
 } from './typecheck-service.js';
+import { DEFAULT_PROJECT as REGISTRY_DEFAULT_PROJECT, siblingModule } from './typecheck-paths.js';
 import type {
   HostFileSystem,
   Port,
@@ -635,6 +636,10 @@ describe('typecheck service', () => {
   });
 
   describe('the worker module', () => {
+    it('defaults to the project the registry sends when a request names none', () => {
+      expect(DEFAULT_PROJECT).toBe(REGISTRY_DEFAULT_PROJECT);
+    });
+
     it('is the source file under source, and the built one once built', () => {
       expect(siblingModule('file:///p/src/a/typecheck.ts', 'worker').href).toBe(
         'file:///p/src/a/worker.ts',
