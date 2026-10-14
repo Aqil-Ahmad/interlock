@@ -492,6 +492,14 @@ describe('detectToolchain', () => {
         'lib/tsconfig.json': tsconfig,
       });
       expect(whole.typecheck).toMatchObject({ projects: ['tsconfig.json'] });
+
+      const ownFiles = await detect({
+        'package.json': json(typescriptDev),
+        'pnpm-lock.yaml': '',
+        'tsconfig.json': json({ files: ['index.ts'], references: [{ path: 'lib' }] }),
+        'lib/tsconfig.json': tsconfig,
+      });
+      expect(ownFiles.typecheck).toMatchObject({ projects: ['tsconfig.json'] });
     });
 
     it('refuses a reference that leaves the tree or names nothing in it', async () => {
