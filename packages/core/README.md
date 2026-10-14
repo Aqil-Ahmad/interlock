@@ -9,7 +9,9 @@ Domain logic. Everything here is a function of its inputs; nothing here runs for
 | `src/git/`       | repo/branch/worktree discovery, dirty-state snapshots, shadow clone lifecycle, the per-pair worktree pool, ChangeSet extraction |
 | `src/merge/`     | speculative pairwise merges in the shadow's object database, textual conflict classification                                    |
 | `src/analyzers/` | the analyzer contract and its implementations                                                                                   |
+| `src/sandbox/`   | the Docker sandbox: the only place merged code runs                                                                             |
 | `src/advisor/`   | Finding ranking                                                                                                                 |
+| `src/sandbox/`   | toolchain detection: package manager, typecheck projects and build, read from the tree without running anything                 |
 
 ## Constraints
 

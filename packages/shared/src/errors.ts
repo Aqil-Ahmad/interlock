@@ -8,6 +8,8 @@
  * A refused operation is neither: `GIT_COMMAND_REFUSED` means Interlock's own
  * code asked for something the safety rules forbid, so it is a bug here rather
  * than a broken environment or a property of the repository under analysis.
+`SANDBOX_REFUSED` is the same for a container: a writable mount the host would
+later read, say.
  *
  * `SNAPSHOT_STALE` is not infrastructure either: an object a snapshot names is
  * no longer in the shadow — the shadow was rebuilt since the capture, or the
@@ -42,6 +44,10 @@ export const INTERLOCK_ERROR_CODES = [
   'MERGE_FAILED',
   'SANDBOX_UNAVAILABLE',
   'SANDBOX_TIMEOUT',
+  /** A sandboxed command killed at its memory or process limit: no verdict on the code. */
+  'SANDBOX_LIMIT',
+  /** A sandbox run Interlock's own code asked for and the safety rules forbid. */
+  'SANDBOX_REFUSED',
   'TOOLCHAIN_UNSUPPORTED',
   'ANALYZER_INFRA_FAILURE',
   /** A check that did not land before its deadline: the daemon is busy, not the pair clean. */

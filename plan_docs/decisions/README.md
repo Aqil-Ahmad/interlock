@@ -12,7 +12,8 @@ One record per hard-to-reverse decision: repository strategy, license, storage, 
 | [0004](0004-security-posture.md)                            | Shadow-only writes and sandboxed execution                                         | accepted |
 | [0005](0005-per-pair-worktree-pool.md)                      | Per-pair worktree pool                                                             | accepted |
 | [0006](0006-behavioural-and-undetectable-semantic-cases.md) | Behavioural semantic cases go to the targeted tests; the duplicate is out of scope | accepted |
-| [0007](0007-in-process-typescript-service.md)               | TypeScript in core, as a language service per slot in a worker thread              | proposed |
+| [0007](0007-sandbox-writes-and-caches.md)                   | Sandbox writes and caches                                                          | accepted |
+| [0008](0008-in-process-typescript-service.md)               | TypeScript in core, as a language service per slot in a worker thread              | accepted |
 
 ## How to add one
 

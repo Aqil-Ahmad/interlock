@@ -25,6 +25,10 @@
     "./advisor": {
       "types": "./dist/advisor/index.d.ts",
       "default": "./dist/advisor/index.js"
+    },
+    "./sandbox": {
+      "types": "./dist/sandbox/index.d.ts",
+      "default": "./dist/sandbox/index.js"
     }
   },
   "files": [

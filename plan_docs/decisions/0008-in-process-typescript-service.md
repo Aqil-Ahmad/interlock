@@ -1,6 +1,6 @@
-# ADR-0007: TypeScript in core, as a language service per slot in a worker thread
+# ADR-0008: TypeScript in core, as a language service per slot in a worker thread
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-10-14
 
 ## Context

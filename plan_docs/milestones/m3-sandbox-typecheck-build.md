@@ -24,21 +24,153 @@ _which branch caused which half_ of each one.
       **What:** the tasks below are one line each. Rewrite them to the depth of `m1-watcher-and-git-core.md` — per-task edge cases, failure modes, the tests each needs, and the constraints it can breach by accident.
       **Done when:** every task below carries a `Done when` naming an observable check, and nothing in it contradicts what earlier milestones learned.
 
-- [ ] **Docker sandbox runner**
-      **Files:** `packages/core/src/sandbox/` (create in this milestone, not before)
-      **What:** run a command against a materialised merged tree in a container.
-      **Done when:** the container has no network, runs non-root, drops capabilities, mounts the tree read-only with a writable tmpfs overlay, and is killed at CPU, memory, PID and wall-clock limits.
-      **Constraints:** merged code is agent-written and unreviewed. It never executes on the host, in any code path, including tests.
+- [x] **Docker sandbox runner**
+      **Files:** `packages/core/src/sandbox/` (the runner and its `index.ts`), `packages/core/src/index.ts`, `packages/core/test/sandbox-runner.test.ts`, `packages/shared/src/config.ts` (default image), `packages/shared/src/errors.ts` (codes), ADR-0007, `docs/threat-model.md` (T2, T9), `docs/architecture.md`
+      **What:** the one primitive every execution analyzer uses: run an argument array against a merged tree inside Docker, under fixed isolation and limits, and return what happened. No analyzer is built here.
 
-- [ ] **Toolchain detection**
-      **Files:** `packages/core/src/sandbox/toolchain.ts`
-      **What:** identify the project's package manager and typechecker from `package.json` and `tsconfig.json`, with a per-repo config override.
-      **Done when:** pnpm, npm and yarn TypeScript projects are detected, and anything else reports `TOOLCHAIN_UNSUPPORTED` rather than guessing.
-      **Constraints:** the override's commands come from `.interlock.json`, which is repository content — a command string chosen by whoever writes the repository. Validation there proves it is a string and nothing more. It runs in the sandbox or it does not run.
+  The build and test analyzers run merged, agent-written code nobody has
+  reviewed. Hard rule 2 says it never runs on the host, so the runner is the
+  only way it runs at all. How a check writes — the tree, a tmpfs, a per-slot
+  cache — is ADR-0007, written before the code.
+
+  **Done when:**
+  - _Isolation,_ each shown by a command run in the container: connecting
+    to an outside address fails; the uid is not 0; `CapEff` in
+    `/proc/self/status` is 0 and `NoNewPrivs` is 1; a write to the tree gets
+    `EROFS` and a write to the tmpfs succeeds; no host environment variable
+    reaches the container, and there is no Docker socket in it.
+  - _Limits,_ each killing the container and saying which fired: a fork bomb
+    is held at the PID limit and reported as it; a memory hog is killed and
+    reported as out of memory, read from `docker inspect` before the container
+    is removed, since exit 137 alone cannot tell an OOM kill from a kill
+    signal; a busy loop is killed at the wall-clock limit as
+    `SANDBOX_TIMEOUT`; aborting the run's `AbortSignal` kills the container.
+  - _Normal results:_ a non-zero exit is a result — exit code, stdout and
+    stderr capped with a flag when either was cut, both redacted — never an
+    error. What the exit means is the analyzer's call.
+  - _Infrastructure:_ Docker not installed, its daemon down, the image absent
+    and a mount Docker cannot reach each raise `SANDBOX_UNAVAILABLE` with a
+    remedy. None falls back to the host and none pulls: every run passes
+    `--pull=never`.
+  - _Orphans:_ every container carries a label naming its owner; one left by a
+    crashed daemon is found by that label and removed by `SandboxRunner.reapOrphans`.
+  - _Pinning:_ the default image in `config.ts` is pinned by digest, as T9
+    already claims.
+
+  **Edge cases and the tests they need:**
+  - A command string — a `.interlock.json` toolchain override — reaches Docker
+    only as `['sh', '-c', command]`, run inside the container. A test runs one
+    full of shell metacharacters and shows nothing on the host changed.
+  - A mount path with a comma or a quote: `--mount` is CSV, so fields are
+    quoted rather than joined. A test mounts such a path.
+  - A writable mount of anything the host later reads or runs is refused:
+    writable mounts only under the caller's cache root, which must not overlap
+    the tree or any read-only source. A socket or device is never a source.
+  - Dependency mounts sit read-only at their tree-relative positions under the
+    tree's mount point, so a relative pnpm workspace link resolves into the
+    merged tree, not the user's. The layout calculation is not built here.
+  - The daemon running as root: refused with a remedy rather than run as a
+    fixed uid, since a fixed uid cannot read the 0700 data dir without
+    loosening it (ADR-0007).
+  - Output over the cap, an aborted run, an orphan reaped, a command that
+    exits non-zero: each its own test.
+  - Containers made by tests carry the label and are removed in `afterEach`,
+    even when the test failed. The test image is pinned by digest too.
+
+  **Failure modes:** a container left running after its run — the runner
+  removes it on every path, including create and start failures; a limit
+  reported as an ordinary exit — classification reads `docker inspect` before
+  removal; an unreachable Docker reported as a clean run — it is an infra
+  error, never a result.
+
+  **Constraints:**
+  - Hard rule 2, including tests: no test runs a command outside Docker "to
+    compare".
+  - Hard rule 8: where flags differ from ADR-0004, raise it rather than choose.
+  - No shell on the host: `execFile` and `spawn` with argument arrays only.
+  - Hard rule 7: no new dependency in `core`; the Docker CLI is driven
+    directly. The runner is the second process call site, listed beside the
+    git runner in `test/support/call-sites.ts`.
+  - No silent skips: the sandbox suite reports why it skipped, and fails on
+    Linux CI when Docker is missing.
+  - Not built here: wiring `SandboxRunner.reapOrphans` into daemon start, the
+    per-slot cache's eviction wipe, and the dependency mount layout. Each is
+    the first task that needs it: the build analyzer for the first two, the
+    typecheck runner's sandboxed counterpart for the third.
+
+- [x] **Toolchain detection**
+      **Files:** `packages/core/src/sandbox/toolchain.ts`, `sandbox/index.ts`, `src/index.ts`, `sandbox/toolchain.test.ts`, `packages/core/test/toolchain.test.ts`, `docs/architecture.md`
+      **What:** from a tree in the shadow, work out the package manager (and the version `packageManager` pins), the install command a slow path would use, the TypeScript projects to typecheck and the build script — answered per capability, with the repository's `.interlock.json` `toolchain` override replacing detection for each command it sets.
+
+  Read from the object database by tree id through `GitRunner` — `ls-tree -r -l`
+  once, then `cat-file blob` — never from disk. It needs no pool slot, so it
+  answers for the merge, either side and the merge base alike; and a symlink is a
+  blob holding a path, so a `package.json` linked at a key file is refused by its
+  mode (`120000`) and never followed, where `fs.readFile` would have read the key.
+  A submodule entry is refused the same way.
+
+  The package manager comes from Corepack's `packageManager` first, then the
+  lockfile. `pnpm-lock.yaml` is pnpm, `package-lock.json` and
+  `npm-shrinkwrap.json` npm, `yarn.lock` Yarn: Berry when `packageManager` names
+  major 2 or later, when `.yarnrc.yml` exists, or when `yarn.lock` opens with
+  `__metadata:`, asked with `git grep` so a megabyte lockfile is never read into
+  memory. Berry is supported only with `nodeLinker: node-modules`; unset, it is
+  Plug'n'Play. Install is `pnpm install --frozen-lockfile`, `npm ci`,
+  `yarn install --frozen-lockfile` or `yarn install --immutable`; build is
+  `<manager> run build` when the root has a `build` script, and `none` when it has
+  not.
+
+  Typecheck needs `typescript` among the root's or a workspace package's
+  dependencies, and projects: a root `tsconfig.json`, unless it is a solution
+  (`"files": []` plus `references`), whose referenced projects are taken instead,
+  nested solutions expanded; with no root tsconfig, each workspace package's own.
+  Workspace packages come from each manager's own source — `pnpm-workspace.yaml`'s
+  `packages:` for pnpm, the `workspaces` field for npm and Yarn — so a package the
+  manager would not install is never named. The YAML is read by a small reader
+  that takes a block list of plain or quoted scalars, or a one-line flow list,
+  and refuses anything richer rather than reading part of it.
+
+  Edge cases and failure modes, each reported as `TOOLCHAIN_UNSUPPORTED` with a
+  reason naming what was found: no `package.json` (naming `deno.json` when that
+  is what stands in for one); Deno; Bun by lockfile or by `packageManager`;
+  `.pnp.cjs`; two managers' lockfiles that `packageManager` does not settle; a
+  `packageManager` that disagrees with the only lockfile; neither a lockfile nor
+  `packageManager` — never a guess at npm; a malformed or unknown
+  `packageManager`; a manifest over the size cap, malformed, not an object, a
+  symlink or a submodule; JSONC the reader cannot parse; a reference that leaves
+  the tree, names nothing in it, has no path, or nests past eight; a workspace
+  tsconfig that is a symlink, which the language service would follow on disk;
+  and JavaScript with no tsconfig, or no `typescript` dependency, for typecheck
+  alone. A reason never carries a value, key or nested path a file chose.
+
+  **Done when:** each of pnpm, npm, Yarn classic and Yarn Berry with
+  `node_modules` linking is detected with its manager, version, typecheck
+  projects, build and install command; each unsupported case above answers its
+  reason, and JavaScript without a tsconfig still detects its build; a
+  solution-style root yields its referenced projects and a monorepo without one
+  yields its workspace packages' tsconfigs; detection on a fixture built from this
+  repository's own manifests names its five referenced packages; an override of
+  one command changes that command alone and each answer says whether it was
+  detected or overridden; an oversized `package.json` is refused with no
+  `cat-file` run; `__proto__` keys cannot supply a field; JSONC comments and
+  trailing commas in `tsconfig.json` parse; a symlinked `package.json` or
+  `tsconfig.json` is refused and its target never appears in the answer; and a
+  second detection of a tree whose manifests did not change runs one `ls-tree`
+  and nothing else.
+  **Constraints:** detection never executes anything — no `pnpm --version`, no
+  `node -e`, no config file evaluated, here or anywhere. Override commands are
+  opaque: validation in `shared` proves they are strings, and here they are
+  carried whole, never split or interpreted, to reach execution only through the
+  sandbox runner. No new dependency in `core` (hard rule 7), so no YAML parser.
+  Workspace globs are matched by scanning, never translated to a regular
+  expression, because a pattern is repository content. The cache keys on the
+  blob ids of what was read and of every manifest whose mere presence changes
+  the answer; keying on the tree id would miss every check, since almost every
+  tree is new.
 
 - [ ] **Typecheck runner**
-      **Files:** `packages/core/src/analyzers/typecheck.ts`, `packages/core/src/analyzers/typecheck-service.ts`, `packages/core/src/analyzers/typecheck-worker.ts`, `packages/core/src/git/worktree-pool.ts`, `packages/core/package.json`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/store/verdict-key.ts`, ADR-0007
-      **What:** host the TypeScript language service inside the daemon, one live instance per hot pool slot (ADR-0005), each in a worker thread of its own (ADR-0007). A check of a slot returns structured diagnostics; later checks of the same slot reuse the service's incremental state. Do not spawn `tsc` per check: the measured process floor is 436 ms, against 350 ms of real work for an incremental check. And make the daemon run `ANALYZER_PIPELINE` generically. This task adds no typecheck analyzer to that list: raw diagnostics include every pre-existing error, and reporting them before the baseline differ exists would blow the false-positive budget on day one.
+      **Files:** `packages/core/src/analyzers/typecheck.ts`, `packages/core/src/analyzers/typecheck-service.ts`, `packages/core/src/analyzers/typecheck-worker.ts`, `packages/core/src/git/worktree-pool.ts`, `packages/core/package.json`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/store/verdict-key.ts`, ADR-0008
+      **What:** host the TypeScript language service inside the daemon, one live instance per hot pool slot (ADR-0005), each in a worker thread of its own (ADR-0008). A check of a slot returns structured diagnostics; later checks of the same slot reuse the service's incremental state. Do not spawn `tsc` per check: the measured process floor is 436 ms, against 350 ms of real work for an incremental check. And make the daemon run `ANALYZER_PIPELINE` generically. This task adds no typecheck analyzer to that list: raw diagnostics include every pre-existing error, and reporting them before the baseline differ exists would blow the false-positive budget on day one.
 
   Rewritten before starting, from the issue. **Diagnostics** are code,
   category, the flattened message, the file relative to the slot, start and
@@ -133,7 +265,7 @@ _which branch caused which half_ of each one.
   - a pnpm workspace link resolves into the slot: a fixture whose user copy
     and merged copy of a sibling package differ reports the merged one's error;
   - the longest event-loop stall during a large check is measured both in the
-    daemon's thread and in a worker, and the choice recorded in ADR-0007;
+    daemon's thread and in a worker, and the choice recorded in ADR-0008;
   - a stub second analyzer in the pipeline runs, is recorded, is fingerprinted
     — adding it, or bumping its version, is a miss — and the existing run
     pipeline and cache tests pass unchanged.
@@ -143,7 +275,7 @@ _which branch caused which half_ of each one.
   are ever needed the service moves to a subprocess, never back into the
   daemon. The compiler is Interlock's own pinned `typescript`, never the
   repository's `node_modules` copy, which is files an agent can write. Hard
-  rule 7: `typescript` in `core` is ADR-0007. T3: nothing reads outside the
+  rule 7: `typescript` in `core` is ADR-0008. T3: nothing reads outside the
   three roots. Do not add a typecheck analyzer to `ANALYZER_PIPELINE` here;
   when one joins with the baseline differ it needs reconciliation keys for its
   Findings — reconciliation matches textual Findings only — and its toolchain

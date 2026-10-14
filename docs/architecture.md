@@ -46,6 +46,8 @@ flowchart TB
 
 Two edges carry the security posture: the dotted edge to user worktrees is read-only, and everything executed runs inside the sandbox.
 
+The sandbox is a fresh container per command, created with `--pull=never` and removed on every path. The merged tree is mounted read-only at `/work` and dependencies read-only beneath it; a tmpfs at `/tmp` takes every write and disappears with the container, so nothing a command writes is ever read back by the host. It has no network and no capabilities, runs as the daemon's own uid — never root — and is held to CPU, memory, process and wall-clock limits. A command that exits non-zero is a result for its analyzer to judge; a limit firing or Docker being unreachable is an infrastructure error, never a verdict on the code.
+
 ## Package map
 
 | Package                 | Role                                                  | Depends on                      |
@@ -93,6 +95,8 @@ Each repository's shadow clone is collected in the retention pass: its refresh a
 | Snapshotting dirty state without touching the user's index | `core/src/git/worktree.ts`        | temporary index file; objects only                     |
 | Disk cost of shadow worktrees                              | `core/src/git/shadow.ts`          | one clone per repo, shared objects, quota + GC         |
 | Materialising merged trees cheaply                         | `core/src/git/worktree-pool.ts`   | LRU per-pair slots, `reset --hard` rewrites the delta  |
+| Running merged code without trusting it                    | `core/src/sandbox`                | read-only tree, tmpfs writes, limits read from Docker  |
+| Knowing how a tree installs, typechecks and builds         | `core/src/sandbox/toolchain.ts`   | read from objects, never run; links refused            |
 | Type-checking a slot without stalling or trusting it       | `core/src/analyzers/typecheck*`   | a warm service per slot in a worker, confined reads    |
 | Telling merge-induced errors from pre-existing ones        | `core/src/analyzers`              | baseline diff across base, both branches and the merge |
 | Naming which branch broke which half                       | `core/src/analyzers`              | attribution against both ChangeSets                    |
@@ -105,4 +109,5 @@ Each repository's shadow clone is collected in the retention pass: its refresh a
 - The event log is append-only; there is no update or delete path for events.
 - Analyzer verdicts are cached on the content they judged: the pair in its own order, each side's tree, the merge base, the shadow clone it was merged in, and the analyzer's fingerprint — its own version, the version of every tool it ran through, and the build of the code that merged, classified and redacted. Any change to content, a lockfile included, is another key, and a changed analyzer or toolchain is a miss. Verdicts that describe the environment rather than the content — an infrastructure failure, a timeout — are never cached.
 - Infra failures (`SANDBOX_UNAVAILABLE`, `TOOLCHAIN_UNSUPPORTED`) are never findings.
+- Toolchain detection executes nothing. It reads `package.json`, lockfiles and tsconfigs out of the shadow's object database by tree id, size-capped, so a symlinked manifest is a refused link rather than a followed one, and answers per capability — install, typecheck, build — saying whether each came from the tree or from the repository's `.interlock.json` override. An override command is carried as an opaque string to the sandbox and is never split or run on the host. What it cannot handle — Bun, Deno, Plug'n'Play, lockfiles that disagree — is `TOOLCHAIN_UNSUPPORTED` with the reason, never a guess.
 - A dismissed Finding is written only by dismissing it and by ending its dismissal; a run that read it open before the dismissal landed cannot write it back open. A live dismissal is kept by retention, and its evidence by shadow collection, as an open Finding is.
