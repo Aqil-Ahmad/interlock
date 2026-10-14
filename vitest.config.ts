@@ -76,8 +76,6 @@ export default defineConfig({
         lines: 85,
         'packages/shared/src/**': { statements: 96, branches: 92, lines: 97, functions: 94 },
         'packages/core/src/**': { statements: 98, branches: 94, lines: 99, functions: 98 },
-        // `purge` is the one stub left, one function in four hundred, and it is
-        // already inside the measured number: writing it can only raise it.
         'packages/daemon/src/**': { statements: 95, branches: 89, lines: 96, functions: 96 },
         'packages/cli/src/**': { statements: 89, branches: 84, lines: 90, functions: 79 },
         // No `functions` floor: every tool is still a stub, so the number would
