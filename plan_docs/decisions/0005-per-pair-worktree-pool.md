@@ -119,3 +119,24 @@ What the pool keeps is the `deps-dirty` decision, made against the tree of the
 checkout whose installed dependencies a check borrows: the merged tree is
 compared with it, and a pair whose dependency files differ is skipped before any
 slot is touched.
+
+## Amendment — a slot holds other trees of its pair, within one check
+
+The decision above says a slot holds the pair's merged tree. Telling the errors
+a merge causes from the ones already there needs three more trees of the same
+pair checked — the merge base, A alone and B alone — and each of them differs
+from the merge only in the files the pair changed. So the baseline check cycles
+the pair's own slot through them: each tree the cache does not already hold is
+written in by `reset --hard` and checked by the slot's service, and then the
+merge. Every step is an incremental check proportional to a difference between
+two trees of one pair, where a slot per side would pay a cold fill and a cold
+service for each, and three times the disk.
+
+What stays true: between checks a slot holds the merge. The cycle runs inside
+`withSlot`'s callback, while the check holds the slot alone, and puts the merge
+back before the callback returns, on every path — a cancel and a failure
+included — so the pool's next fill is a delta from the tree it recorded. Every
+commit a slot's `HEAD` names in the meantime is one the shadow already has: the
+merge base, a side's commit or snapshot commit, or the pool's own. A slot's
+`HEAD` is still a root for collection, and a side's commit is checked like any
+other slot `HEAD` before one.
