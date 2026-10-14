@@ -107,7 +107,8 @@ describe('purge', () => {
       // Inspected, never purged: the refusal is the property, and the suite
       // does not bet a machine on it.
       for (const path of ['/', join(base, '..', '..', '..', '..', '..', '..', '..', '..')]) {
-        const error = await rejection(inspectPurge(path, options({ home: '/' })));
+        // The suite's own home, so only the root check stands between.
+        const error = await rejection(inspectPurge(path, options()));
         expect(error.code).toBe('PURGE_REFUSED');
         expect(error.message).toContain('root');
       }
@@ -172,7 +173,10 @@ describe('purge', () => {
       plant(dataDir);
       const link = join(base, 'link');
       symlinkSync(dataDir, link);
-      expect((await rejection(purgeDataDir(link, options()))).code).toBe('PURGE_REFUSED');
+      const error = await rejection(purgeDataDir(link, options()));
+      expect(error.code).toBe('PURGE_REFUSED');
+      // Refused as a link, not merely as something that is not a directory.
+      expect(error.message).toContain('symbolic link');
       expect(existsSync(join(dataDir, DATA_DIR_LOCK_FILENAME))).toBe(true);
     });
 

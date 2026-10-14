@@ -91,7 +91,8 @@ function refused(
 /** Whether `inner` is `outer` or sits below it, on whole path segments. */
 function within(inner: string, outer: string): boolean {
   const path = relative(outer, inner);
-  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+  // `''` is the same directory, and passes all three.
+  return path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path);
 }
 
 /**

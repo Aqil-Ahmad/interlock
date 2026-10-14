@@ -456,6 +456,29 @@ describe('interlock daemon', () => {
       expect(alive(deaf.pid!)).toBe(true);
     });
 
+    it('does not claim a daemon it did not launch', async () => {
+      config({ repos: [], daemon: { port: 0 } });
+      // The launched process starts the real daemon as its own child and
+      // stays: a daemon comes up and answers, and it is not the one launched.
+      const relay = [
+        "const { spawn } = require('node:child_process');",
+        `spawn(process.execPath, ['--import', 'tsx', ${JSON.stringify(MAIN)}, '--log-to-file'], { detached: true, stdio: 'ignore' }).unref();`,
+        'setInterval(() => {}, 1000);',
+      ].join('\n');
+      out = [];
+      err = [];
+      const code = await runDaemon(['start'], {
+        ...io(),
+        launch: () => ({ command: process.execPath, args: ['-e', relay, '--'] }),
+        startTimeoutMs: 8_000,
+      });
+      expect(code).toBe(70);
+      expect(stdout()).not.toContain('The daemon started');
+      expect(stderr()).toContain('did not answer in time');
+      // The daemon that did come up is found, and stopped after the test.
+      expect(published()).not.toBeNull();
+    }, 60_000);
+
     it('says no daemon is running, with 0, when stopped twice', async () => {
       expect(await daemon('stop')).toBe(0);
       expect(stdout()).toContain('No daemon is running');
