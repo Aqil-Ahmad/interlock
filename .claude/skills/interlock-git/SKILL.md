@@ -192,6 +192,10 @@ magnitude more than the merge, and unaffordable per check.
 - Link nothing into a slot. The in-process type checker resolves dependencies
   from the dependency checkout through its host, and a sandboxed command mounts
   what it needs; a host symlink does not exist inside the container.
+- Anything that keeps a slot open — a type-check service rooted in it — is
+  let go through the pool's `onEvict`, which runs before the slot's files are
+  removed and is awaited. A slot says how its fill wrote it (`slot.fill`): a
+  cold fill rewrote every file, so nothing keyed on a file's stat survives it.
 - `.tsbuildinfo` stays in the slot between checks. That persistence is the
   entire reason continuous checking is affordable, so never clear a slot as a
   "cleanup" step.
