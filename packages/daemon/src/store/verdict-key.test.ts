@@ -1,7 +1,7 @@
 import { ulid } from '@interlock/shared';
 import type { BranchRefId } from '@interlock/shared';
 import { describe, expect, it } from 'vitest';
-import { toolchainFingerprint, verdictKey } from './verdict-key.js';
+import { pipelineFingerprint, toolchainFingerprint, verdictKey } from './verdict-key.js';
 import type { VerdictKeyParts } from './verdict-key.js';
 
 describe('verdictKey', () => {
@@ -63,5 +63,29 @@ describe('toolchainFingerprint', () => {
     ['another analyzer', { analyzer: 'typecheck' }],
   ] as const)('changes with %s', (_, change) => {
     expect(toolchainFingerprint({ ...textual, ...change })).not.toBe(toolchainFingerprint(textual));
+  });
+});
+
+describe('pipelineFingerprint', () => {
+  const tools = ['git 2.55.0', 'interlock abc'];
+
+  it('is a lone analyzer’s own fingerprint, so verdicts already stored keep their keys', () => {
+    expect(pipelineFingerprint([{ name: 'textual', version: 1 }], tools)).toBe(
+      toolchainFingerprint({ analyzer: 'textual', version: 1, tools }),
+    );
+  });
+
+  it('changes with any analyzer’s name, version, presence or place, and with the tools', () => {
+    const textual = { name: 'textual', version: 1 };
+    const typecheck = { name: 'typecheck', version: 1 };
+    const prints = [
+      pipelineFingerprint([textual, typecheck], tools),
+      pipelineFingerprint([textual, { ...typecheck, version: 2 }], tools),
+      pipelineFingerprint([textual, { ...typecheck, name: 'build' }], tools),
+      pipelineFingerprint([textual], tools),
+      pipelineFingerprint([typecheck, textual], tools),
+      pipelineFingerprint([textual, typecheck], ['git 2.55.1', 'interlock abc']),
+    ];
+    expect(new Set(prints).size).toBe(prints.length);
   });
 });

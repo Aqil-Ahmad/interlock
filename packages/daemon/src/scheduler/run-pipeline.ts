@@ -1,4 +1,6 @@
 import {
+  ANALYZER_PIPELINE,
+  CLEAN,
   captureDirtyState,
   commitSnapshotInShadow,
   assertObjectId,
@@ -10,11 +12,11 @@ import {
   openUserRepo,
   runRequired,
   speculativeMerge,
-  textualAnalyzer,
   textualFindingContent,
   textualFindingKey,
 } from '@interlock/core';
 import type {
+  Analyzer,
   AnalyzerContext,
   AnalyzerOutcome,
   GitRunner,
@@ -29,6 +31,8 @@ import {
   ulid,
 } from '@interlock/shared';
 import type {
+  AnalyzerKind,
+  AnalyzerResult,
   BranchRef,
   BranchRefId,
   ChangeSet,
@@ -48,7 +52,7 @@ import type {
 } from '@interlock/shared';
 import type { EventBus, Subscription } from '../bus/index.js';
 import type { ShadowRegistry } from '../shadows.js';
-import { toolchainFingerprint, verdictKey } from '../store/index.js';
+import { pipelineFingerprint, toolchainFingerprint, verdictKey } from '../store/index.js';
 import type { CachedVerdict, Store } from '../store/index.js';
 import type { PairCandidate, PairPlan, PairRunRequest, PairRunResult } from './index.js';
 import { pairOverlap } from './overlap.js';
@@ -108,6 +112,8 @@ export interface RunPipelineOptions {
   readonly build?: string;
   /** {@link SNAPSHOT_COMMIT_REUSE_MS} unless given: a bench compressing a day compresses this too. */
   readonly commitReuseMs?: number;
+  /** The analyzers a run runs, in order: {@link ANALYZER_PIPELINE} unless given. */
+  readonly analyzers?: readonly Analyzer[];
 }
 
 /** A branch's content as the watcher last announced it. */
@@ -162,6 +168,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
   const { store, bus, runner, shadows } = options;
   const build = options.build ?? analysisBuildId();
   const commitReuseMs = options.commitReuseMs ?? SNAPSHOT_COMMIT_REUSE_MS;
+  const analyzers = options.analyzers ?? ANALYZER_PIPELINE;
   const log = (options.logger ?? silentLogger).child('run-pipeline');
 
   const announced = new Map<BranchRefId, Announced>();
@@ -368,13 +375,11 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     };
   };
 
-  /** The textual analyzer's fingerprint: its version, the git that merges, and this build. */
-  const textualFingerprint = async (shadow: ShadowRepo): Promise<string> =>
-    toolchainFingerprint({
-      analyzer: textualAnalyzer.name,
-      version: textualAnalyzer.version,
-      tools: [`git ${await gitVersion(runner, shadow)}`, `interlock ${build}`],
-    });
+  /** What every verdict comes through besides its analyzer: the git that merges, and this build. */
+  const toolsOf = async (shadow: ShadowRepo): Promise<readonly string[]> => [
+    `git ${await gitVersion(runner, shadow)}`,
+    `interlock ${build}`,
+  ];
 
   const recapture = async (
     repo: Repo,
@@ -573,17 +578,30 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     const base = await baseOf(handle, idA.headSha, idB.headSha);
     if (base === null) return { kind: 'skipped', reason: 'unrelated' };
 
-    const fingerprint = await textualFingerprint(shadow);
-    const keyOf = (a: Identified, b: Identified, mergeBaseSha: string): string =>
-      verdictKey({
-        fingerprint,
-        branchA: a.branch.id,
-        treeA: a.treeOid,
-        branchB: b.branch.id,
-        treeB: b.treeOid,
-        mergeBaseSha,
-        shadowGeneration: shadow.generation,
-      });
+    const tools = await toolsOf(shadow);
+    const keyUnder =
+      (fingerprint: string) =>
+      (a: Identified, b: Identified, mergeBaseSha: string): string =>
+        verdictKey({
+          fingerprint,
+          branchA: a.branch.id,
+          treeA: a.treeOid,
+          branchB: b.branch.id,
+          treeB: b.treeOid,
+          mergeBaseSha,
+          shadowGeneration: shadow.generation,
+        });
+    // The run's key covers every analyzer in the pipeline, so adding one, or
+    // bumping any one's version, makes content already judged new again.
+    const keyOf = keyUnder(pipelineFingerprint(analyzers, tools));
+    // Each analyzer's verdict is cached under its own fingerprint: one
+    // analyzer's change leaves the others' verdicts standing.
+    const verdictKeysOf = (a: Identified, b: Identified, mergeBaseSha: string): string[] =>
+      analyzers.map((analyzer) =>
+        keyUnder(
+          toolchainFingerprint({ analyzer: analyzer.name, version: analyzer.version, tools }),
+        )(a, b, mergeBaseSha),
+      );
 
     // The verdict's own key, so the two checks agree on what is the same: a
     // pair at unchanged content in a rebuilt clone, or under another toolchain,
@@ -596,13 +614,9 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
       return { kind: 'duplicate', contentKey };
     }
 
-    const cached = await store.getCachedVerdict(contentKey);
-    const origin = cached === null ? null : await store.getRun(cached.runId);
-    if (cached !== null && origin?.mergeOutcome != null) {
-      return reuse(request, signal, repo, [idA, idB], base, contentKey, {
-        ...cached,
-        mergeOutcome: origin.mergeOutcome,
-      });
+    const cached = await cachedRun(verdictKeysOf(idA, idB, base));
+    if (cached !== null) {
+      return reuse(request, signal, repo, [idA, idB], base, contentKey, cached);
     }
 
     const sideA = await materialise(repo, handle, shadow, idA);
@@ -656,7 +670,6 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         { causedBy: started },
       );
 
-      const analyzerStartedAt = Date.now();
       const context: AnalyzerContext = {
         runId: run.id,
         branchA: branchA.id,
@@ -671,24 +684,6 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         logger: log,
         signal,
       };
-      // A clean merge has no textual conflict, which is a verdict rather than
-      // an analyzer that did not apply.
-      const outcome: AnalyzerOutcome = textualAnalyzer.appliesTo(context)
-        ? await textualAnalyzer.analyze(context)
-        : { verdict: 'clean', findings: [] };
-      const analyzerMs = Date.now() - analyzerStartedAt;
-      const analyzed = await bus.publish(
-        {
-          type: 'run.analyzer-completed',
-          repoId: repo.id,
-          at: new Date().toISOString(),
-          runId: run.id,
-          analyzer: 'textual',
-          verdict: outcome.verdict,
-          durationMs: analyzerMs,
-        },
-        { causedBy: mergedEvent },
-      );
       const mergeOutcome = {
         clean: merged.clean,
         conflictedPaths: merged.conflictedPaths,
@@ -697,13 +692,42 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         mergedSha: null,
       };
 
-      if (outcome.verdict === 'infra-failure') {
-        await finish('failed', { mergeOutcome });
-        return {
-          kind: 'infra-failure',
-          component: 'analyzer:textual',
-          message: outcome.diagnostic ?? 'the textual analyzer could not run',
-        };
+      const ran: Ran[] = [];
+      for (const analyzer of analyzers) {
+        // Between analyzers, not before the first: a run superseded during its
+        // merge still reaches its discard point below with what it found.
+        if (ran.length > 0 && signal.aborted) {
+          await finish('superseded', { mergeOutcome });
+          return { kind: 'superseded' };
+        }
+        const startedAt = Date.now();
+        // An analyzer that does not apply has nothing to find in this merge —
+        // a clean merge has no textual conflict — which is a verdict, not a gap.
+        const outcome: AnalyzerOutcome = analyzer.appliesTo(context)
+          ? await analyzer.analyze(context)
+          : CLEAN;
+        const durationMs = Date.now() - startedAt;
+        const event = await bus.publish(
+          {
+            type: 'run.analyzer-completed',
+            repoId: repo.id,
+            at: new Date().toISOString(),
+            runId: run.id,
+            analyzer: analyzer.kind,
+            verdict: outcome.verdict,
+            durationMs,
+          },
+          { causedBy: mergedEvent },
+        );
+        if (outcome.verdict === 'infra-failure') {
+          await finish('failed', { mergeOutcome });
+          return {
+            kind: 'infra-failure',
+            component: `analyzer:${analyzer.name}`,
+            message: outcome.diagnostic ?? `the ${analyzer.name} analyzer could not run`,
+          };
+        }
+        ran.push({ analyzer, outcome, durationMs, event });
       }
 
       // The discard point: a branch in this pair moved while it ran, so what it
@@ -713,27 +737,36 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         return { kind: 'superseded' };
       }
 
-      const findingIds = await reconcileFindings(repo.id, stored, outcome.findings, analyzed);
+      const reconciled = await reconcileFindings(
+        repo.id,
+        stored,
+        ran.flatMap(({ outcome }) => outcome.findings),
+        causesOf(ran),
+      );
+      const findingIds = [...reconciled.values()];
       await store.upsertMergePair({ ...stored, lastRunAt: new Date().toISOString(), stale: false });
-      const result = {
-        analyzer: 'textual',
+      const results = ran.map(({ analyzer, outcome, durationMs }): AnalyzerResult => ({
+        analyzer: analyzer.kind,
         verdict: outcome.verdict,
-        findingIds,
-        durationMs: analyzerMs,
+        findingIds: idsOf(outcome.findings, reconciled),
+        durationMs,
         cached: false,
         diagnostic: outcome.diagnostic ?? null,
-      } as const;
+      }));
       const finished = await finish('complete', {
         mergeOutcome,
         findingIds,
-        analyzerResults: [result],
+        analyzerResults: results,
       });
       // Keyed on what was merged, which a side captured again may have changed.
-      await cacheVerdict(keyOf(sideA, sideB, mergeBaseSha), {
-        result,
-        runId: run.id,
-        findings: outcome.findings,
-      });
+      const verdictKeys = verdictKeysOf(sideA, sideB, mergeBaseSha);
+      for (const [index, { outcome }] of ran.entries()) {
+        await cacheVerdict(verdictKeys[index]!, {
+          result: results[index]!,
+          runId: run.id,
+          findings: outcome.findings,
+        });
+      }
       return {
         kind: 'analysed',
         runId: run.id,
@@ -771,6 +804,28 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         reason: error instanceof Error ? error.message : String(error),
       });
     }
+  };
+
+  /**
+   * Every analyzer's verdict on some content, if the cache holds them all
+   * from one run whose merge outcome is still stored, or null.
+   *
+   * All or nothing: a run answered in part from the cache would still merge,
+   * and verdicts from two runs would put one run's Findings beside another's
+   * merge. A verdict missing — one analyzer's infrastructure failed, and
+   * those are never cached — means the run is made again.
+   */
+  const cachedRun = async (keys: readonly string[]): Promise<CachedRun | null> => {
+    const verdicts: CachedVerdict[] = [];
+    for (const key of keys) {
+      const verdict = await store.getCachedVerdict(key);
+      if (verdict === null) return null;
+      if (verdicts.length > 0 && verdict.runId !== verdicts[0]!.runId) return null;
+      verdicts.push(verdict);
+    }
+    const origin = verdicts.length === 0 ? null : await store.getRun(verdicts[0]!.runId);
+    if (origin?.mergeOutcome == null) return null;
+    return { runId: origin.id, verdicts, mergeOutcome: origin.mergeOutcome };
   };
 
   /**
@@ -864,7 +919,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     sides: readonly [Identified, Identified],
     mergeBaseSha: string,
     contentKey: string,
-    cached: CachedVerdict & { readonly mergeOutcome: MergeOutcome },
+    cached: CachedRun,
   ): Promise<PairRunResult> => {
     const { run, stored, started, finish } = await begin(request, repo, sides, mergeBaseSha);
     try {
@@ -872,19 +927,25 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         await finish('superseded', {});
         return { kind: 'superseded' };
       }
-      const analyzed = await bus.publish(
-        {
-          type: 'run.analyzer-completed',
-          repoId: repo.id,
-          at: new Date().toISOString(),
-          runId: run.id,
-          analyzer: cached.result.analyzer,
-          verdict: cached.result.verdict,
-          durationMs: 0,
-          cachedFrom: cached.runId,
-        },
-        { causedBy: started },
-      );
+      const causes = new Map<AnalyzerKind, EventId>();
+      for (const verdict of cached.verdicts) {
+        causes.set(
+          verdict.result.analyzer,
+          await bus.publish(
+            {
+              type: 'run.analyzer-completed',
+              repoId: repo.id,
+              at: new Date().toISOString(),
+              runId: run.id,
+              analyzer: verdict.result.analyzer,
+              verdict: verdict.result.verdict,
+              durationMs: 0,
+              cachedFrom: cached.runId,
+            },
+            { causedBy: started },
+          ),
+        );
+      }
       // The discard point, as for a run: a branch that moved while the hit was
       // recorded leaves its verdict describing content already gone.
       if (signal.aborted) {
@@ -892,19 +953,26 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         return { kind: 'superseded' };
       }
       const now = new Date().toISOString();
-      const raised = cached.findings.map((finding): Finding => ({
-        ...finding,
-        id: ulid<FindingId>(),
-        runId: run.id,
-        firstSeenAt: now,
-        updatedAt: now,
-      }));
-      const findingIds = await reconcileFindings(repo.id, stored, raised, analyzed);
+      const raised = cached.verdicts.map((verdict) =>
+        verdict.findings.map((finding): Finding => ({
+          ...finding,
+          id: ulid<FindingId>(),
+          runId: run.id,
+          firstSeenAt: now,
+          updatedAt: now,
+        })),
+      );
+      const reconciled = await reconcileFindings(repo.id, stored, raised.flat(), causes);
+      const findingIds = [...reconciled.values()];
       await store.upsertMergePair({ ...stored, lastRunAt: now, stale: false });
       const finished = await finish('complete', {
         mergeOutcome: cached.mergeOutcome,
         findingIds,
-        analyzerResults: [{ ...cached.result, findingIds, cached: true }],
+        analyzerResults: cached.verdicts.map((verdict, index) => ({
+          ...verdict.result,
+          findingIds: idsOf(raised[index]!, reconciled),
+          cached: true,
+        })),
       });
       return {
         kind: 'analysed',
@@ -946,10 +1014,14 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     repoId: RepoId,
     pair: MergePair,
     found: readonly Finding[],
-    cause: EventId,
-  ): Promise<Finding['id'][]> => {
+    causes: ReadonlyMap<AnalyzerKind, EventId>,
+  ): Promise<Map<Finding, Finding['id']>> => {
+    // Only textual Findings have a key to be matched by, so only they are
+    // reconciled against what is open, and only when the textual analyzer ran.
+    const cause = causes.get('textual');
     const now = new Date().toISOString();
     const ofPair = (finding: Finding): boolean =>
+      cause !== undefined &&
       finding.kind === 'textual' &&
       makePairKey(finding.attribution.branchA, finding.attribution.branchB) === pair.key;
     const open = (await store.listOpenFindings(repoId)).filter(ofPair);
@@ -957,7 +1029,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     const dismissed = (await store.listDismissedFindings(repoId)).filter(ofPair);
     const holding = new Set<Finding['id']>();
 
-    const ids: Finding['id'][] = [];
+    const ids = new Map<Finding, Finding['id']>();
     for (const finding of found) {
       const key = textualFindingKey(finding);
       const content = textualFindingContent(finding);
@@ -981,11 +1053,11 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
           runId: previous.runId,
           firstSeenAt: previous.firstSeenAt,
         });
-        ids.push(previous.id);
+        ids.set(finding, previous.id);
         continue;
       }
       await store.raiseFinding(finding);
-      ids.push(finding.id);
+      ids.set(finding, finding.id);
       await bus.publish(
         {
           type: 'finding.raised',
@@ -996,7 +1068,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
           kind: finding.kind,
           rule: finding.rule,
         },
-        { causedBy: cause },
+        { causedBy: causes.get(finding.kind)! },
       );
     }
 
@@ -1017,7 +1089,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
           findingId: gone.id,
           reason: 'no-longer-reproduces',
         },
-        { causedBy: cause },
+        { causedBy: cause! },
       );
     }
 
@@ -1032,7 +1104,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
           findingId: dismissal.id,
           reason: 'no-longer-reproduces',
         },
-        { causedBy: cause },
+        { causedBy: cause! },
       );
     }
     return ids;
@@ -1118,6 +1190,38 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
     planPair,
     runPair,
   };
+}
+
+/** One analyzer's part in a run that merged. */
+interface Ran {
+  readonly analyzer: Analyzer;
+  readonly outcome: AnalyzerOutcome;
+  readonly durationMs: number;
+  /** Its `run.analyzer-completed`: what its Findings were raised by. */
+  readonly event: EventId;
+}
+
+/** A run answered from the cache: every analyzer's verdict, and the merge they came from. */
+interface CachedRun {
+  readonly runId: SpeculativeRunId;
+  /** In pipeline order. */
+  readonly verdicts: readonly CachedVerdict[];
+  readonly mergeOutcome: MergeOutcome;
+}
+
+function causesOf(ran: readonly Ran[]): Map<AnalyzerKind, EventId> {
+  return new Map(ran.map(({ analyzer, event }) => [analyzer.kind, event]));
+}
+
+/** The ids reconciliation gave an analyzer's Findings; a dismissed one raised nothing, and has none. */
+function idsOf(
+  findings: readonly Finding[],
+  reconciled: ReadonlyMap<Finding, Finding['id']>,
+): Finding['id'][] {
+  return findings.flatMap((finding) => {
+    const id = reconciled.get(finding);
+    return id === undefined ? [] : [id];
+  });
 }
 
 /**

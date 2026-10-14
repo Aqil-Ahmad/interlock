@@ -12,8 +12,8 @@ import {
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { createGitRunner, textualAnalyzer } from '@interlock/core';
-import type { GitResult, GitRunner, UserRepo } from '@interlock/core';
+import { CLEAN, createGitRunner, infraFailure, textualAnalyzer } from '@interlock/core';
+import type { Analyzer, AnalyzerContext, GitResult, GitRunner, UserRepo } from '@interlock/core';
 import { createLogger, makePairKey, silentLogger, ulid } from '@interlock/shared';
 import type {
   BranchRef,
@@ -26,6 +26,7 @@ import type {
   Repo,
   RepoId,
   SpanEvidence,
+  SpeculativeRunId,
 } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventBus } from '../src/bus/index.js';
@@ -982,6 +983,184 @@ describe('run pipeline', () => {
       aborted.abort();
 
       expect(await run(aborted.signal)).toEqual({ kind: 'superseded' });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'superseded' });
+    });
+  });
+
+  describe('a pipeline of more than one analyzer', () => {
+    /** A second analyzer that finds nothing, counting its calls and what it was shown. */
+    const stub = (overrides: Partial<Analyzer> = {}): Analyzer & { calls: AnalyzerContext[] } => {
+      const calls: AnalyzerContext[] = [];
+      return {
+        kind: 'typecheck',
+        name: 'stub',
+        version: 1,
+        appliesTo: () => true,
+        analyze: (context) => {
+          calls.push(context);
+          return Promise.resolve(CLEAN);
+        },
+        ...overrides,
+        calls,
+      };
+    };
+
+    const using = (analyzers: readonly Analyzer[]): RunPipeline => {
+      const made = createRunPipeline({
+        store,
+        bus,
+        runner,
+        shadows,
+        logger: silentLogger,
+        analyzers,
+      });
+      made.attach();
+      return made;
+    };
+
+    beforeEach(async () => {
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      writeFileSync(join(base, 'b', 'total.ts'), body('2'));
+      await observe();
+    });
+
+    it('runs every analyzer in order and records each one’s verdict', async () => {
+      const second = stub();
+      const result = await run(new AbortController().signal, using([textualAnalyzer, second]));
+
+      expect(result).toMatchObject({ kind: 'analysed', cached: false, findingCount: 1 });
+      expect(second.calls).toHaveLength(1);
+      expect(second.calls[0]).toMatchObject({ slot: null, merged: { clean: false } });
+      const [finding] = await store.listOpenFindings((await repo()).id);
+      const stored = await store.getRun(finding!.runId);
+      expect(stored!.analyzerResults).toMatchObject([
+        { analyzer: 'textual', verdict: 'findings', findingIds: [finding!.id], cached: false },
+        { analyzer: 'typecheck', verdict: 'clean', findingIds: [], cached: false },
+      ]);
+      const analyzed = published('run.analyzer-completed').slice(-2);
+      expect(analyzed.map((record) => (record.payload as { analyzer: string }).analyzer)).toEqual([
+        'textual',
+        'typecheck',
+      ]);
+      const merged = published('run.merge-completed').at(-1)!;
+      expect(analyzed.every((record) => record.causedBy === merged.id)).toBe(true);
+      // The Finding traces to the analyzer that raised it.
+      expect(published('finding.raised').at(-1)!.causedBy).toBe(analyzed[0]!.id);
+    });
+
+    it('answers from the cache only with every analyzer’s verdict', async () => {
+      const second = stub();
+      const pipelineOf = using([textualAnalyzer, second]);
+      const first = await run(new AbortController().signal, pipelineOf);
+      lastKey = null;
+      const hit = await run(new AbortController().signal, pipelineOf);
+
+      expect(hit).toMatchObject({ kind: 'analysed', cached: true });
+      expect(second.calls).toHaveLength(1);
+      const stored = await store.getRun((hit as { runId: SpeculativeRunId }).runId);
+      expect(stored!.analyzerResults).toMatchObject([
+        { analyzer: 'textual', verdict: 'findings', cached: true },
+        { analyzer: 'typecheck', verdict: 'clean', cached: true },
+      ]);
+      const analyzed = published('run.analyzer-completed').slice(-2);
+      const origin = (first as { runId: SpeculativeRunId }).runId;
+      expect(analyzed.map((record) => record.payload)).toMatchObject([
+        { analyzer: 'textual', cachedFrom: origin },
+        { analyzer: 'typecheck', cachedFrom: origin },
+      ]);
+    });
+
+    it('fingerprints every analyzer: a second one, or its new version, is new content', async () => {
+      const alone = await run(new AbortController().signal, using([textualAnalyzer]));
+      const second = stub();
+      lastKey = null;
+      const joined = await run(new AbortController().signal, using([textualAnalyzer, second]));
+      lastKey = null;
+      const bumped = await run(
+        new AbortController().signal,
+        using([textualAnalyzer, { ...second, version: 2 }]),
+      );
+
+      const keys = [alone, joined, bumped].map(
+        (result) => (result as { contentKey: string }).contentKey,
+      );
+      expect(new Set(keys).size).toBe(3);
+      // Neither the textual verdict nor a pipeline's own can stand in for one
+      // that ran an analyzer they did not.
+      expect(joined).toMatchObject({ kind: 'analysed', cached: false });
+      expect(bumped).toMatchObject({ kind: 'analysed', cached: false });
+      expect(second.calls).toHaveLength(2);
+    });
+
+    it('misses when the analyzers’ verdicts were reached by different runs', async () => {
+      const second = stub();
+      await run(new AbortController().signal, using([textualAnalyzer, second]));
+      lastKey = null;
+      // Rewrites the textual verdict under a new run, and the stub's under its new version.
+      await run(new AbortController().signal, using([textualAnalyzer, { ...second, version: 2 }]));
+      lastKey = null;
+      const back = await run(new AbortController().signal, using([textualAnalyzer, second]));
+
+      expect(back).toMatchObject({ kind: 'analysed', cached: false });
+    });
+
+    it('fails the run at an analyzer that could not run, and caches none of it', async () => {
+      const failing = stub({
+        analyze: () => Promise.resolve(infraFailure('ANALYZER_INFRA_FAILURE: no compiler')),
+      });
+      const result = await run(new AbortController().signal, using([textualAnalyzer, failing]));
+
+      expect(result).toEqual({
+        kind: 'infra-failure',
+        component: 'analyzer:stub',
+        message: 'ANALYZER_INFRA_FAILURE: no compiler',
+      });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
+      expect(await store.listOpenFindings((await repo()).id)).toEqual([]);
+
+      const second = stub();
+      lastKey = null;
+      expect(
+        await run(new AbortController().signal, using([textualAnalyzer, second])),
+      ).toMatchObject({ kind: 'analysed', cached: false });
+      expect(second.calls).toHaveLength(1);
+    });
+
+    it('names the analyzer that could not run when it says nothing of why', async () => {
+      const failing = stub({
+        analyze: () => Promise.resolve({ verdict: 'infra-failure', findings: [] }),
+      });
+      expect(await run(new AbortController().signal, using([failing]))).toEqual({
+        kind: 'infra-failure',
+        component: 'analyzer:stub',
+        message: 'the stub analyzer could not run',
+      });
+    });
+
+    it('records an analyzer that does not apply as clean, without running it', async () => {
+      const idle = stub({ appliesTo: () => false });
+      const result = await run(new AbortController().signal, using([textualAnalyzer, idle]));
+
+      expect(idle.calls).toEqual([]);
+      const stored = await store.getRun((result as { runId: SpeculativeRunId }).runId);
+      expect(stored!.analyzerResults[1]).toMatchObject({ analyzer: 'typecheck', verdict: 'clean' });
+    });
+
+    it('stops between analyzers once the run is superseded', async () => {
+      const moved = new AbortController();
+      const first = stub({
+        analyze: () => {
+          moved.abort();
+          return Promise.resolve(CLEAN);
+        },
+      });
+      const second = stub();
+      const result = await run(moved.signal, using([textualAnalyzer, first, second]));
+
+      expect(result).toEqual({ kind: 'superseded' });
+      expect(second.calls).toEqual([]);
       const started = published('run.started').at(-1)!.payload as { runId: string };
       expect(endOf(started.runId)).toMatchObject({ status: 'superseded' });
     });
