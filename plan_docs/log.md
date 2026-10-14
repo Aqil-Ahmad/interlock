@@ -4,6 +4,26 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-10-13 — Docker sandbox runner
+
+- **ADR-0007 accepted** by the maintainer on 2026-10-15.
+- **Review — the timeout kill no longer waits on its evidence.** A failing pids read skipped `docker kill`, and each read could hold it for the full 30 s call timeout; the reads now have their own try/catch and a 5 s timeout, and the kill always runs.
+- **Task rewritten before starting.** The one-line "Docker sandbox runner" task is expanded in M3 to M1's depth, from the issue: isolation and limits each shown inside a container, infra failures with remedies, orphans, the pinned image, and what is left to later tasks (wiring the orphan reap into daemon start, the cache's eviction wipe, the dependency layout).
+- **Measured — copying a 293 MB, 6,605-file tree into a tmpfs inside the container: 515, 411, 393, 377, 423 ms, median 411 ms.** Synthetic tree at archestra's size, Linux, Docker 29.8.2. An empty container's start and stop is about 285 ms.
+- **Decided, ADR-0007, left `proposed` for a human (hard rule 8):** the tree is read-only at `/work`, writes go to a tmpfs at `/tmp`, a writable per-slot cache only from under a caller-named cache root that overlaps nothing read-only, and the host only ever deletes a cache. ADR-0004's "tmpfs overlay" is not something Docker can do, and its posture does not mention a cache, so both wordings change.
+- **Decided — a daemon running as root is refused with a remedy,** not given a fixed unprivileged uid: that uid could read the slot only if the 0700 data dir were opened to it. The container runs as the daemon's uid and gid.
+- **Found — Docker cannot create a mount point inside a read-only bind mount,** and on a writable one it would create it by writing into the slot. Nested mounts therefore need their mount point already in the tree, as a real directory or file of the source's kind and never through a link; the runner checks that before creating anything.
+- **Found — a fork bomb does not sit at its PID limit.** Forks fail, the failing branches exit, and `docker stats` read 4 processes against a limit of 32. The cgroup's `pids.events` `max` counter does not collapse (97 refusals in two seconds), so on the wall clock the runner reads it with `docker exec`, falling back to `docker stats`; either way the run is a limit, never a result.
+- **Found — `docker start --attach` killed leaves the container running.** The runner kills by name, then the client.
+- **Decided — two error codes: `SANDBOX_LIMIT` (memory, PIDs) and `SANDBOX_REFUSED` (a mount the rules forbid).** `SANDBOX_TIMEOUT` stays the wall clock's; abort is `REQUEST_CANCELLED`.
+- **Decided — the runner is the second listed process call site,** beside the git runner, as the call-site list anticipated.
+- **Decided — the sandbox suite fails on Linux CI when it cannot run** (no Docker, no image, or root) and elsewhere skips with a test titled with the reason. The test image is `node:22-alpine` pinned by digest.
+- **Mutation: 42 mutations, 39 caught, then 3 of 3 after tests.** Survivors, all missing tests: an ignored abort (the wall clock ended the run later; the abort test now has a clock past its own timeout), the memory and PID messages swapped (messages now asserted), the output cap's flag off by one (a run at the cap and one byte over).
+- **Found in review — a container still running when inspected read as exit 0.** `docker start --attach` can end before its container does: the client dies, or a daemon with live restore drops the connection. `.State` then shows `ExitCode` 0, its placeholder, and the run returned a clean result for a command still running. `Running` is now read, and a run with no limit or abort fired whose container is still running is `SANDBOX_UNAVAILABLE`. Mutation: 5 mutations, 5 caught.
+- **Default image pinned:** `node:22-bookworm-slim@sha256:c3de60bf…`, read through `mirror.gcr.io` since Docker Hub was rate-limiting here.
+- **Run as root here the same 16 tests fail as on `dev`, and no others.** As uid 1000 with Docker, only the two git-2.43 stale-snapshot cases fail, as on `dev`; coverage floors hold, `core/src/sandbox` at 99.6 % statements and 100 % lines; `test:untouched` passes.
+- **Residual, noted:** output is cut at the cap before redaction, so a secret straddling the cut can leave a short prefix that no longer matches a pattern.
+
 ## 2026-10-13 — toolchain detection
 
 - **Review — `stripJsonc` was quadratic in trailing commas** (60,000 took 4 s), each one rebuilding the output; it now blanks one piece of an array. Checked against pnpm 11: a `pnpm-workspace.yaml` with no `packages:` is the root project alone, as the reader has it.

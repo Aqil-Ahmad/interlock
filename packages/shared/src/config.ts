@@ -159,7 +159,10 @@ export const DEFAULT_CONFIG: InterlockConfig = {
   },
   sandbox: {
     enabled: true,
-    image: 'node:22-bookworm-slim',
+    // By digest: a tag is moved by whoever publishes it, and the image runs
+    // every check. Docker resolves the digest and ignores the tag beside it.
+    image:
+      'node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392',
     cpuLimit: 2,
     memoryLimitMb: 4096,
     timeoutMs: 180_000,

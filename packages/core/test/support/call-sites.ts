@@ -4,22 +4,23 @@ import { join, relative, sep } from 'node:path';
 /**
  * Where a process may be spawned from.
  *
- * The git runner is the only place Interlock invokes anything, and that is what
- * makes its read-only promise checkable: one call site, one allowlist, one
- * place to break it. This walks shipped source and names anywhere else that
- * so much as mentions the module.
+ * The git runner and the sandbox runner are the only places Interlock invokes
+ * anything, and that is what makes its promises checkable: a short allowlist,
+ * and nowhere else to break them. This walks shipped source and names anywhere
+ * else that so much as mentions the module.
  */
 
 /**
  * Every file allowed to spawn a process, relative to the repository root.
  *
- * A set with one member today. The invariant is not that there is exactly one
- * place — the sandbox that runs merged code will need to start a container, and
- * that cannot live in the git runner — but that every place is deliberate,
- * listed here, and visible in review. Adding to this list is the review.
+ * The invariant is not that there is exactly one place — the sandbox that runs
+ * merged code starts containers, and that cannot live in the git runner — but
+ * that every place is deliberate, listed here, and visible in review. Adding to
+ * this list is the review.
  */
 export const ALLOWED_CALL_SITES: ReadonlySet<string> = new Set([
   join('packages', 'core', 'src', 'git', 'repo-handle.ts'),
+  join('packages', 'core', 'src', 'sandbox', 'runner.ts'),
 ]);
 
 /**
