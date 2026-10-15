@@ -156,6 +156,13 @@ describe('mergeInduced', () => {
       mergeInduced(trees({ a: copies(1, 'src/c.ts'), merge: copies(1, 'src/a.ts') }), regrown)
         .files,
     ).toEqual([]);
+    // The same two paths renamed each way, by two diffs: one class, and no cycle to walk.
+    expect(
+      mergeInduced(trees({ a: copies(1, 'src/x.ts'), merge: copies(1, 'src/y.ts') }), [
+        ['src/x.ts', 'src/y.ts'],
+        ['src/y.ts', 'src/x.ts'],
+      ]).files,
+    ).toEqual([]);
     // An unrelated rename joins nothing else.
     expect(
       mergeInduced(trees({ a: copies(1, 'src/old.ts'), merge: copies(1, 'src/other.ts') }), [
