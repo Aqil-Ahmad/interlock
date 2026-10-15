@@ -281,7 +281,7 @@ _which branch caused which half_ of each one.
   Findings — reconciliation matches textual Findings only — and its toolchain
   fingerprint must name the TypeScript version.
 
-- [ ] **Baseline differ**
+- [x] **Baseline differ**
       **Files:** `packages/core/src/analyzers/baseline.ts`, `analyzers/index.ts`, `analyzers/typecheck-paths.ts` (the compiler's version), `packages/core/test/baseline.test.ts`, `packages/core/test/support/semantic-fixtures.ts`, ADR-0005 (an amendment), `docs/architecture.md`
       **What:** a merged tree is often already broken for reasons that have nothing to do with the merge: `main` has type errors, or one branch is broken on its own. Typecheck four trees of a pair — the merge base, A alone, B alone and the merge — and keep only the diagnostics the merge has and none of the other three has. That set is what the merge caused. Not built here: attributing a diagnostic to a branch (the attribution engine), and an analyzer in `ANALYZER_PIPELINE` (the typecheck analyzer).
 
