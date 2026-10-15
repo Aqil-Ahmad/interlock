@@ -137,7 +137,10 @@ export function mergeInduced(
   };
 }
 
-/** One name per class of paths joined by renames: the least, so the choice is stable. */
+/**
+ * One name per class of paths joined by renames. Which member names a class
+ * does not matter: the name is compared, never shown.
+ */
 function renameClasses(renames: readonly Rename[]): (path: string) => string {
   const parent = new Map<string, string>();
   const find = (path: string): string => {
@@ -148,9 +151,7 @@ function renameClasses(renames: readonly Rename[]): (path: string) => string {
   for (const [from, to] of renames) {
     const one = find(from);
     const two = find(to);
-    if (one === two) continue;
-    if (one < two) parent.set(two, one);
-    else parent.set(one, two);
+    if (one !== two) parent.set(one, two);
   }
   return find;
 }
