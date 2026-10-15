@@ -1,6 +1,6 @@
 import { lstatSync, readdirSync, realpathSync, rmdirSync, unlinkSync } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import type { GitRunner } from '@interlock/core';
 import { InterlockError, isInterlockError } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
@@ -142,7 +142,8 @@ export async function inspectPurge(dataDir: string, options: PurgeOptions): Prom
   // symlinked parent is recognised under any of its names.
   const real = realpathSync(dataDir);
   const home = realpathSync(options.home);
-  if (dirname(real) === real || within(home, real)) {
+  // The root is above every home, so it is refused here too, by the same test.
+  if (within(home, real)) {
     throw refused(
       real,
       'The data directory is the root, the home directory, or above it',
