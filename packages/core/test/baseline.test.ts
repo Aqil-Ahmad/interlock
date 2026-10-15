@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { InterlockError } from '@interlock/shared';
+import type { Logger } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createBaselineDiffer } from '../src/analyzers/baseline.js';
 import type { BaselineDiffer, BaselineOutcome, BaselineTree } from '../src/analyzers/baseline.js';
 import { createTypecheckRegistry } from '../src/analyzers/typecheck.js';
 import type { TypecheckRegistry, TypecheckRequest } from '../src/analyzers/typecheck.js';
 import { createGitRunner } from '../src/git/repo-handle.js';
+import type { GitRunner } from '../src/git/repo-handle.js';
 import { PROJECT, SEMANTIC_CASES, baselineFixture } from './support/semantic-fixtures.js';
 import type { BaselineFixture, Files } from './support/semantic-fixtures.js';
 
@@ -35,6 +37,7 @@ describe('baseline differ', () => {
   let fixture: BaselineFixture | undefined;
   let registry: TypecheckRegistry;
   let checks: string[];
+  let fills: (string | undefined)[];
   let differ: BaselineDiffer;
 
   /** The registry the differ is given, counting checks by the slot's HEAD tree at the time. */
@@ -45,6 +48,7 @@ describe('baseline differ', () => {
           encoding: 'utf8',
         }).trim(),
       );
+      fills.push(request.fill);
       return inner.check(request);
     },
     release: (root) => inner.release(root),
@@ -57,6 +61,7 @@ describe('baseline differ', () => {
   beforeEach(() => {
     registry = createTypecheckRegistry();
     checks = [];
+    fills = [];
     differ = createBaselineDiffer({ runner: createGitRunner(), registry: counting(registry) });
   });
 
@@ -267,11 +272,21 @@ describe('baseline differ', () => {
       );
       const repo = await open({ ...PROJECT, 'src/check.ts': check, 'src/old.ts': old });
       const outcome = await repo.compare(differ, {
-        // A renames the file untouched; B changes the broken call, keeping it
-        // broken. The merge has B's error under A's name, which only B
-        // explains, under the old name.
+        // A renames the file untouched; B rewrites most of it, keeping the
+        // call broken in its own way. The merge has B's error under A's name,
+        // which only B explains, under the old name — and the merge is too
+        // unlike the base for the diff between them to call it a rename, so
+        // only A's own diff joins the two names.
         one: { remove: ['src/old.ts'], write: { 'src/new.ts': old } },
-        two: { write: { 'src/old.ts': old.replace('check("a")', 'check("b")') } },
+        two: {
+          write: {
+            'src/old.ts': lines(
+              'import { check } from "./check";',
+              ...filler.map((line) => line.replace(/= (\d+);/u, '= "$1".length;')),
+              'export const wrong = check("b");',
+            ),
+          },
+        },
       });
       expect(named(outcome)).toEqual([]);
     });
@@ -340,6 +355,14 @@ describe('baseline differ', () => {
       expect(outcome).toMatchObject({ kind: 'unavailable', tree: 'base' });
       // Refused as soon as the base was seen: nothing else was checked.
       expect(checks).toHaveLength(1);
+
+      // And again from the cache, with a side moved on: still nothing checked.
+      checks = [];
+      const again = await repo.compare(differ, {
+        one: { write: { 'src/one.ts': 'export const one: number = "y";\n' } },
+      });
+      expect(again).toMatchObject({ kind: 'unavailable', tree: 'base' });
+      expect(checks).toEqual([]);
     });
 
     it('is unavailable when a side cannot be checked against the installed dependencies', async () => {
@@ -486,5 +509,105 @@ describe('baseline differ', () => {
       expect(again.checked).toEqual([]);
       expect(checks).toEqual([]);
     });
+
+    it('holds no more reports than its bound', async () => {
+      const repo = await open({ ...PROJECT, 'src/a.ts': 'export const a = 1;\n' });
+      const bounded = createBaselineDiffer({
+        runner: createGitRunner(),
+        registry: counting(registry),
+        cacheSize: 2,
+      });
+      await repo.compare(bounded, {
+        one: { write: { 'src/one.ts': 'export const one = 1;\n' } },
+        two: { write: { 'src/two.ts': 'export const two = 2;\n' } },
+      });
+      expect(bounded.cached).toBe(2);
+      expect(() =>
+        createBaselineDiffer({ runner: createGitRunner(), registry, cacheSize: 0 }),
+      ).toThrow(expect.objectContaining({ code: 'CONFIG_INVALID' }));
+    });
+  });
+
+  describe('the slot', () => {
+    it('tells the service a cold fill once, on the first tree it checks', async () => {
+      const repo = await open({ ...PROJECT, 'src/a.ts': 'export const a = 1;\n' });
+      const one = { write: { 'src/one.ts': 'export const one = 1;\n' } };
+      await repo.compare(differ, { one });
+      expect(fills).toEqual(['cold', 'delta', 'delta', 'delta']);
+      fills = [];
+      await repo.compare(differ, {
+        one,
+        two: { write: { 'src/two.ts': 'export const two = 2;\n' } },
+      });
+      expect(fills).toEqual(['delta', 'delta']);
+    });
+
+    it('answers when the slot cannot be put back on the merge, which its next fill corrects', async () => {
+      const repo = await open({ ...PROJECT, 'src/a.ts': 'export const a = 1;\n' });
+      const runner = createGitRunner();
+      let resets = 0;
+      const failingRestore: GitRunner = {
+        run: (repo, args, options) => {
+          if (args[0] === 'reset') {
+            resets += 1;
+            // The first reset moves to the base; the second would move back.
+            if (resets === 2) {
+              return Promise.resolve({ stdout: '', stderr: 'fatal: no', exitCode: 128 });
+            }
+          }
+          return runner.run(repo, args, options);
+        },
+      };
+      const warnings: string[] = [];
+      const logger = recording(warnings);
+      const dying: TypecheckRegistry = {
+        ...registry,
+        check: () =>
+          Promise.reject(
+            new InterlockError('ANALYZER_INFRA_FAILURE', 'The type checker stopped', {
+              infra: true,
+            }),
+          ),
+        release: (root) => registry.release(root),
+        close: () => registry.close(),
+        live: 0,
+      };
+      const differ = createBaselineDiffer({ runner: failingRestore, registry: dying, logger });
+      const outcome = await repo.compare(differ, {
+        one: { write: { 'src/one.ts': 'export const one = 1;\n' } },
+      });
+      expect(outcome).toMatchObject({ kind: 'unavailable', tree: 'base' });
+      expect(warnings).toContain('pool slot not returned to its merge');
+    });
+
+    it('raises an error that is not the environment’s rather than call it unavailable', async () => {
+      const repo = await open({ ...PROJECT, 'src/a.ts': 'export const a = 1;\n' });
+      const broken: TypecheckRegistry = {
+        ...registry,
+        check: () => Promise.reject(new Error('a bug, not an outage')),
+        release: (root) => registry.release(root),
+        close: () => registry.close(),
+        live: 0,
+      };
+      const differ = createBaselineDiffer({ runner: createGitRunner(), registry: broken });
+      await expect(
+        repo.compare(differ, { one: { write: { 'src/one.ts': 'export const one = 1;\n' } } }),
+      ).rejects.toThrow('a bug, not an outage');
+    });
   });
 });
+
+/** A logger keeping each warning's message. */
+function recording(warnings: string[]): Logger {
+  const logger: Logger = {
+    trace: () => undefined,
+    debug: () => undefined,
+    info: () => undefined,
+    warn: (message) => {
+      warnings.push(message);
+    },
+    error: () => undefined,
+    child: () => logger,
+  };
+  return logger;
+}

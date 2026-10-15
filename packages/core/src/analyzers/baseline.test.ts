@@ -98,6 +98,9 @@ describe('mergeInduced', () => {
     { base: 0, a: 1, b: 1, merge: 2, induced: 0 },
     { base: 1, a: 2, b: 2, merge: 3, induced: 0 },
     { base: 1, a: 2, b: 2, merge: 4, induced: 1 },
+    // One side added a copy and the other removed one: either alone explains the merge.
+    { base: 1, a: 2, b: 0, merge: 2, induced: 0 },
+    { base: 1, a: 0, b: 2, merge: 2, induced: 0 },
     // A side fixed one: the merge keeping the base's count is not new.
     { base: 2, a: 1, b: 2, merge: 2, induced: 0 },
     { base: 0, a: 0, b: 0, merge: 3, induced: 3 },
@@ -144,6 +147,15 @@ describe('mergeInduced', () => {
         mergeInduced(trees({ a: copies(1, one), merge: copies(1, two) }), renames).files,
       ).toEqual([]);
     }
+    // A path already joined, joined again from elsewhere: the class grows, nothing leaves it.
+    const regrown: Rename[] = [
+      ['src/b.ts', 'src/c.ts'],
+      ['src/b.ts', 'src/a.ts'],
+    ];
+    expect(
+      mergeInduced(trees({ a: copies(1, 'src/c.ts'), merge: copies(1, 'src/a.ts') }), regrown)
+        .files,
+    ).toEqual([]);
     // An unrelated rename joins nothing else.
     expect(
       mergeInduced(trees({ a: copies(1, 'src/old.ts'), merge: copies(1, 'src/other.ts') }), [
