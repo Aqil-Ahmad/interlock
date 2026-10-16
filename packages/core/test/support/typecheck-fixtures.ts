@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { makePairKey, ulid } from '@interlock/shared';
 import type { BranchRefId, RepoId } from '@interlock/shared';
+import { listTree } from '../../src/analyzers/typecheck.js';
+import type { TreeListing } from '../../src/analyzers/typecheck.js';
 import { createGitRunner } from '../../src/git/repo-handle.js';
 import type { ShadowRepo, UserRepo } from '../../src/git/repo-handle.js';
 import { ensureShadow } from '../../src/git/shadow.js';
@@ -18,7 +20,13 @@ import { speculativeMerge } from '../../src/merge/speculative-merge.js';
  * written into a pool slot. Nothing here type-checks; it only makes trees.
  */
 
-export type Files = Readonly<Record<string, string>>;
+/** File contents by path; a `{ link }` is a symbolic link to that target, committed as one. */
+export type Files = Readonly<Record<string, string | { readonly link: string }>>;
+
+/** What a slot holds, as a check is told it. */
+export function treeOf(slot: PoolSlot): Promise<TreeListing> {
+  return listTree(createGitRunner(), slot.repo, slot.treeOid);
+}
 
 /** Interlock's own `tsc`, the compiler the service is held against. */
 export const TSC = createRequire(import.meta.url).resolve('typescript/bin/tsc');
@@ -38,7 +46,7 @@ export interface SlotFixture {
     use: (slot: PoolSlot) => Promise<T>,
   ): Promise<T>;
   /** Write files into the user's checkout without committing them: installed dependencies. */
-  install(files: Files): void;
+  install(files: Readonly<Record<string, string>>): void;
   link(path: string, target: string): void;
   dispose(): void;
 }
@@ -57,7 +65,8 @@ export async function slotFixture(
   const writeAll = (where: string, files: Files): void => {
     for (const [path, content] of Object.entries(files)) {
       mkdirSync(dirname(join(where, path)), { recursive: true });
-      writeFileSync(join(where, path), content);
+      if (typeof content === 'string') writeFileSync(join(where, path), content);
+      else symlinkSync(content.link, join(where, path));
     }
   };
 

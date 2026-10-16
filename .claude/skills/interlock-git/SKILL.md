@@ -196,6 +196,10 @@ magnitude more than the merge, and unaffordable per check.
   let go through the pool's `onEvict`, which runs before the slot's files are
   removed and is awaited. A slot says how its fill wrote it (`slot.fill`): a
   cold fill rewrote every file, so nothing keyed on a file's stat survives it.
+- A slot's directory is not its tree: `reset --hard` leaves untracked and
+  ignored files where they are. Anything that reads a slot as the merged tree
+  decides what exists from the tree's listing (`listTree`) and keys each file
+  on its blob id, as the type checker does — never on the directory or a stat.
 - `.tsbuildinfo` stays in the slot between checks. That persistence is the
   entire reason continuous checking is affordable, so never clear a slot as a
   "cleanup" step.
