@@ -70,7 +70,7 @@ The path to trace when debugging anything:
 3. **Snapshot.** The dirty tree is captured without touching the user's index — a temporary index file plus `write-tree` — and its objects are written into the shadow clone's store, never the user's. Publishes `branch.snapshot`, naming the tree and the head it was captured against.
 4. **Schedule.** Once the branch has been quiet for the debounce, or at a ceiling if it never is, every pair containing it is marked stale and runs in flight for those pairs are told to discard their results. Pairs whose changes have nothing in common are never merged; the rest are ranked by file overlap and admitted up to the concurrency limit, and a pair already analysed at the same content is not merged again. Publishes `pair.scheduled`.
 5. **Merge.** Both sides' commits — real or snapshot — are merged with `git merge-tree` inside the shadow clone's object database. No checkout, no working directory. Publishes `run.merge-completed`.
-6. **Analyze.** A conflicted merge is already a textual finding. A clean merge is a semantic candidate: the pre-filter asks whether the two branches touched overlapping exported symbols, and only then is the merged tree materialised — into the pair's slot in a small pool of persistent worktrees, updated by delta so incremental compiler state survives between checks — and handed to the compiler, then to the build and targeted tests inside the sandbox. The compiler is Interlock's own TypeScript, hosted as a language service in a worker thread of the daemon, one per hot slot, so a slot's second check costs its change rather than its repository; it loads no plugin and reads nothing outside the slot, the dependency checkout's `node_modules` and its own `lib` files. The daemon runs every analyzer in the pipeline in order, each verdict cached under its own analyzer's fingerprint and the run keyed on all of them. Each step publishes `run.analyzer-completed`.
+6. **Analyze.** A conflicted merge is already a textual finding. A clean merge is a semantic candidate: the pre-filter asks whether the two branches touched overlapping exported symbols, and only then is the merged tree materialised — into the pair's slot in a small pool of persistent worktrees, updated by delta so incremental compiler state survives between checks — and handed to the compiler, then to the build and targeted tests inside the sandbox. The compiler is Interlock's own TypeScript, hosted as a language service in a worker thread of the daemon, one per hot slot, so a slot's second check costs its change rather than its repository; it loads no plugin, sees only the files the merged tree lists — not whatever else the slot keeps — and reads nothing outside them, the dependency checkout's `node_modules` and its own `lib` files. A check that runs past its deadline is asked to stop where it stands, keeping its warm state, and its worker is terminated only if it does not. The daemon runs every analyzer in the pipeline in order, each verdict cached under its own analyzer's fingerprint and the run keyed on all of them. Each step publishes `run.analyzer-completed`.
 7. **Attribute.** Each problem is traced to which side introduced which half — the difference between "TS2304" and "your rename broke a call site the other branch added".
 8. **Record.** Findings are persisted with evidence: spans on both branches, each in that branch's own file; for a textual conflict, the merge it came from — both commits, the merge base and git's conflict type; redacted tool output; symbol trails. Publishes `finding.raised`.
 9. **Advise.** The advisor ranks by severity × confidence and produces Advice within the noise budget.
@@ -89,19 +89,19 @@ Each repository's shadow clone is collected in the retention pass: its refresh a
 
 ## Where the hard parts live
 
-| Problem                                                    | Lives in                          | Notes                                                  |
-| ---------------------------------------------------------- | --------------------------------- | ------------------------------------------------------ |
-| Not melting the CPU with N² pairs                          | `daemon/src/scheduler`            | `notes.md` — debounce, priority, invalidation, budgets |
-| Snapshotting dirty state without touching the user's index | `core/src/git/worktree.ts`        | temporary index file; objects only                     |
-| Disk cost of shadow worktrees                              | `core/src/git/shadow.ts`          | one clone per repo, shared objects, quota + GC         |
-| Materialising merged trees cheaply                         | `core/src/git/worktree-pool.ts`   | LRU per-pair slots, `reset --hard` rewrites the delta  |
-| Running merged code without trusting it                    | `core/src/sandbox`                | read-only tree, tmpfs writes, limits read from Docker  |
-| Knowing how a tree installs, typechecks and builds         | `core/src/sandbox/toolchain.ts`   | read from objects, never run; links refused            |
-| Type-checking a slot without stalling or trusting it       | `core/src/analyzers/typecheck*`   | a warm service per slot in a worker, confined reads    |
-| Telling merge-induced errors from pre-existing ones        | `core/src/analyzers`              | baseline diff across base, both branches and the merge |
-| Naming which branch broke which half                       | `core/src/analyzers`              | attribution against both ChangeSets                    |
-| Not being ignored by agents                                | `mcp-server` + `core/src/advisor` | ranking + rate limits                                  |
-| Not being an attack surface                                | `shared/src/sanitize.ts`          | untrusted content wrapped as data                      |
+| Problem                                                    | Lives in                          | Notes                                                                     |
+| ---------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------- |
+| Not melting the CPU with N² pairs                          | `daemon/src/scheduler`            | `notes.md` — debounce, priority, invalidation, budgets                    |
+| Snapshotting dirty state without touching the user's index | `core/src/git/worktree.ts`        | temporary index file; objects only                                        |
+| Disk cost of shadow worktrees                              | `core/src/git/shadow.ts`          | one clone per repo, shared objects, quota + GC                            |
+| Materialising merged trees cheaply                         | `core/src/git/worktree-pool.ts`   | LRU per-pair slots, `reset --hard` rewrites the delta                     |
+| Running merged code without trusting it                    | `core/src/sandbox`                | read-only tree, tmpfs writes, limits read from Docker                     |
+| Knowing how a tree installs, typechecks and builds         | `core/src/sandbox/toolchain.ts`   | read from objects, never run; links refused                               |
+| Type-checking a slot without stalling or trusting it       | `core/src/analyzers/typecheck*`   | a warm service per slot in a worker, reads confined to the tree's listing |
+| Telling merge-induced errors from pre-existing ones        | `core/src/analyzers`              | baseline diff across base, both branches and the merge                    |
+| Naming which branch broke which half                       | `core/src/analyzers`              | attribution against both ChangeSets                                       |
+| Not being ignored by agents                                | `mcp-server` + `core/src/advisor` | ranking + rate limits                                                     |
+| Not being an attack surface                                | `shared/src/sanitize.ts`          | untrusted content wrapped as data                                         |
 
 ## Data flow invariants
 

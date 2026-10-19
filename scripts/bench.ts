@@ -55,6 +55,9 @@ function main(): void {
     console.log(`  ${budget.id.padEnd(28)} ${budget.budget.padEnd(18)} ${budget.description}`);
   }
   console.log('\nWatcher: pnpm exec tsx scripts/watcher-bench.ts');
+  console.log(
+    'Type checker: pnpm exec tsx scripts/typecheck-bench.ts <checkout> <tsconfig> <file to edit>',
+  );
   console.log('The rest land with the scheduler.');
 }
 

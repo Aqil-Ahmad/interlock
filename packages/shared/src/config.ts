@@ -24,6 +24,7 @@ export interface InterlockConfig {
   readonly scheduler: SchedulerConfig;
   readonly analyzers: AnalyzersConfig;
   readonly sandbox: SandboxConfig;
+  readonly typecheck: TypecheckConfig;
   readonly mcp: McpConfig;
   readonly sessions: SessionsConfig;
   readonly retention: RetentionConfig;
@@ -83,6 +84,27 @@ export interface SandboxConfig {
   readonly network: false;
 }
 
+/**
+ * The in-process type checker: a TypeScript language service per hot pool
+ * slot, each in a worker thread of its own.
+ */
+export interface TypecheckConfig {
+  /**
+   * Heap limit of each worker, in MiB. A program that outgrows it ends that
+   * worker's check as out of memory, naming this setting; the daemon runs on,
+   * and the next check starts a fresh worker.
+   */
+  readonly maxHeapMb: number;
+  /** How long one check may run before it is asked to stop. */
+  readonly deadlineMs: number;
+  /**
+   * How long a check asked to stop — at its deadline, or superseded — has to
+   * stop of its own accord before its worker is terminated. A check that stops
+   * keeps its slot's program warm; a terminated one leaves the next check cold.
+   */
+  readonly graceMs: number;
+}
+
 export interface SessionsConfig {
   /**
    * How long an agent session may go without a hook before it is presumed
@@ -140,6 +162,16 @@ export const RETENTION_MIN_MS = 60 * 60_000;
  */
 export const RETENTION_MAX_MS = 10 * 365 * 24 * 60 * 60_000;
 
+/**
+ * The smallest heap a type-check worker is given, in MiB.
+ *
+ * Below a few MiB V8 cannot deserialize a worker's snapshot at all, and it
+ * aborts the whole process for it rather than the worker; below this a worker
+ * cannot hold the compiler and its standard library, so every check would end
+ * out of memory before reading the tree.
+ */
+export const TYPECHECK_MIN_HEAP_MB = 128;
+
 export const DEFAULT_CONFIG: InterlockConfig = {
   repos: [],
   dataDir: DEFAULT_DATA_DIR,
@@ -168,6 +200,9 @@ export const DEFAULT_CONFIG: InterlockConfig = {
     timeoutMs: 180_000,
     network: false,
   },
+  // The deadline is the typecheck Finding's whole budget: past it, the
+  // Finding is late however the check ends.
+  typecheck: { maxHeapMb: 3072, deadlineMs: 180_000, graceMs: 10_000 },
   mcp: { enabled: true, port: 47318, maxWarningsPerHour: 10 },
   sessions: { staleAfterMs: 5 * 60_000 },
   retention: { windowMs: RETENTION_DEFAULT_MS },
@@ -422,6 +457,7 @@ const CONFIG_SECTIONS = [
   'scheduler',
   'analyzers',
   'sandbox',
+  'typecheck',
   'mcp',
   'sessions',
   'retention',
@@ -639,6 +675,7 @@ export function resolveConfig(input: DeepPartial<InterlockConfig> = {}): Interlo
     scheduler: { ...DEFAULT_CONFIG.scheduler, ...input.scheduler },
     analyzers: { ...DEFAULT_CONFIG.analyzers, ...input.analyzers },
     sandbox: { ...DEFAULT_CONFIG.sandbox, ...input.sandbox, network: false },
+    typecheck: { ...DEFAULT_CONFIG.typecheck, ...input.typecheck },
     mcp: { ...DEFAULT_CONFIG.mcp, ...input.mcp },
     sessions: { ...DEFAULT_CONFIG.sessions, ...input.sessions },
     retention: { ...DEFAULT_CONFIG.retention, ...input.retention },
@@ -741,6 +778,27 @@ export function validateConfig(config: InterlockConfig): string[] {
     'sandbox.timeoutMs',
     'must be >= 1000',
     (n) => n >= 1_000,
+    problems,
+  );
+  requireNumber(
+    config.typecheck.maxHeapMb,
+    'typecheck.maxHeapMb',
+    `must be a whole number >= ${String(TYPECHECK_MIN_HEAP_MB)}`,
+    (n) => Number.isInteger(n) && n >= TYPECHECK_MIN_HEAP_MB,
+    problems,
+  );
+  requireNumber(
+    config.typecheck.deadlineMs,
+    'typecheck.deadlineMs',
+    'must be >= 1000',
+    (n) => n >= 1_000,
+    problems,
+  );
+  requireNumber(
+    config.typecheck.graceMs,
+    'typecheck.graceMs',
+    'must be >= 0',
+    (n) => n >= 0,
     problems,
   );
   requireNumber(

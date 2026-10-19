@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { getHeapStatistics } from 'node:v8';
 import ts from 'typescript';
 
@@ -23,11 +23,12 @@ import ts from 'typescript';
  *    plugin is code the host process loads, and an `extends` into
  *    `node_modules` can introduce one.
  *  - **Reads stay confined.** Every path the compiler asks about goes through
- *    {@link Confinement}: files inside the tree, `node_modules` answered from
- *    the dependency checkout, and Interlock's own `lib` files. Anything else —
- *    a `../../.ssh` in `include`, an absolute path in `paths`, a symlink in
- *    the tree pointing out of it — does not exist as far as the compiler can
- *    tell. `ts.sys` is never consulted, so no default can widen it.
+ *    {@link Confinement}: files the tree's listing holds, `node_modules`
+ *    answered from the dependency checkout, and Interlock's own `lib` files.
+ *    Anything else — a `../../.ssh` in `include`, an absolute path in `paths`,
+ *    a symlink in the tree pointing out of it, build output an earlier tree
+ *    left in the slot — does not exist as far as the compiler can tell.
+ *    `ts.sys` is never consulted, so no default can widen it.
  */
 
 /** Where a check's diagnostics came from: the configuration, or the code. */
@@ -71,8 +72,52 @@ export interface TypecheckReport {
   readonly projects: readonly string[];
 }
 
+/**
+ * How a check ended, and how many source files its programs type-checked
+ * rather than answered from what was kept: what an edit cost, and, for a
+ * cancelled check, how far it got.
+ */
 export type TypecheckResult =
-  { readonly kind: 'checked'; readonly report: TypecheckReport } | { readonly kind: 'cancelled' };
+  | {
+      readonly kind: 'checked';
+      readonly report: TypecheckReport;
+      readonly filesChecked: number;
+      /**
+       * Projects whose program the check built anew rather than kept: none
+       * when nothing it reads has changed, since building one over a large
+       * tree costs seconds even when no file is checked again.
+       */
+      readonly programsBuilt: number;
+    }
+  | { readonly kind: 'cancelled'; readonly filesChecked: number };
+
+/** One file of a tree, as `git ls-tree` lists it. */
+export interface TreeEntry {
+  /** Relative to the tree's root, `/`-separated. */
+  readonly path: string;
+  /**
+   * The blob id, which is the file's version for the compiler: it names the
+   * content, so it holds however the slot was written, where a file's size and
+   * times would not.
+   */
+  readonly oid: string;
+  /** A symbolic link: followed to where it leads, never read as source. */
+  readonly symlink: boolean;
+}
+
+/**
+ * The files a tree holds, by its listing rather than its directory.
+ *
+ * A slot keeps whatever `reset --hard` does not remove — untracked and ignored
+ * files, `.tsbuildinfo`, an earlier tree's build output — and the compiler must
+ * not take any of it for the tree's: a stale `dist/*.d.ts` would be read as
+ * this tree's declarations.
+ */
+export interface TreeListing {
+  /** The tree's id: a listing of the tree last checked is not indexed again. */
+  readonly oid: string;
+  readonly entries: readonly TreeEntry[];
+}
 
 /** The file system calls the service makes, all of them. Injected by tests to watch them. */
 export interface HostFileSystem {
@@ -80,6 +125,8 @@ export interface HostFileSystem {
   stat(path: string): HostStat | undefined;
   readdir(path: string): readonly Dirent[];
   realpath(path: string): string | undefined;
+  /** A symbolic link's target as written; undefined for anything that is not one. */
+  readlink(path: string): string | undefined;
 }
 
 export interface HostStat {
@@ -102,17 +149,20 @@ export interface TypecheckServiceOptions {
 }
 
 export interface CheckOptions {
+  /** What the tree holds now: which files exist, and each one's version. */
+  readonly tree: TreeListing;
   /**
-   * The tree was written whole since the last check, so no file's version can
-   * be trusted to have changed with its content.
+   * Names the dependency checkout's install: its files keep their version for
+   * as long as it is unchanged. Null when its package manager keeps no record
+   * of one, and then each file's version is read from the disk on every check.
    */
-  readonly cold?: boolean;
+  readonly install: string | null;
   /** Polled by the compiler as it works; true stops the check where it stands. */
   readonly isCancelled?: () => boolean;
 }
 
 export interface TypecheckService {
-  check(options?: CheckOptions): TypecheckResult;
+  check(options: CheckOptions): TypecheckResult;
   dispose(): void;
 }
 
@@ -159,6 +209,13 @@ export const NODE_FILE_SYSTEM: HostFileSystem = {
       return undefined;
     }
   },
+  readlink: (path) => {
+    try {
+      return readlinkSync(path);
+    } catch {
+      return undefined;
+    }
+  },
 };
 
 /**
@@ -194,35 +251,101 @@ export function matchFilesOf(module: unknown): MatchFiles {
 
 const matchFiles = matchFilesOf(ts);
 
+/**
+ * How many of a program's files it has type-checked itself, across every
+ * check that used it.
+ *
+ * Read through `getCachedSemanticDiagnostics`, which the public declarations
+ * leave out: a builder hands a new program the diagnostics it kept for an
+ * unaffected file without asking it, so a file with none cached was not
+ * checked by this program. Refused rather than guessed at if an upgrade drops it.
+ */
+export function filesCheckedBy(program: ts.Program): number {
+  const cached = (
+    program as { readonly getCachedSemanticDiagnostics?: (file: ts.SourceFile) => unknown }
+  ).getCachedSemanticDiagnostics;
+  if (typeof cached !== 'function') {
+    throw new Error(
+      'this TypeScript does not provide getCachedSemanticDiagnostics, which counting a check needs',
+    );
+  }
+  let count = 0;
+  for (const file of program.getSourceFiles()) {
+    if (cached.call(program, file) !== undefined) count += 1;
+  }
+  return count;
+}
+
 /** Interlock's own compiler's `lib` directory: the one place outside the tree the service reads. */
 const LIB_DIR = dirname(ts.getDefaultLibFilePath({}));
 
 const NODE_MODULES = 'node_modules';
 
+/** Links followed before a path is given up on, as the kernel's own `MAXSYMLINKS`. */
+const MAX_LINK_HOPS = 40;
+
+/** Where a path the compiler asked about leads, if anywhere it may look. */
+type Located =
+  | { readonly kind: 'tree-file'; readonly rel: string; readonly oid: string }
+  | { readonly kind: 'tree-directory'; readonly rel: string }
+  | {
+      readonly kind: 'dependency-file';
+      readonly rel: string;
+      readonly real: string;
+      readonly stat: HostStat;
+    }
+  | { readonly kind: 'dependency-directory'; readonly rel: string; readonly real: string }
+  | { readonly kind: 'lib-file'; readonly real: string }
+  | { readonly kind: 'lib-directory'; readonly real: string };
+
+interface TreeIndex {
+  readonly files: ReadonlyMap<string, TreeEntry>;
+  /** Every directory the tree implies, by path (`''` for the root), with the names directly in it. */
+  readonly directories: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
 /**
  * The read policy, and the mapping from what the compiler asks for to what is
  * read.
  *
- * The compiler sees one tree: the slot, with a `node_modules` in it. Nothing
- * of the kind is on disk — a slot holds tracked files only — so a path with a
- * `node_modules` segment is answered from the same place in the dependency
- * checkout. Every answer stays in the slot's terms, so a diagnostic in a
- * dependency is still a path the slot would have.
+ * The compiler sees one tree: the slot as its listing has it, with a
+ * `node_modules` in it. What exists in the slot is the listing's answer, never
+ * the directory's. Nothing of `node_modules` is in a slot — it holds tracked
+ * files only, and a `node_modules` a tree commits is left out in favour of
+ * the installed one — so a path with a `node_modules` segment is answered from
+ * the same place in the dependency checkout. Every answer stays in the slot's
+ * terms, so a diagnostic in a dependency is still a path the slot would have.
  *
  * A workspace package is the exception that makes the mapping necessary
  * rather than convenient. In a pnpm workspace `node_modules/@scope/pkg` links
  * to `../../packages/pkg`: followed in the dependency checkout, it would
  * type-check the merge against the user's copy of the sibling package rather
- * than the merged one. So a link whose target is inside the dependency
- * checkout but outside any `node_modules` resolves back into the slot.
+ * than the merged one. So a path that leads out of `node_modules` into the
+ * dependency checkout's own source is answered by the tree, at the same
+ * relative path — a file only the merge added there included.
  */
 export class Confinement {
   readonly #fs: HostFileSystem;
   readonly #root: string;
   readonly #dependencies: string;
   readonly #lib: string;
-  readonly #realpaths = new Map<string, string | undefined>();
-  readonly #stats = new Map<string, HostStat | undefined>();
+  #index: TreeIndex = { files: new Map(), directories: new Map([['', new Set()]]) };
+  #indexed: string | null = null;
+  #install: string | null = null;
+  /** Where each path asked about leads, for one check: the tree changes between checks. */
+  readonly #located = new Map<string, Located | null>();
+  /** The slot's own answers, for one check. */
+  readonly #treeRealpaths = new Map<string, string | undefined>();
+  /**
+   * The dependency checkout's answers, for as long as its install is the same
+   * one: the compiler asks after the same few thousand paths on every check,
+   * and an install is what changes them. Kept for one check where no install
+   * is recorded.
+   */
+  readonly #dependencyRealpaths = new Map<string, string | undefined>();
+  readonly #dependencyStats = new Map<string, HostStat | undefined>();
+  /** Interlock's own `lib`, which does not change under a running daemon. */
+  readonly #libStats = new Map<string, HostStat | undefined>();
 
   constructor(root: string, dependencyRoot: string, fileSystem: HostFileSystem) {
     this.#fs = fileSystem;
@@ -232,38 +355,28 @@ export class Confinement {
   }
 
   /**
-   * Forget what the disk said. Answers are remembered within a check, where
-   * the compiler asks after the same few thousand paths many times over and
-   * the tree holds still; between checks it does not.
+   * Start a check of `tree` against the install `install` names. Answers are
+   * remembered within a check, where the compiler asks after the same paths
+   * many times over and nothing moves; the dependency checkout's, across
+   * checks of one install.
    */
-  forget(): void {
-    this.#realpaths.clear();
-    this.#stats.clear();
-  }
-
-  #realpathOf(path: string): string | undefined {
-    if (this.#realpaths.has(path)) return this.#realpaths.get(path);
-    const real = this.#fs.realpath(path);
-    this.#realpaths.set(path, real);
-    return real;
+  begin(tree: TreeListing, install: string | null): void {
+    if (tree.oid !== this.#indexed) {
+      this.#index = indexTree(tree.entries);
+      this.#indexed = tree.oid;
+    }
+    this.#located.clear();
+    this.#treeRealpaths.clear();
+    if (install === null || install !== this.#install) {
+      this.#dependencyRealpaths.clear();
+      this.#dependencyStats.clear();
+    }
+    this.#install = install;
   }
 
   /** The tree, as every path the compiler is given starts. */
   get root(): string {
     return this.#root;
-  }
-
-  /** The real file behind a path the compiler asked for, or null where it may not look. */
-  physical(path: string): string | null {
-    const absolute = resolve(this.#root, path);
-    if (within(this.#lib, absolute)) return absolute;
-    if (!within(this.#root, absolute)) return null;
-    const inTree = relative(this.#root, absolute);
-    if (!hasNodeModules(inTree)) return this.#inTree(absolute);
-    const real = this.#realpathOf(join(this.#dependencies, inTree));
-    if (real === undefined || !within(this.#dependencies, real)) return null;
-    const inCheckout = relative(this.#dependencies, real);
-    return hasNodeModules(inCheckout) ? real : this.#inTree(join(this.#root, inCheckout));
   }
 
   /**
@@ -272,66 +385,235 @@ export class Confinement {
    * it still finds nothing.
    */
   realpath(path: string): string {
-    const absolute = resolve(this.#root, path);
-    if (!within(this.#root, absolute)) return absolute;
-    const inTree = relative(this.#root, absolute);
-    if (!hasNodeModules(inTree)) {
-      const real = this.#realpathOf(absolute);
-      return real !== undefined && within(this.#root, real) ? real : absolute;
-    }
-    const real = this.#realpathOf(join(this.#dependencies, inTree));
-    if (real === undefined || !within(this.#dependencies, real)) return absolute;
-    return join(this.#root, relative(this.#dependencies, real));
+    const found = this.#locate(path);
+    return found === null ? resolve(this.#root, path) : this.#virtual(found);
   }
 
   readFile(path: string): string | undefined {
-    const physical = this.physical(path);
-    return physical === null ? undefined : this.#fs.readFile(physical);
-  }
-
-  stat(path: string): HostStat | undefined {
-    const physical = this.physical(path);
-    if (physical === null) return undefined;
-    if (this.#stats.has(physical)) return this.#stats.get(physical);
-    const found = this.#fs.stat(physical);
-    this.#stats.set(physical, found);
-    return found;
+    const found = this.#locate(path);
+    if (found === null) return undefined;
+    switch (found.kind) {
+      case 'tree-file': {
+        // The listing says the file is the tree's; the disk is read only
+        // where it agrees that the file is inside the slot.
+        const physical = join(this.#root, ...found.rel.split('/'));
+        const real = this.#treeRealpathOf(physical);
+        return real !== undefined && within(this.#root, real) ? this.#fs.readFile(real) : undefined;
+      }
+      case 'dependency-file':
+      case 'lib-file':
+        return this.#fs.readFile(found.real);
+      default:
+        return undefined;
+    }
   }
 
   fileExists(path: string): boolean {
-    return this.stat(path)?.isFile === true;
+    const kind = this.#locate(path)?.kind;
+    return kind === 'tree-file' || kind === 'dependency-file' || kind === 'lib-file';
   }
 
   directoryExists(path: string): boolean {
-    return this.stat(path)?.isDirectory === true;
+    const kind = this.#locate(path)?.kind;
+    return kind === 'tree-directory' || kind === 'dependency-directory' || kind === 'lib-directory';
+  }
+
+  /**
+   * A file's version for the compiler: its blob id in the tree; the install,
+   * under `node_modules`, or what the disk says of it where no install is
+   * recorded; and one constant for Interlock's own `lib`.
+   */
+  versionOf(path: string): string {
+    const found = this.#locate(path);
+    switch (found?.kind) {
+      case 'tree-file':
+        return found.oid;
+      case 'dependency-file': {
+        if (this.#install !== null) return `install:${this.#install}`;
+        // Every field a rewrite moves: an install writes a changed file anew,
+        // which is a new inode and a new change time even within one tick.
+        const { ino, size, mtimeMs, ctimeMs } = found.stat;
+        return `stat:${String(ino)}:${String(size)}:${String(mtimeMs)}:${String(ctimeMs)}`;
+      }
+      case 'lib-file':
+        return 'lib';
+      default:
+        return 'absent';
+    }
   }
 
   /** A directory's entries by name, each classified by where it leads, links included. */
   entries(path: string): { readonly files: string[]; readonly directories: string[] } {
     const files: string[] = [];
     const directories: string[] = [];
-    const physical = this.physical(path);
-    if (physical === null) return { files, directories };
-    for (const entry of this.#fs.readdir(physical)) {
-      let isFile = entry.isFile();
-      let isDirectory = entry.isDirectory();
-      if (entry.isSymbolicLink()) {
-        const target = this.stat(join(path, entry.name));
-        isFile = target?.isFile === true;
-        isDirectory = target?.isDirectory === true;
+    const found = this.#locate(path);
+    let names: Iterable<string>;
+    if (found?.kind === 'tree-directory') {
+      // Every directory the walk finds is one the index implies.
+      names = this.#index.directories.get(found.rel)!;
+    } else if (found?.kind === 'dependency-directory' || found?.kind === 'lib-directory') {
+      names = this.#fs.readdir(found.real).map((entry) => entry.name);
+    } else {
+      return { files, directories };
+    }
+    const at = this.#virtual(found);
+    for (const name of names) {
+      const child = this.#locate(join(at, name));
+      const kind = child?.kind;
+      if (kind === 'tree-file' || kind === 'dependency-file' || kind === 'lib-file') {
+        files.push(name);
+      } else if (child !== null) {
+        directories.push(name);
       }
-      if (isFile) files.push(entry.name);
-      else if (isDirectory) directories.push(entry.name);
     }
     return { files: files.sort(), directories: directories.sort() };
   }
 
-  /** A checkout path that is not a link out of the tree. */
-  #inTree(path: string): string | null {
-    const real = this.#realpathOf(path);
-    if (real === undefined) return path;
-    return within(this.#root, real) ? real : null;
+  #locate(path: string): Located | null {
+    const absolute = resolve(this.#root, path);
+    if (this.#located.has(absolute)) return this.#located.get(absolute) ?? null;
+    const found = this.#locateAbsolute(absolute, 0);
+    this.#located.set(absolute, found);
+    return found;
   }
+
+  #locateAbsolute(absolute: string, hops: number): Located | null {
+    if (within(this.#lib, absolute)) return this.#inLib(absolute);
+    if (!within(this.#root, absolute)) return null;
+    return this.#inTree(posixOf(relative(this.#root, absolute)), hops);
+  }
+
+  /**
+   * A path relative to the tree's root, walked through the listing. Every
+   * component must be a directory the tree implies or a symlink the tree
+   * holds; the first `node_modules` component hands the rest of the path to
+   * the dependency checkout, before the listing is asked, so a `node_modules`
+   * the tree commits never stands in for the installed one.
+   */
+  #inTree(rel: string, hops: number): Located | null {
+    if (hops > MAX_LINK_HOPS) return null;
+    const parts = rel === '' ? [] : rel.split('/');
+    let at = '';
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i]!;
+      if (part === NODE_MODULES) {
+        return this.#inDependencies(joinRel(at, parts.slice(i).join('/')), hops);
+      }
+      const next = joinRel(at, part);
+      const entry = this.#index.files.get(next);
+      if (entry !== undefined) {
+        const rest = parts.slice(i + 1);
+        if (entry.symlink) return this.#throughLink(next, rest, hops);
+        return rest.length === 0 ? { kind: 'tree-file', rel: next, oid: entry.oid } : null;
+      }
+      if (!this.#index.directories.has(next)) return null;
+      at = next;
+    }
+    return { kind: 'tree-directory', rel: at };
+  }
+
+  /**
+   * Where a symlink the tree holds leads, joined with the rest of the path.
+   *
+   * Its target is read from the slot, which holds it as `reset --hard` wrote
+   * it, and judged as any other path: one that leaves the tree leads nowhere.
+   */
+  #throughLink(link: string, rest: readonly string[], hops: number): Located | null {
+    const target = this.#fs.readlink(join(this.#root, ...link.split('/')));
+    if (target === undefined) return null;
+    const beside = join(this.#root, ...posix.dirname(link).split('/'));
+    return this.#locateAbsolute(resolve(beside, target, ...rest), hops + 1);
+  }
+
+  /**
+   * A path relative to the dependency checkout, through a `node_modules`.
+   *
+   * Asked whole first, which answers every path the checkout holds. A path it
+   * does not hold may still exist past a workspace link — a file the merge
+   * added to a sibling package — so its components are then followed one at a
+   * time, to find where the path leaves `node_modules` for the checkout's own
+   * source, which the tree answers for.
+   */
+  #inDependencies(asked: string, hops: number): Located | null {
+    const real = this.#dependencyRealpathOf(join(this.#dependencies, ...asked.split('/')));
+    if (real !== undefined) return this.#inCheckout(real, hops);
+    const parts = asked.split('/');
+    for (let end = parts.indexOf(NODE_MODULES) + 1; end < parts.length; end += 1) {
+      const prefix = this.#dependencyRealpathOf(join(this.#dependencies, ...parts.slice(0, end)));
+      if (prefix === undefined || !within(this.#dependencies, prefix)) return null;
+      const inCheckout = posixOf(relative(this.#dependencies, prefix));
+      if (!inCheckout.split('/').includes(NODE_MODULES)) {
+        return this.#inTree(joinRel(inCheckout, parts.slice(end).join('/')), hops + 1);
+      }
+    }
+    return null;
+  }
+
+  /** A real path in the dependency checkout: installed, or the checkout's source and so the tree's. */
+  #inCheckout(real: string, hops: number): Located | null {
+    // A package manager's global store, or a package linked from elsewhere on
+    // the machine: outside the checkout, so nothing the compiler may read.
+    if (!within(this.#dependencies, real)) return null;
+    const inCheckout = posixOf(relative(this.#dependencies, real));
+    if (!inCheckout.split('/').includes(NODE_MODULES)) return this.#inTree(inCheckout, hops + 1);
+    const stat = this.#dependencyStatOf(real);
+    if (stat?.isFile === true) return { kind: 'dependency-file', rel: inCheckout, real, stat };
+    if (stat?.isDirectory === true) return { kind: 'dependency-directory', rel: inCheckout, real };
+    // A pipe or a socket: never opened, since opening a pipe waits for a writer.
+    return null;
+  }
+
+  #inLib(absolute: string): Located | null {
+    if (!this.#libStats.has(absolute)) this.#libStats.set(absolute, this.#fs.stat(absolute));
+    const stat = this.#libStats.get(absolute);
+    if (stat?.isFile === true) return { kind: 'lib-file', real: absolute };
+    if (stat?.isDirectory === true) return { kind: 'lib-directory', real: absolute };
+    return null;
+  }
+
+  #virtual(found: Located): string {
+    if (found.kind === 'lib-file' || found.kind === 'lib-directory') return found.real;
+    return found.rel === '' ? this.#root : join(this.#root, ...found.rel.split('/'));
+  }
+
+  #treeRealpathOf(path: string): string | undefined {
+    if (!this.#treeRealpaths.has(path)) this.#treeRealpaths.set(path, this.#fs.realpath(path));
+    return this.#treeRealpaths.get(path);
+  }
+
+  #dependencyRealpathOf(path: string): string | undefined {
+    if (!this.#dependencyRealpaths.has(path)) {
+      this.#dependencyRealpaths.set(path, this.#fs.realpath(path));
+    }
+    return this.#dependencyRealpaths.get(path);
+  }
+
+  #dependencyStatOf(path: string): HostStat | undefined {
+    if (!this.#dependencyStats.has(path)) this.#dependencyStats.set(path, this.#fs.stat(path));
+    return this.#dependencyStats.get(path);
+  }
+}
+
+/** The listing as paths and the directories they imply. */
+function indexTree(entries: readonly TreeEntry[]): TreeIndex {
+  const files = new Map<string, TreeEntry>();
+  const directories = new Map<string, Set<string>>([['', new Set()]]);
+  const directory = (path: string): Set<string> => {
+    let names = directories.get(path);
+    if (names === undefined) {
+      names = new Set();
+      directories.set(path, names);
+      const cut = path.lastIndexOf('/');
+      directory(cut === -1 ? '' : path.slice(0, cut)).add(path.slice(cut + 1));
+    }
+    return names;
+  };
+  for (const entry of entries) {
+    files.set(entry.path, entry);
+    const cut = entry.path.lastIndexOf('/');
+    directory(cut === -1 ? '' : entry.path.slice(0, cut)).add(entry.path.slice(cut + 1));
+  }
+  return { files, directories };
 }
 
 /**
@@ -414,12 +696,6 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
   const rootConfig = join(confinement.root, options.project ?? DEFAULT_PROJECT);
   const registry = ts.createDocumentRegistry(ts.sys.useCaseSensitiveFileNames, confinement.root);
   const projects = new Map<string, Project>();
-  /**
-   * Bumped by a cold check, and part of every file's version: a tree written
-   * whole may hold a file whose size and timestamps happen to match what was
-   * there before, and only this says otherwise.
-   */
-  let epoch = 0;
   /** Configs read during the current check, so a project referenced twice is parsed once. */
   let configs = new Map<string, ts.ParsedCommandLine>();
   /**
@@ -429,12 +705,26 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
    * The language service re-resolves a file's imports only when the file
    * changes or the root files do, and nothing watches the paths a failed
    * lookup tried. So an import of a file outside `include` stays unresolved
-   * after a merge adds the file, unless its importer is named here: each check
-   * resolves these again, which costs only the files that were already broken.
+   * after a merge adds the file, unless its importer is named here: a check
+   * resolves these again whenever the tree or the install has moved.
    */
   let suspect: ReadonlySet<string> | 'all' = new Set();
   /** Being gathered by the check in progress, for the next one. */
   let gathering: Set<string> | 'all' = new Set();
+  /**
+   * The tree and install the last whole check saw. While both hold, no path a
+   * failed lookup tried can have appeared — the tree is its listing, and
+   * `node_modules` is the install — so `suspect` is left as it resolved.
+   * Resolving it again builds every program anew, which over a large tree
+   * with one unresolved import was most of a warm check.
+   */
+  let settled: { readonly tree: string; readonly install: string } | null = null;
+  /** The check in progress resolves `suspect` again. */
+  let unsettled = true;
+  /** Files the check in progress has type-checked so far. */
+  let filesChecked = 0;
+  /** Programs the check in progress has built anew. */
+  let programsBuilt = 0;
 
   /** Each project's last reading, handed back while it reads the same. */
   const lastRead = new Map<string, ts.ParsedCommandLine>();
@@ -459,15 +749,6 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
     return parsed;
   };
 
-  const versionOf = (path: string): string => {
-    const found = confinement.stat(path);
-    // Every field a rewrite moves: `reset --hard` writes a changed file anew,
-    // which is a new inode and a new change time even within one tick.
-    return found === undefined
-      ? `${epoch}:absent`
-      : `${epoch}:${found.ino}:${found.size}:${found.mtimeMs}:${found.ctimeMs}`;
-  };
-
   const createProject = (configPath: string): Project => {
     // The last two members are read from the host by the language service, as
     // tsserver's projects supply them, though the public declarations list
@@ -481,7 +762,7 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       getCompilationSettings: () => project.settings,
       getScriptFileNames: () => project.parsed.fileNames,
       getProjectReferences: () => project.parsed.projectReferences,
-      getScriptVersion: versionOf,
+      getScriptVersion: (path) => confinement.versionOf(path),
       getScriptSnapshot: (path) => {
         const text = confinement.readFile(path);
         return text === undefined ? undefined : ts.ScriptSnapshot.fromString(text);
@@ -497,10 +778,12 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       // Read by the service in place of parsing a reference itself, which
       // would need the host to list directories too.
       getParsedCommandLine: projectOf,
-      // A slot holds no build output, so a reference is read as its sources,
-      // as an editor reads it, rather than as declarations nobody built.
+      // A slot holds no build output the compiler may see, so a reference is
+      // read as its sources, as an editor reads it, rather than as
+      // declarations nobody built.
       useSourceOfProjectReferenceRedirect: () => true,
-      hasInvalidatedResolutions: (path) => suspect === 'all' || suspect.has(canonicalName(path)),
+      hasInvalidatedResolutions: (path) =>
+        unsettled && (suspect === 'all' || suspect.has(canonicalName(path))),
     };
     const parsed = projectOf(configPath);
     const project: Project = {
@@ -532,11 +815,15 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
     return order;
   };
 
-  const check = (checkOptions: CheckOptions = {}): TypecheckResult => {
-    if (checkOptions.cold === true) epoch += 1;
-    confinement.forget();
+  const check = (checkOptions: CheckOptions): TypecheckResult => {
+    const { tree, install } = checkOptions;
+    confinement.begin(tree, install);
+    // An install with no record could have changed under any lookup.
+    unsettled = install === null || settled?.tree !== tree.oid || settled.install !== install;
     configs = new Map();
     gathering = new Set();
+    filesChecked = 0;
+    programsBuilt = 0;
     const token: ts.CancellationToken = {
       isCancellationRequested: checkOptions.isCancelled ?? (() => false),
       throwIfCancellationRequested: () => {
@@ -550,12 +837,15 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
     try {
       const report = checkAll(token);
       suspect = gathering;
-      return { kind: 'checked', report };
+      settled = install === null ? null : { tree: tree.oid, install };
+      return { kind: 'checked', report, filesChecked, programsBuilt };
     } catch (error) {
       // Cut short, it found out about only some files: the next check
       // resolves every file again rather than trust what it did not reach.
       suspect = 'all';
-      if (error instanceof ts.OperationCanceledException) return { kind: 'cancelled' };
+      settled = null;
+      if (error instanceof ts.OperationCanceledException)
+        return { kind: 'cancelled', filesChecked };
       throw error;
     }
   };
@@ -623,6 +913,7 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       );
       project.program = program;
       project.pending = true;
+      programsBuilt += 1;
     }
     const builder = project.builder!;
     // A referenced project's sources are in every program that imports them;
@@ -642,8 +933,18 @@ export function createTypecheckService(options: TypecheckServiceOptions): Typech
       gathering = 'all';
       return;
     }
-    if (project.pending) drainAffected(project, builder, token);
-    const semantic = sources.flatMap((file) => builder.getSemanticDiagnostics(file, token));
+    const before = filesCheckedBy(program);
+    let semantic: ts.Diagnostic[];
+    try {
+      if (project.pending) drainAffected(project, builder, token);
+      // The token reaches this pass too: under `isolatedModules` an edit
+      // affects its own file alone, and the builder drops what it kept for
+      // each importer and checks them here, which can be most of an edit's cost.
+      semantic = sources.flatMap((file) => builder.getSemanticDiagnostics(file, token));
+    } finally {
+      // Counted on the way out of a cancelled check too: how far it got.
+      filesChecked += filesCheckedBy(program) - before;
+    }
     files.push(...semantic);
     for (const diagnostic of semantic) {
       if (gathering !== 'all' && UNRESOLVED.has(diagnostic.code)) {
@@ -787,8 +1088,13 @@ function within(root: string, path: string): boolean {
   );
 }
 
-function hasNodeModules(path: string): boolean {
-  return path.split(sep).includes(NODE_MODULES);
+/** A path relative to a root, `/`-separated as a listing names it. */
+function posixOf(path: string): string {
+  return path.split(sep).join('/');
+}
+
+function joinRel(at: string, rest: string): string {
+  return at === '' ? rest : `${at}/${rest}`;
 }
 
 /** The worker's side of the protocol {@link ./typecheck.ts} speaks. */
@@ -802,7 +1108,8 @@ export type WorkerRequest =
   | {
       readonly type: 'check';
       readonly id: number;
-      readonly cold: boolean;
+      readonly tree: TreeListing;
+      readonly install: string | null;
       /** One `Int32`, set non-zero by the other thread to cancel this check. */
       readonly cancel: SharedArrayBuffer;
     }
@@ -852,7 +1159,8 @@ export function serveTypecheck(port: Port, init: WorkerInit, fileSystem?: HostFi
     // Not caught: a compiler that throws has state nobody can vouch for, and
     // the thread dying is how the registry learns to start a new one.
     const result = service.check({
-      cold: request.cold,
+      tree: request.tree,
+      install: request.install,
       isCancelled: () => Atomics.load(flag, 0) !== 0,
     });
     port.postMessage({

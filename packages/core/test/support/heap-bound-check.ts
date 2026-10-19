@@ -1,25 +1,27 @@
+import { readFileSync } from 'node:fs';
 import { createTypecheckRegistry } from '../../src/analyzers/typecheck.js';
+import type { TreeListing } from '../../src/analyzers/typecheck.js';
 
 /**
  * One check of the tree named on the command line, against the dependency
- * checkout named after it, by a registry whose heap bound is below what any
- * service needs, printed as JSON.
+ * checkout named after it and the listing in the file named last, by a
+ * registry at the smallest heap limit it accepts, printed as JSON.
  *
- * A process of its own because the bound it exercises is the one enforced
- * after a check, which only matters once a process-wide
- * `--max-old-space-size` has overridden the worker's own limit; that flag is
- * fixed when a process starts. Without it the worker's limit holds, and V8
- * ends the whole process rather than the worker when an isolate cannot even
- * deserialize its snapshot under it.
+ * A process of its own because what it exercises depends on flags fixed when
+ * a process starts. Started with a process-wide `--max-old-space-size`, the
+ * worker's own limit is overridden, and only the bound checked after a check
+ * stops the service. Started with none, the worker's limit holds, and a
+ * program past it ends the worker alone.
  */
-const [root, dependencyRoot] = process.argv.slice(2);
-if (root === undefined || dependencyRoot === undefined) {
-  throw new Error('usage: heap-bound-check <tree> <dependency root>');
+const [root, dependencyRoot, listing] = process.argv.slice(2);
+if (root === undefined || dependencyRoot === undefined || listing === undefined) {
+  throw new Error('usage: heap-bound-check <tree> <dependency root> <listing file>');
 }
+const tree = JSON.parse(readFileSync(listing, 'utf8')) as TreeListing;
 
-const registry = createTypecheckRegistry({ maxHeapMb: 1 });
+const registry = createTypecheckRegistry({ maxHeapMb: 128 });
 try {
-  const outcome = await registry.check({ root, dependencyRoot });
+  const outcome = await registry.check({ root, dependencyRoot, tree });
   process.stdout.write(JSON.stringify({ outcome, live: registry.live }));
 } finally {
   await registry.close();
