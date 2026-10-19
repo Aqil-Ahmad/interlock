@@ -199,6 +199,7 @@ describe('cacheKey', () => {
   const parts = {
     treeOid: 'a'.repeat(40),
     dependencyTreeOid: 'b'.repeat(40),
+    install: 'd'.repeat(64),
     project: 'tsconfig.json',
   };
 
@@ -207,9 +208,11 @@ describe('cacheKey', () => {
       cacheKey(parts),
       cacheKey({ ...parts, treeOid: 'c'.repeat(40) }),
       cacheKey({ ...parts, dependencyTreeOid: 'c'.repeat(40) }),
+      cacheKey({ ...parts, install: 'e'.repeat(64) }),
+      cacheKey({ ...parts, install: null }),
       cacheKey({ ...parts, project: 'tsconfig.check.json' }),
     ]);
-    expect(keys.size).toBe(4);
+    expect(keys.size).toBe(6);
   });
 
   it('names the comparison’s version and the compiler’s', () => {

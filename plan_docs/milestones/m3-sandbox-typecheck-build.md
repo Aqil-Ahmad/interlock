@@ -359,8 +359,8 @@ _which branch caused which half_ of each one.
   its own rule; it is never folded into the file set.
 
   **The cache** holds each tree's report by its tree id, the dependency
-  checkout's tree, the compiler's version, the project and the comparison's
-  version: in memory and bounded, so no migration; a daemon restart pays one
+  checkout's tree and its install identity, the compiler's version, the project
+  and the comparison's version: in memory and bounded, so no migration; a daemon restart pays one
   check per tree again.
 
   **Done when:**

@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { InterlockError } from '@interlock/shared';
 import type { Logger } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -550,6 +552,24 @@ describe('baseline differ', () => {
       const again = compared(await repo.compare(differ, pair));
       expect(again.checked).toEqual([]);
       expect(checks).toEqual([]);
+    });
+
+    it('checks every tree again once the dependencies are installed again', async () => {
+      const repo = await open({ ...PROJECT, 'src/a.ts': 'export const a = 1;\n' });
+      const pair = { one: { write: { 'src/one.ts': 'export const one = 1;\n' } } };
+      const record = (content: string): void => {
+        mkdirSync(join(repo.user, 'node_modules'), { recursive: true });
+        writeFileSync(join(repo.user, 'node_modules', '.package-lock.json'), content);
+      };
+      record('{ "lockfileVersion": 3, "packages": {} }\n');
+      await repo.compare(differ, pair);
+      expect(checks).toHaveLength(4);
+
+      checks = [];
+      record('{ "lockfileVersion": 3, "packages": { "node_modules/x": {} } }\n');
+      const again = compared(await repo.compare(differ, pair));
+      expect(again.checked).toEqual(['base', 'a', 'b', 'merge']);
+      expect(checks).toHaveLength(4);
     });
 
     it('holds no more reports than its bound', async () => {

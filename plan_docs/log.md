@@ -28,6 +28,7 @@ Short entries: done, decided, blocked. Newest first.
 ## 2026-10-19 — baseline differ, merged with the typecheck runner's rework
 
 - **Ported onto `dev`'s service.** A check is sent the tree's listing (`listTree`) instead of a fill kind, and reads only that tree, not what `reset --hard` left in the slot; every outcome but `checked` and `cancelled` — a timeout, an exhausted heap, a crash, an infra failure — is `unavailable` for that tree, never an empty report. The cold-fill test went with the fill kind; a test that each check gets the listing of the slot's tree replaces it.
+- **Found in review, and fixed — a cached report outlived a reinstall.** The key named the dependency checkout's tree but not its install, so a tree checked between a lockfile change and the `install` that follows kept its report afterwards. The key now carries `installIdentity`, the records the registry already reads; with no record it is null, and a changed install is seen only by a restart, as in the service.
 
 ## 2026-10-15 — baseline differ
 

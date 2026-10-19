@@ -7,7 +7,7 @@ import type { GitRunner, ShadowRepo } from '../git/repo-handle.js';
 import { dependencyDrift } from '../git/worktree-pool.js';
 import type { PoolSlot } from '../git/worktree-pool.js';
 import { DEFAULT_PROJECT, TYPESCRIPT_VERSION } from './typecheck-paths.js';
-import { listTree } from './typecheck.js';
+import { installIdentity, installRoots, listTree } from './typecheck.js';
 import type {
   ConfigDiagnostic,
   FileDiagnostic,
@@ -289,10 +289,18 @@ export function createBaselineDiffer(options: BaselineDifferOptions): BaselineDi
         merge: slot.commitSha,
       };
       const trees = await treesOf(runner, shadow, commits);
+      // The installed packages, not only the tree they were installed from: a
+      // checkout whose lockfile moved before its install did is the same tree
+      // under two installs, and a report from the first is wrong for the second.
+      const install = await installIdentity(
+        request.dependencyRoot,
+        installRoots(await listTree(runner, shadow, request.dependencyTreeOid)),
+      );
       const keyOf = (tree: BaselineTree): string =>
         cacheKey({
           treeOid: trees[tree],
           dependencyTreeOid: request.dependencyTreeOid,
+          install,
           project,
         });
       const renames = (
@@ -450,10 +458,15 @@ function notChecked(
   }
 }
 
-/** What a tree's report is a pure function of. */
+/**
+ * What a tree's report is a pure function of. `install` is the dependency
+ * checkout's install identity, null where no package manager keeps a record
+ * of one.
+ */
 export function cacheKey(parts: {
   readonly treeOid: string;
   readonly dependencyTreeOid: string;
+  readonly install: string | null;
   readonly project: string;
 }): string {
   return JSON.stringify([
@@ -461,6 +474,7 @@ export function cacheKey(parts: {
     TYPESCRIPT_VERSION,
     parts.treeOid,
     parts.dependencyTreeOid,
+    parts.install,
     parts.project,
   ]);
 }
