@@ -168,8 +168,8 @@ _which branch caused which half_ of each one.
   the answer; keying on the tree id would miss every check, since almost every
   tree is new.
 
-- [ ] **Typecheck runner**
-      **Files:** `packages/core/src/analyzers/typecheck.ts`, `packages/core/src/analyzers/typecheck-service.ts`, `packages/core/src/analyzers/typecheck-worker.ts`, `packages/core/src/git/worktree-pool.ts`, `packages/core/package.json`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/store/verdict-key.ts`, ADR-0008
+- [x] **Typecheck runner**
+      **Files:** `packages/core/src/analyzers/typecheck.ts`, `packages/core/src/analyzers/typecheck-service.ts`, `packages/core/src/analyzers/typecheck-worker.ts`, `packages/core/src/git/worktree-pool.ts`, `packages/core/package.json`, `packages/shared/src/config.ts`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/store/verdict-key.ts`, `scripts/typecheck-bench.ts`, ADR-0008
       **What:** host the TypeScript language service inside the daemon, one live instance per hot pool slot (ADR-0005), each in a worker thread of its own (ADR-0008). A check of a slot returns structured diagnostics; later checks of the same slot reuse the service's incremental state. Do not spawn `tsc` per check: the measured process floor is 436 ms, against 350 ms of real work for an incremental check. And make the daemon run `ANALYZER_PIPELINE` generically. This task adds no typecheck analyzer to that list: raw diagnostics include every pre-existing error, and reporting them before the baseline differ exists would blow the false-positive budget on day one.
 
   Rewritten before starting, from the issue. **Diagnostics** are code,
@@ -193,11 +193,13 @@ _which branch caused which half_ of each one.
 
   **Incremental state** is the language service's programs and a semantic
   diagnostics builder per project, the propagation `tsc --incremental` uses.
-  A file's version is its inode, size, modification and change times —
-  `reset --hard` writes a changed file anew, so a rewrite moves at least one,
-  while an unchanged file's stat costs no read — plus an epoch a cold fill
-  bumps, since a tree written whole may hold a file whose stat matches the old
-  one. A tsconfig is read again on every check, as an added file changes what
+  A file of the tree is versioned by its blob id in the merged tree's listing:
+  it names the content, so a slot rewritten whole keeps what did not change. A
+  file under `node_modules` is versioned by the dependency checkout's install —
+  a hash of the package managers' records under each install root, the
+  checkout's own and each lockfile's directory, read before and after every
+  check — or, where no record exists, by its inode, size and times, read on
+  every check. A tsconfig is read again on every check, as an added file changes what
   `include` matches, and a reading equal to the last is answered with the last
   one's object: the language service compares a reference's reading by
   identity, and a fresh one rebuilds every program on every check. Declaration
@@ -205,11 +207,15 @@ _which branch caused which half_ of each one.
   a change affected; left uncached, they type-check every file on every check.
 
   **Read confinement** is explicit in the host, never through `ts.sys`. The
-  compiler sees one tree: the slot, with `node_modules` in it answered from the
-  same path in the dependency checkout. A link in the dependency checkout to a
-  path inside it but outside any `node_modules` — a pnpm workspace link —
-  resolves back into the slot, so a sibling package is checked as merged, not
-  as the user has it. Anything else outside the slot, the dependency
+  compiler sees one tree: the slot as the merged tree's `ls-tree` listing has
+  it, never as its directory — a slot keeps what `reset --hard` leaves,
+  `.tsbuildinfo` and an earlier tree's build output — with `node_modules` in it
+  answered from the same path in the dependency checkout, and a `node_modules`
+  the tree commits left out. A link the tree holds is followed through the
+  listing. A path in the dependency checkout that leads out of `node_modules`
+  into the checkout's own source — a pnpm workspace link — is answered by the
+  tree at the same path, so a sibling package is checked as merged, not as the
+  user has it, a file only the merge added included. Anything else outside the slot, the dependency
   checkout's `node_modules` and Interlock's own `lib` directory does not exist:
   a `..` or absolute path in `include`, `files`, `paths` or `typeRoots`, a link
   in the slot pointing out of it, a link in `node_modules` pointing out of the
@@ -221,14 +227,35 @@ _which branch caused which half_ of each one.
   first and a busy one never; one check per service at a time. A service is
   rooted at a path, not at a slot, so a later task can root one at a merge base
   or one side. The pool calls `onEvict` before it removes a slot's files, and
-  awaits it; a failing hook is logged and the eviction goes ahead. The pool's
-  slot carries how its fill wrote it, for the cold epoch. The daemon stopping
-  is `close()`, which stops every worker.
+  awaits it; a failing hook is logged and the eviction goes ahead. The daemon
+  stopping is `close()`, which stops every worker.
 
   **Cancellation** crosses threads through one shared `Int32`, polled by the
   compiler's cancellation token, since the check is synchronous and nothing
   posted to the worker is read until it returns. A cancelled check keeps the
-  service; the next check is whole.
+  service; the next check is whole. Under `isolatedModules` the importers an
+  edit re-checks are checked in the pass over every file, and the token
+  reaches that pass too.
+
+  **Deadline and grace.** Each check has a deadline, `typecheck.deadlineMs`,
+  from when it is sent. At it, or when its run is superseded, the flag is set
+  and the compiler stops where it stands, keeping its program; a worker still
+  running `typecheck.graceMs` later is terminated, since the compiler does not
+  poll while it builds a program, and a check queued behind it starts a new
+  service.
+
+  **Outcomes.** `checked`, `cancelled`, `timeout`, `out-of-memory` and
+  `crashed` are told apart; a worker that did not start, a released or closed
+  service, and an install that changed under the check are one
+  `infra-failure` carrying its reason. None is a Finding, and a check resolves
+  to one of them whatever its worker does.
+
+  **Workers** start with an empty environment — the compiler reads `NODE_ENV`
+  as it loads — and the heap limit `typecheck.maxHeapMb`, at least 128 MiB,
+  refused below it when the config is read and by the registry, since V8
+  aborts the whole process rather than a worker too small to start in. The
+  heap is checked again after each check, since a process-wide
+  `--max-old-space-size` overrides a worker's own limit.
 
   **The generic pipeline** runs every entry of `ANALYZER_PIPELINE` in order,
   each with a `run.analyzer-completed` caused by the merge. An analyzer that
@@ -263,7 +290,24 @@ _which branch caused which half_ of each one.
     which any read would hang on, and a recording file system shows no call
     outside the three roots;
   - a pnpm workspace link resolves into the slot: a fixture whose user copy
-    and merged copy of a sibling package differ reports the merged one's error;
+    and merged copy of a sibling package differ reports the merged one's error,
+    and a file only the merge added to the package is found through its link;
+  - a file the slot holds and its listing does not — an earlier tree's
+    untracked output, which `tsc` reading the directory reports — is never read;
+  - a check still running at its deadline is a `timeout` that keeps its
+    service when it stops within the grace; with no grace its worker is
+    terminated and a check queued behind it starts a new one; a stack overflow
+    in the compiler is `crashed`, a heap past the limit `out-of-memory` naming
+    it, a worker that cannot start or a released tree `infra-failure` with its
+    reason;
+  - files under `node_modules` keep their version while the install's records
+    hold — a warm check asks nothing of the disk under `node_modules` — and are
+    read again when an install changes; with no record they are versioned by
+    the disk; a check during which the install changed is `infra-failure`;
+  - workers start with an empty environment; a heap limit below 128 MiB is
+    refused when the config is read and by the registry;
+  - under `isolatedModules`, a check cancelled part way through the importers
+    an edit re-checks resumes where it stopped;
   - the longest event-loop stall during a large check is measured both in the
     daemon's thread and in a worker, and the choice recorded in ADR-0008;
   - a stub second analyzer in the pipeline runs, is recorded, is fingerprinted
@@ -276,7 +320,8 @@ _which branch caused which half_ of each one.
   daemon. The compiler is Interlock's own pinned `typescript`, never the
   repository's `node_modules` copy, which is files an agent can write. Hard
   rule 7: `typescript` in `core` is ADR-0008. T3: nothing reads outside the
-  three roots. Do not add a typecheck analyzer to `ANALYZER_PIPELINE` here;
+  three roots; the install records are read as data, inside the dependency
+  checkout, never through a final link and never waiting on a pipe. Do not add a typecheck analyzer to `ANALYZER_PIPELINE` here;
   when one joins with the baseline differ it needs reconciliation keys for its
   Findings — reconciliation matches textual Findings only — and its toolchain
   fingerprint must name the TypeScript version.
@@ -336,7 +381,7 @@ _which branch caused which half_ of each one.
   - a file renamed on one side is compared under its old name in the trees
     that have it;
   - each tree that cannot be checked — deps-dirty, a broken tsconfig in the
-    base, a worker crash — makes the whole result unavailable, never "nothing
+    base, a worker crash, a timeout, an exhausted heap — makes the whole result unavailable, never "nothing
     merge-induced", and names the tree;
   - checking the pair again with only B changed rechecks B and the merge and
     neither the base nor A, shown by a counter, with the four-tree and B-only

@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createBaselineDiffer } from '../src/analyzers/baseline.js';
 import type { BaselineDiffer, BaselineOutcome, BaselineTree } from '../src/analyzers/baseline.js';
 import { createTypecheckRegistry } from '../src/analyzers/typecheck.js';
-import type { TypecheckRegistry, TypecheckRequest } from '../src/analyzers/typecheck.js';
+import type {
+  TypecheckOutcome,
+  TypecheckRegistry,
+  TypecheckRequest,
+} from '../src/analyzers/typecheck.js';
 import { createGitRunner } from '../src/git/repo-handle.js';
 import type { GitRunner } from '../src/git/repo-handle.js';
 import { PROJECT, SEMANTIC_CASES, baselineFixture } from './support/semantic-fixtures.js';
@@ -37,7 +41,7 @@ describe('baseline differ', () => {
   let fixture: BaselineFixture | undefined;
   let registry: TypecheckRegistry;
   let checks: string[];
-  let fills: (string | undefined)[];
+  let listings: string[];
   let differ: BaselineDiffer;
 
   /** The registry the differ is given, counting checks by the slot's HEAD tree at the time. */
@@ -48,7 +52,7 @@ describe('baseline differ', () => {
           encoding: 'utf8',
         }).trim(),
       );
-      fills.push(request.fill);
+      listings.push(request.tree.oid);
       return inner.check(request);
     },
     release: (root) => inner.release(root),
@@ -61,7 +65,7 @@ describe('baseline differ', () => {
   beforeEach(() => {
     registry = createTypecheckRegistry();
     checks = [];
-    fills = [];
+    listings = [];
     differ = createBaselineDiffer({ runner: createGitRunner(), registry: counting(registry) });
   });
 
@@ -388,17 +392,12 @@ describe('baseline differ', () => {
         ...registry,
         check: (request) => {
           calls += 1;
-          // As the registry fails a check whose worker exits under it.
+          // As the registry answers a check whose worker exits under it.
           if (calls === 2) {
-            return Promise.reject(
-              new InterlockError(
-                'ANALYZER_INFRA_FAILURE',
-                'The type checker stopped: the worker exited with code 1',
-                {
-                  infra: true,
-                },
-              ),
-            );
+            return Promise.resolve({
+              kind: 'crashed',
+              message: 'the worker exited with code 1',
+            });
           }
           return registry.check(request);
         },
@@ -461,6 +460,49 @@ describe('baseline differ', () => {
       expect(outcome).toEqual({ kind: 'cancelled' });
       expect(head).toBe(expected);
     });
+  });
+
+  describe('a check that ends without a report', () => {
+    const outcomes: [string, TypecheckOutcome, RegExp][] = [
+      ['a timeout', { kind: 'timeout', deadlineMs: 180_000 }, /180000 ms/u],
+      ['an exhausted heap', { kind: 'out-of-memory', maxHeapMb: 3072 }, /3072 MiB/u],
+      [
+        'an install that moved under it',
+        { kind: 'infra-failure', reason: 'install-changed', message: 'reinstalled' },
+        /install-changed/u,
+      ],
+    ];
+    for (const [name, ended, reason] of outcomes) {
+      it(`is unavailable for ${name}, and the slot is back on the merge`, async () => {
+        const repo = await open({ ...PROJECT, 'src/a.ts': 'export const a = 1;\n' });
+        const ending: TypecheckRegistry = {
+          ...registry,
+          check: () => Promise.resolve(ended),
+          release: (root) => registry.release(root),
+          close: () => registry.close(),
+          live: 0,
+        };
+        const differ = createBaselineDiffer({ runner: createGitRunner(), registry: ending });
+        let head = '';
+        let expected = '';
+        const outcome = await repo.compare(
+          differ,
+          { one: { write: { 'src/one.ts': 'export const one = 1;\n' } } },
+          {
+            inside: (slot) => {
+              head = execFileSync('git', ['-C', slot.path, 'rev-parse', 'HEAD'], {
+                encoding: 'utf8',
+              }).trim();
+              expected = slot.commitSha;
+            },
+          },
+        );
+        expect(outcome).toMatchObject({ kind: 'unavailable', tree: 'base' });
+        if (outcome.kind === 'unavailable') expect(outcome.reason).toMatch(reason);
+        expect(head).toBe(expected);
+        expect(differ.cached).toBe(0);
+      });
+    }
   });
 
   describe('the cache', () => {
@@ -529,17 +571,14 @@ describe('baseline differ', () => {
   });
 
   describe('the slot', () => {
-    it('tells the service a cold fill once, on the first tree it checks', async () => {
+    it('sends each check the listing of the tree the slot holds', async () => {
       const repo = await open({ ...PROJECT, 'src/a.ts': 'export const a = 1;\n' });
-      const one = { write: { 'src/one.ts': 'export const one = 1;\n' } };
-      await repo.compare(differ, { one });
-      expect(fills).toEqual(['cold', 'delta', 'delta', 'delta']);
-      fills = [];
       await repo.compare(differ, {
-        one,
+        one: { write: { 'src/one.ts': 'export const one = 1;\n' } },
         two: { write: { 'src/two.ts': 'export const two = 2;\n' } },
       });
-      expect(fills).toEqual(['delta', 'delta']);
+      expect(new Set(checks).size).toBe(4);
+      expect(listings).toEqual(checks);
     });
 
     it('answers when the slot cannot be put back on the merge, which its next fill corrects', async () => {
@@ -564,7 +603,7 @@ describe('baseline differ', () => {
         ...registry,
         check: () =>
           Promise.reject(
-            new InterlockError('ANALYZER_INFRA_FAILURE', 'The type checker stopped', {
+            new InterlockError('GIT_COMMAND_FAILED', 'The shadow could not be read', {
               infra: true,
             }),
           ),

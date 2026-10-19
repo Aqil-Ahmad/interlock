@@ -10,6 +10,7 @@ import {
   parseConfigFile,
   parseRepoConfigOverride,
   resolveConfig,
+  TYPECHECK_MIN_HEAP_MB,
   validateConfig,
 } from './config.js';
 import { isInterlockError } from './errors.js';
@@ -117,7 +118,7 @@ describe('validateConfig', () => {
     expect(problems).toContain('dataDir must be absolute: relative/data');
   });
 
-  const { scheduler: S, sandbox: B, mcp: M } = DEFAULT_CONFIG;
+  const { scheduler: S, sandbox: B, typecheck: T, mcp: M } = DEFAULT_CONFIG;
 
   it('refuses a value of the wrong type before testing its range', () => {
     // The config arrives through JSON.parse, so a range test can be handed a
@@ -147,6 +148,25 @@ describe('validateConfig', () => {
     expect(problems).toContain('analyzers.textual must be true or false');
   });
 
+  it('refuses a type-check heap too small to start a worker, or not whole', () => {
+    // A worker below the minimum ends out of memory before it reads the tree;
+    // far enough below it, V8 aborts the whole process instead of the worker.
+    const withHeap = (maxHeapMb: number) =>
+      validateConfig({ ...DEFAULT_CONFIG, typecheck: { ...DEFAULT_CONFIG.typecheck, maxHeapMb } });
+    expect(withHeap(TYPECHECK_MIN_HEAP_MB)).toEqual([]);
+    expect(withHeap(TYPECHECK_MIN_HEAP_MB - 1)).toContain(
+      'typecheck.maxHeapMb must be a whole number >= 128',
+    );
+    expect(withHeap(1024.5)).toContain('typecheck.maxHeapMb must be a whole number >= 128');
+    expect(withHeap(Number.NaN)).toContain('typecheck.maxHeapMb must be a number');
+  });
+
+  it('accepts a type check with no grace, which terminates it at its deadline', () => {
+    expect(
+      validateConfig({ ...DEFAULT_CONFIG, typecheck: { ...DEFAULT_CONFIG.typecheck, graceMs: 0 } }),
+    ).toEqual([]);
+  });
+
   it('refuses the daemon and mcp sharing a port', () => {
     // A constraint between two sections rather than within one, so nothing
     // else in the file exercises the path that reads both.
@@ -167,6 +187,8 @@ describe('validateConfig', () => {
     ['sandbox.cpuLimit must be > 0', { sandbox: { ...B, cpuLimit: 0 } }],
     ['sandbox.memoryLimitMb must be >= 512', { sandbox: { ...B, memoryLimitMb: 8 } }],
     ['sandbox.timeoutMs must be >= 1000', { sandbox: { ...B, timeoutMs: 10 } }],
+    ['typecheck.deadlineMs must be >= 1000', { typecheck: { ...T, deadlineMs: 999 } }],
+    ['typecheck.graceMs must be >= 0', { typecheck: { ...T, graceMs: -1 } }],
     ['mcp.maxWarningsPerHour must be >= 0', { mcp: { ...M, maxWarningsPerHour: -1 } }],
   ])('refuses %s', (expected, patch) => {
     expect(validateConfig({ ...DEFAULT_CONFIG, ...patch })).toContain(expected);
@@ -389,6 +411,18 @@ describe('parseConfigFile', () => {
       7_200_000,
     );
     expect(resolveConfig({}).retention).toStrictEqual(DEFAULT_CONFIG.retention);
+  });
+
+  it('reads the typecheck section like any other, over the default', () => {
+    expect(parseConfigFile(JSON.stringify({ typecheck: { maxHeapMb: 8192 } }), PATH)).toStrictEqual(
+      { typecheck: { maxHeapMb: 8192 } },
+    );
+    expect(problemsOf(JSON.stringify({ typecheck: { heapMb: 1 } }))[0]).toContain('`heapMb`');
+    expect(resolveConfig({ typecheck: { maxHeapMb: 8192 } }).typecheck).toStrictEqual({
+      ...DEFAULT_CONFIG.typecheck,
+      maxHeapMb: 8192,
+    });
+    expect(() => resolveConfig({ typecheck: { maxHeapMb: 64 } })).toThrow(/typecheck\.maxHeapMb/u);
   });
 
   it('refuses an unknown key inside a section', () => {

@@ -7,9 +7,11 @@ import type { GitRunner, ShadowRepo } from '../git/repo-handle.js';
 import { dependencyDrift } from '../git/worktree-pool.js';
 import type { PoolSlot } from '../git/worktree-pool.js';
 import { DEFAULT_PROJECT, TYPESCRIPT_VERSION } from './typecheck-paths.js';
+import { listTree } from './typecheck.js';
 import type {
   ConfigDiagnostic,
   FileDiagnostic,
+  TypecheckOutcome,
   TypecheckRegistry,
   TypecheckReport,
 } from './typecheck.js';
@@ -328,7 +330,6 @@ export function createBaselineDiffer(options: BaselineDifferOptions): BaselineDi
       const checked: BaselineTree[] = [];
       const durationsMs: Partial<Record<BaselineTree, number>> = {};
       let current: BaselineTree = 'merge';
-      let firstFill: 'cold' | 'delta' = slot.fill;
 
       const move = async (tree: BaselineTree): Promise<void> => {
         if (tree === current) return;
@@ -343,12 +344,18 @@ export function createBaselineDiffer(options: BaselineDifferOptions): BaselineDi
           const outcome = await registry.check({
             root: slot.path,
             dependencyRoot: request.dependencyRoot,
+            // The slot's directory keeps what `reset --hard` leaves behind; the
+            // listing is what this tree holds.
+            tree: await listTree(runner, shadow, trees[tree]),
             project,
-            fill: firstFill,
             ...(signal === undefined ? {} : { signal }),
           });
-          firstFill = 'delta';
           if (outcome.kind === 'cancelled') return { kind: 'cancelled' };
+          if (outcome.kind !== 'checked') {
+            const reason = notChecked(outcome);
+            log.warn('baseline tree could not be checked', { tree, reason });
+            return { kind: 'unavailable', tree, reason };
+          }
           const identified = await identify(outcome.report, {
             runner,
             shadow,
@@ -421,6 +428,26 @@ function refusal(
     if (why !== null) return { kind: 'unavailable', tree, reason: why };
   }
   return null;
+}
+
+/**
+ * Why a check that ended without a report says nothing about its tree. A
+ * timeout or an exhausted heap is the environment's limit, not the code's
+ * verdict, so it is never read as an empty report.
+ */
+function notChecked(
+  outcome: Exclude<TypecheckOutcome, { kind: 'checked' } | { kind: 'cancelled' }>,
+): string {
+  switch (outcome.kind) {
+    case 'timeout':
+      return `its check ran past ${outcome.deadlineMs} ms`;
+    case 'out-of-memory':
+      return `its check ran out of memory at ${outcome.maxHeapMb} MiB`;
+    case 'crashed':
+      return `the type checker stopped: ${outcome.message}`;
+    case 'infra-failure':
+      return `its check could not run (${outcome.reason}): ${outcome.message}`;
+  }
 }
 
 /** What a tree's report is a pure function of. */
