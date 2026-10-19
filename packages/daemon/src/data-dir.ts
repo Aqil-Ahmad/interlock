@@ -100,6 +100,9 @@ export interface DataDirHold {
   release(): void;
 }
 
+/** Long enough to outlast a client's probe of the hold, short enough to refuse a second daemon at once. */
+const HOLD_BUSY_TIMEOUT_MS = 500;
+
 /**
  * Claim the directory for one daemon, for as long as that daemon runs.
  *
@@ -124,9 +127,12 @@ export interface DataDirHold {
 export function holdDataDir(path: string, logger: Logger): DataDirHold {
   ensureDataDir(path, logger);
   const lockPath = join(path, DATA_DIR_LOCK_FILENAME);
-  // No busy timeout: a second daemon should be told at once, not after waiting
-  // for one that may run for weeks.
-  const db = new DatabaseSync(lockPath, { timeout: 0 });
+  // A short busy timeout, not none: a client asking whether the directory is
+  // held takes a shared lock for an instant, and `start` asks every 100 ms
+  // while its own daemon is taking the hold. A daemon that holds the directory
+  // holds it for as long as it runs, so a second one is still told within
+  // this, not after waiting for one that may run for weeks.
+  const db = new DatabaseSync(lockPath, { timeout: HOLD_BUSY_TIMEOUT_MS });
   try {
     // Nothing is ever written here, and with the lock held exclusively a
     // journal on disk would stay behind as a second file for the whole run.

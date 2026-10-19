@@ -50,14 +50,14 @@ The sandbox is a fresh container per command, created with `--pull=never` and re
 
 ## Package map
 
-| Package                 | Role                                                  | Depends on                      |
-| ----------------------- | ----------------------------------------------------- | ------------------------------- |
-| `@interlock/shared`     | models, events, config, errors, logging, ids          | nothing                         |
-| `@interlock/core`       | git/shadow ops, speculative merge, analyzers, ranking | shared                          |
-| `@interlock/daemon`     | watcher, bus, scheduler, store, API, composition root | shared, core                    |
-| `@interlock/mcp-server` | agent-facing tools                                    | shared (+ daemon API over HTTP) |
-| `@interlock/cli`        | `interlock` command                                   | shared (+ daemon API over HTTP) |
-| `@interlock/dashboard`  | React UI                                              | shared (+ daemon API over HTTP) |
+| Package                 | Role                                                  | Depends on                                                      |
+| ----------------------- | ----------------------------------------------------- | --------------------------------------------------------------- |
+| `@interlock/shared`     | models, events, config, errors, logging, ids          | nothing                                                         |
+| `@interlock/core`       | git/shadow ops, speculative merge, analyzers, ranking | shared                                                          |
+| `@interlock/daemon`     | watcher, bus, scheduler, store, API, composition root | shared, core                                                    |
+| `@interlock/mcp-server` | agent-facing tools                                    | shared (+ daemon API over HTTP)                                 |
+| `@interlock/cli`        | `interlock` command                                   | shared, daemon (to start and purge it) (+ daemon API over HTTP) |
+| `@interlock/dashboard`  | React UI                                              | shared (+ daemon API over HTTP)                                 |
 
 Dependencies point one way. `shared` imports no sibling; `core` never imports a runtime package. Both are enforced in `eslint.config.js`.
 

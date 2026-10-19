@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,6 +37,32 @@ describe('isDataDirHeld', () => {
     expect(isDataDirHeld(dataDir)).toBe(false);
     // And asking does not take it either: the next daemon still can.
     holdDataDir(dataDir, silentLogger).release();
+  });
+
+  it('is taken while another process is asking whether it is held', async () => {
+    holdDataDir(dataDir, silentLogger).release();
+    // A client's probe: a shared lock on the file, held for a moment. In
+    // another process, since one process's locks never conflict with its own.
+    const probe = spawn(
+      process.execPath,
+      [
+        '-e',
+        [
+          "const { DatabaseSync } = require('node:sqlite');",
+          'const db = new DatabaseSync(process.argv[1], { readOnly: true });',
+          "db.exec('BEGIN'); db.exec('SELECT count(*) FROM sqlite_master');",
+          "process.stdout.write('asking\\n');",
+          "setTimeout(() => { db.exec('COMMIT'); db.close(); }, 200);",
+        ].join('\n'),
+        join(dataDir, DATA_DIR_LOCK_FILENAME),
+      ],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    await new Promise<void>((resolve) => probe.stdout.once('data', () => resolve()));
+
+    const hold = holdDataDir(dataDir, silentLogger);
+    hold.release();
+    await new Promise((resolve) => probe.once('exit', resolve));
   });
 
   it('refuses a lock file that is not a lock', () => {

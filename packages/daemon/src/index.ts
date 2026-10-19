@@ -20,7 +20,7 @@ export {
   refuseDataDirInRepos,
 } from './data-dir.js';
 export type { DataDirHold } from './data-dir.js';
-export { LOG_FILE_MODE, createFileSink, rotatedLogPath } from './log-file.js';
+export { LOG_FILE_MODE, createFileSink, openLogFile, rotatedLogPath } from './log-file.js';
 export type { FileSink } from './log-file.js';
 export { inspectPurge, purgeDataDir } from './purge.js';
 export type { PurgeOptions, PurgeReport } from './purge.js';

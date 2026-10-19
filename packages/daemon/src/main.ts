@@ -4,15 +4,10 @@
  *
  * Started by `interlock daemon start`; runnable directly for debugging.
  */
-import {
-  createLogger,
-  dataDirFrom,
-  isInterlockError,
-  loadConfig,
-  logPath,
-} from '@interlock/shared';
+import { createLogger, dataDirFrom, loadConfig, logPath } from '@interlock/shared';
+import type { Logger } from '@interlock/shared';
 import { createDaemon } from './daemon.js';
-import { createFileSink } from './log-file.js';
+import { createFileSink, recordFatal } from './log-file.js';
 
 /**
  * Write the log to the data dir's capped file rather than stderr.
@@ -22,6 +17,9 @@ import { createFileSink } from './log-file.js';
  * wants to watch it.
  */
 const LOG_TO_FILE = '--log-to-file';
+
+/** The logger once it writes to the file, for {@link recordFatal}. */
+let started: Logger | null = null;
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -35,6 +33,15 @@ async function main(): Promise<void> {
     ...(file === null ? {} : { sink: file.sink }),
   });
   const daemon = createDaemon({ config, logger });
+  if (file !== null) {
+    started = logger;
+    // In a terminal Node prints these itself, where the person running it is
+    // looking. In the background they belong in the log.
+    process.on('uncaughtException', (error) => {
+      logger.error('uncaught exception', { error: error.stack ?? String(error) });
+      process.exit(1);
+    });
+  }
 
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
@@ -61,13 +68,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  // The logger may not exist yet — its level comes from the config, and the
-  // config is the likeliest thing to have failed. Same shape as a log record,
-  // with the code and the remedy carried rather than flattened into the
-  // message: the remedy is the part a person can act on.
-  const record = isInterlockError(error)
-    ? { level: 'error', msg: error.message, code: error.code, remedy: error.remedy }
-    : { level: 'error', msg: error instanceof Error ? error.message : String(error) };
-  process.stderr.write(`${JSON.stringify(record)}\n`);
+  recordFatal(error, started);
   process.exit(1);
 });

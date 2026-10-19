@@ -25,7 +25,7 @@ import { captureState, describeDiff, diffState } from '../../core/test/support/r
 import { createDaemon } from '../src/daemon.js';
 import type { Daemon } from '../src/daemon.js';
 import { DATA_DIR_LOCK_FILENAME, holdDataDir } from '../src/data-dir.js';
-import { inspectPurge, purgeDataDir } from '../src/purge.js';
+import { inspectPurge, purgeDataDir, unlessGone } from '../src/purge.js';
 import type { PurgeOptions } from '../src/purge.js';
 import { rejection } from './support/rejection.js';
 
@@ -343,6 +343,19 @@ describe('purge', () => {
       expect(existsSync(join(dataDir, DATA_DIR_LOCK_FILENAME))).toBe(true);
     });
 
+    it('refused through Daemon.purge before the daemon is stopped', async () => {
+      const daemon = daemonFor(dataDir);
+      await daemon.start();
+      writeFileSync(join(dataDir, 'notes.txt'), 'mine\n');
+      try {
+        await expect(daemon.purge()).rejects.toMatchObject({ code: 'PURGE_REFUSED' });
+        expect(daemon.runtime).not.toBeNull();
+      } finally {
+        await daemon.stop();
+      }
+      expect(readFileSync(join(dataDir, 'notes.txt'), 'utf8')).toBe('mine\n');
+    });
+
     it('the staging files a crash leaves', async () => {
       plant(dataDir);
       writeFileSync(join(dataDir, 'daemon.json.123.tmp'), '{}');
@@ -351,5 +364,20 @@ describe('purge', () => {
       await purgeDataDir(dataDir, options());
       expect(existsSync(dataDir)).toBe(false);
     });
+  });
+});
+
+/** A file a live daemon removes mid-walk is skipped; any other failure is not. */
+describe('unlessGone', () => {
+  it('answers the fallback for a path that has gone', () => {
+    expect(unlessGone(() => readFileSync('/nonexistent/interlock-gone'), null)).toBeNull();
+  });
+
+  it('throws anything else', () => {
+    expect(() =>
+      unlessGone(() => {
+        throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      }, null),
+    ).toThrow('denied');
   });
 });

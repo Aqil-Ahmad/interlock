@@ -261,10 +261,28 @@ function blocks(stats: Stats): number {
  * one, whatever it names. A directory on another device is a mount someone
  * made inside the data dir, and nothing Interlock wrote.
  */
+/**
+ * `act`'s answer, or `fallback` when the path it touched has gone.
+ *
+ * Inspection runs while the daemon is live, and a repack in a shadow clone
+ * removes the very files a walk is counting; a file that goes mid-walk is
+ * skipped rather than failing the purge. Exported for tests.
+ */
+export function unlessGone<T>(act: () => T, fallback: T): T {
+  try {
+    return act();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback;
+    throw error;
+  }
+}
+
+/** Size, and with `remove` delete, everything under `path`. */
 function walk(path: string, device: number, remove: boolean): number {
-  const stats = lstatSync(path);
+  const stats = unlessGone((): Stats | null => lstatSync(path), null);
+  if (stats === null) return 0;
   if (!stats.isDirectory()) {
-    if (remove) unlinkSync(path);
+    if (remove) unlessGone(() => unlinkSync(path), undefined);
     return blocks(stats);
   }
   if (stats.dev !== device) {
@@ -278,7 +296,9 @@ function walk(path: string, device: number, remove: boolean): number {
     );
   }
   let total = blocks(stats);
-  for (const name of readdirSync(path)) total += walk(join(path, name), device, remove);
-  if (remove) rmdirSync(path);
+  for (const name of unlessGone(() => readdirSync(path), [])) {
+    total += walk(join(path, name), device, remove);
+  }
+  if (remove) unlessGone(() => rmdirSync(path), undefined);
   return total;
 }

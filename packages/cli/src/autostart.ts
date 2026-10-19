@@ -1,17 +1,19 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
-import { InterlockError } from '@interlock/shared';
-import type { CommandResult } from './processes.js';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import { InterlockError, logPath } from '@interlock/shared';
+import type { CommandResult, ServiceManager } from './processes.js';
 
 /**
  * The login item that starts the daemon: a launchd agent on macOS, a systemd
  * user unit on Linux.
  *
  * Off unless asked for. The item names absolute paths — the node binary, the
- * daemon's entry point and the data dir — and never relies on `PATH`, which a
- * login session sets differently from the shell that turned it on. Each data
- * dir gets its own item, so turning one off never touches another's.
+ * daemon's entry point and the data dir — and carries the `PATH` of the shell
+ * that turned it on, since a login session sets its own: launchd's finds only
+ * the system git, which Interlock does not support. Each data dir gets its own
+ * item, so turning one off never touches another's. What the daemon prints
+ * before it has a logger, and a crash, go to its log file.
  *
  * Every command runs through an injected runner, so the suite asserts on the
  * generated file and the argv without loading anything into the session it
@@ -19,7 +21,13 @@ import type { CommandResult } from './processes.js';
  */
 
 /** One command, as an argument array: there is no shell anywhere here. */
-export type AutostartRunner = (file: string, args: readonly string[]) => Promise<CommandResult>;
+export type AutostartRunner = (
+  file: ServiceManager,
+  args: readonly string[],
+) => Promise<CommandResult>;
+
+/** A service manager and its arguments. */
+type Command = readonly [ServiceManager, ...string[]];
 
 export interface AutostartContext {
   readonly platform: NodeJS.Platform;
@@ -31,6 +39,8 @@ export interface AutostartContext {
   /** The daemon's entry point, absolute. */
   readonly entry: string;
   readonly dataDir: string;
+  /** The `PATH` the daemon runs with, which is where it finds git. Relative entries are dropped. */
+  readonly path?: string;
   readonly run: AutostartRunner;
 }
 
@@ -51,6 +61,14 @@ const ITEM_MODE = 0o644;
 /** The flag `main.ts` takes to log into the data dir rather than stderr. */
 const LOG_TO_FILE = '--log-to-file';
 
+/**
+ * How long `off` waits for launchd to finish unloading an agent. `bootout`
+ * returns before the agent is gone, and a `bootstrap` of the same label before
+ * then fails with an I/O error — `on` over an existing item is exactly that.
+ */
+const BOOTOUT_WAIT_MS = 10_000;
+const BOOTOUT_POLL_MS = 100;
+
 function unsupported(platform: NodeJS.Platform): InterlockError {
   return new InterlockError('CONFIG_INVALID', `Autostart is not supported on ${platform}`, {
     remedy: 'Start the daemon with `interlock daemon start` after logging in.',
@@ -64,17 +82,38 @@ function unsupported(platform: NodeJS.Platform): InterlockError {
  * the directive and starts another — and a relative path would resolve against
  * wherever the session manager happens to run.
  */
-function checkPath(what: string, path: string): void {
-  const control = [...path].some((character) => {
+function hasControl(text: string): boolean {
+  return [...text].some((character) => {
     const point = character.codePointAt(0) ?? 0;
     return point < 0x20 || point === 0x7f;
   });
-  if (!isAbsolute(path) || control) {
+}
+
+function checkPath(what: string, path: string): void {
+  if (!isAbsolute(path) || hasControl(path)) {
     throw new InterlockError('CONFIG_INVALID', `The ${what} cannot be written into a login item`, {
       details: { [what]: path },
       remedy: `Use an absolute ${what} with no control characters in it.`,
     });
   }
+}
+
+/**
+ * The search path an item carries: absolute entries only, since a relative one
+ * resolves against wherever the session manager runs. One with a control
+ * character is refused, as any other path is; empty when none is left.
+ */
+function searchPath(path: string | undefined): string {
+  if (path === undefined) return '';
+  if (hasControl(path)) {
+    throw new InterlockError('CONFIG_INVALID', 'The PATH cannot be written into a login item', {
+      remedy: 'Remove the control characters from PATH and turn autostart on again.',
+    });
+  }
+  return path
+    .split(delimiter)
+    .filter((entry) => isAbsolute(entry))
+    .join(delimiter);
 }
 
 function hashOf(dataDir: string): string {
@@ -92,17 +131,14 @@ function xml(text: string): string {
 /**
  * One systemd word, quoted.
  *
- * Inside double quotes systemd still reads `\` escapes, expands `%` specifiers
- * everywhere and `$` variables on `ExecStart`, so each is escaped rather than
- * trusted to mean itself.
+ * Inside double quotes systemd still reads `\` escapes and expands `%`
+ * specifiers everywhere, so each is escaped rather than trusted to mean
+ * itself. `$` is expanded on `ExecStart` alone: there it is doubled, and
+ * anywhere else a doubled one would reach the daemon as two.
  */
-function systemdWord(text: string): string {
-  const escaped = text
-    .replaceAll('\\', '\\\\')
-    .replaceAll('"', '\\"')
-    .replaceAll('%', '%%')
-    .replaceAll('$', '$$$$');
-  return `"${escaped}"`;
+function systemdWord(text: string, onExecStart = false): string {
+  const escaped = text.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%');
+  return `"${onExecStart ? escaped.replaceAll('$', '$$$$') : escaped}"`;
 }
 
 /** The item `on` would install, without installing it. */
@@ -110,7 +146,13 @@ export function autostartItem(context: AutostartContext): AutostartItem {
   checkPath('node', context.node);
   checkPath('entry', context.entry);
   checkPath('dataDir', context.dataDir);
-  const hash = hashOf(context.dataDir);
+  // One item per directory however it was spelled: `~/.interlock/` and
+  // `~/.interlock` are the same data dir, and a purge of one must find the item
+  // the other installed.
+  const dataDir = resolve(context.dataDir);
+  const hash = hashOf(dataDir);
+  const path = searchPath(context.path);
+  const log = logPath(dataDir);
 
   if (context.platform === 'darwin') {
     const name = `ai.interlock.daemon.${hash}`;
@@ -130,8 +172,13 @@ export function autostartItem(context: AutostartContext): AutostartItem {
       '  <key>EnvironmentVariables</key>',
       '  <dict>',
       '    <key>INTERLOCK_DATA_DIR</key>',
-      `    <string>${xml(context.dataDir)}</string>`,
+      `    <string>${xml(dataDir)}</string>`,
+      ...(path === '' ? [] : ['    <key>PATH</key>', `    <string>${xml(path)}</string>`]),
       '  </dict>',
+      '  <key>StandardOutPath</key>',
+      `  <string>${xml(log)}</string>`,
+      '  <key>StandardErrorPath</key>',
+      `  <string>${xml(log)}</string>`,
       '  <key>RunAtLoad</key>',
       '  <true/>',
       // Not kept alive: a daemon stopped on purpose stays stopped, and one that
@@ -152,12 +199,16 @@ export function autostartItem(context: AutostartContext): AutostartItem {
     const content = [
       '[Unit]',
       // Specifiers expand here too.
-      `Description=Interlock daemon for ${context.dataDir.replaceAll('%', '%%')}`,
+      `Description=Interlock daemon for ${dataDir.replaceAll('%', '%%')}`,
       '',
       '[Service]',
       'Type=simple',
-      `Environment=${systemdWord(`INTERLOCK_DATA_DIR=${context.dataDir}`)}`,
-      `ExecStart=${[context.node, context.entry].map(systemdWord).join(' ')} ${LOG_TO_FILE}`,
+      `Environment=${systemdWord(`INTERLOCK_DATA_DIR=${dataDir}`)}`,
+      ...(path === '' ? [] : [`Environment=${systemdWord(`PATH=${path}`)}`]),
+      `ExecStart=${[context.node, context.entry].map((word) => systemdWord(word, true)).join(' ')} ${LOG_TO_FILE}`,
+      // Read whole to the end of the line, with specifiers expanded: no quoting.
+      `StandardOutput=append:${log.replaceAll('%', '%%')}`,
+      `StandardError=append:${log.replaceAll('%', '%%')}`,
       // No `Restart=`, for the reason the launchd agent is not kept alive.
       '',
       '[Install]',
@@ -176,7 +227,7 @@ export function autostartInstalled(context: AutostartContext): boolean {
 }
 
 /** The commands that load an installed item, in order. */
-function loadCommands(context: AutostartContext, item: AutostartItem): string[][] {
+function loadCommands(context: AutostartContext, item: AutostartItem): Command[] {
   if (context.platform === 'darwin') {
     return [['launchctl', 'bootstrap', `gui/${String(context.uid)}`, item.path]];
   }
@@ -187,7 +238,7 @@ function loadCommands(context: AutostartContext, item: AutostartItem): string[][
 }
 
 /** The commands that unload it. Run before the file goes, which they read. */
-function unloadCommands(context: AutostartContext, item: AutostartItem): string[][] {
+function unloadCommands(context: AutostartContext, item: AutostartItem): Command[] {
   if (context.platform === 'darwin') {
     return [['launchctl', 'bootout', `gui/${String(context.uid)}/${item.name}`]];
   }
@@ -195,7 +246,7 @@ function unloadCommands(context: AutostartContext, item: AutostartItem): string[
 }
 
 /** After the file goes, so the manager forgets the unit rather than reporting it missing. */
-function forgetCommands(context: AutostartContext): string[][] {
+function forgetCommands(context: AutostartContext): Command[] {
   return context.platform === 'darwin' ? [] : [['systemctl', '--user', 'daemon-reload']];
 }
 
@@ -212,12 +263,12 @@ export async function enableAutostart(context: AutostartContext): Promise<Autost
   mkdirSync(dirname(item.path), { recursive: true });
   writeFileSync(item.path, item.content, { mode: ITEM_MODE });
   for (const [file, ...args] of loadCommands(context, item)) {
-    const result = await context.run(file!, args);
+    const result = await context.run(file, args);
     if (result.exitCode !== 0) {
       rmSync(item.path, { force: true });
-      throw new InterlockError('CONFIG_INVALID', `${file!} could not load the login item`, {
+      throw new InterlockError('CONFIG_INVALID', `${file} could not load the login item`, {
         details: { args, exitCode: result.exitCode, stderr: result.stderr.trim() },
-        remedy: `Run \`${[file!, ...args].join(' ')}\` to see why, then turn autostart on again.`,
+        remedy: `Run \`${[file, ...args].join(' ')}\` to see why, then turn autostart on again.`,
       });
     }
   }
@@ -239,21 +290,36 @@ export async function disableAutostart(
   if (!existsSync(item.path)) return { removed: false, warnings: [] };
   const warnings: string[] = [];
   for (const [file, ...args] of unloadCommands(context, item)) {
-    const result = await context.run(file!, args);
+    const result = await context.run(file, args);
     if (result.exitCode !== 0) {
       warnings.push(
-        `${[file!, ...args].join(' ')} exited ${String(result.exitCode)}: ${result.stderr.trim()}`,
+        `${[file, ...args].join(' ')} exited ${String(result.exitCode)}: ${result.stderr.trim()}`,
       );
     }
   }
+  if (context.platform === 'darwin') await bootedOut(context, item);
   rmSync(item.path, { force: true });
   for (const [file, ...args] of forgetCommands(context)) {
-    const result = await context.run(file!, args);
+    const result = await context.run(file, args);
     if (result.exitCode !== 0) {
       warnings.push(
-        `${[file!, ...args].join(' ')} exited ${String(result.exitCode)}: ${result.stderr.trim()}`,
+        `${[file, ...args].join(' ')} exited ${String(result.exitCode)}: ${result.stderr.trim()}`,
       );
     }
   }
   return { removed: true, warnings };
+}
+
+/**
+ * Wait until launchd no longer knows the agent: `print` fails for a label it
+ * does not have. Bounded, and a wait that runs out is not an error here — a
+ * `bootstrap` after it says so itself.
+ */
+async function bootedOut(context: AutostartContext, item: AutostartItem): Promise<void> {
+  const target = `gui/${String(context.uid)}/${item.name}`;
+  const deadline = Date.now() + BOOTOUT_WAIT_MS;
+  while ((await context.run('launchctl', ['print', target])).exitCode === 0) {
+    if (Date.now() > deadline) return;
+    await new Promise((done) => setTimeout(done, BOOTOUT_POLL_MS));
+  }
 }

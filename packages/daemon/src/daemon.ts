@@ -13,7 +13,7 @@ import type { DataDirHold } from './data-dir.js';
 import type { ApiServer } from './api/index.js';
 import { EventBus } from './bus/index.js';
 import { createSessionRegistry } from './hooks/index.js';
-import { purgeDataDir } from './purge.js';
+import { inspectPurge, purgeDataDir } from './purge.js';
 import type { PurgeReport } from './purge.js';
 import { createRetention } from './retention.js';
 import type { Retention } from './retention.js';
@@ -166,15 +166,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
     },
 
     async purge(): Promise<PurgeReport> {
-      await this.stop();
-      // Takes the hold itself, so nothing starts between this stop and the
-      // deletion — this daemon included.
-      return purgeDataDir(config.dataDir, {
+      const purging = {
         repos: () => config.repos,
         runner: options.runner ?? createGitRunner(),
         home: homedir(),
         logger: log,
-      });
+      };
+      // Refused before anything is stopped: a purge that would be refused must
+      // not take the daemon down on its way to being refused.
+      await inspectPurge(config.dataDir, purging);
+      await this.stop();
+      // Takes the hold itself, so nothing starts between this stop and the
+      // deletion — this daemon included.
+      return purgeDataDir(config.dataDir, purging);
     },
   };
 

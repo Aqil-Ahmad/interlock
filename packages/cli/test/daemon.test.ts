@@ -94,6 +94,10 @@ describe('interlock daemon', () => {
       uid: 501,
       run: (file, args) => {
         calls.push({ argv: [file, ...args] });
+        // launchd's answer for a label it no longer has: the agent is gone.
+        if (file === 'launchctl' && args[0] === 'print') {
+          return Promise.resolve({ exitCode: 113, stderr: 'Could not find service\n' });
+        }
         return Promise.resolve(
           failing !== null && [file, ...args].join(' ').includes(failing)
             ? { exitCode: 5, stderr: 'refused\n' }
@@ -255,6 +259,9 @@ describe('interlock daemon', () => {
       expect(await daemon('logs', '-n')).toBe(64);
       expect(await daemon('stop', '--yes')).toBe(64);
       expect(await daemon('autostart', 'maybe')).toBe(64);
+      // A name every object has is not a command.
+      expect(await runDaemon(['toString', 'on'], installed())).toBe(64);
+      expect(calls).toStrictEqual([]);
     });
 
     it('refuses a relative INTERLOCK_DATA_DIR with 64', async () => {
@@ -426,13 +433,45 @@ describe('interlock daemon', () => {
       }
     });
 
+    it('leaves a daemon still in its first pass running, and says so', async () => {
+      // Holds the data dir as the daemon does, and never publishes: a daemon
+      // whose first pass over the repositories outlasts the wait.
+      const holding = [
+        "const { DatabaseSync } = require('node:sqlite');",
+        "const db = new DatabaseSync(require('node:path').join(process.env.INTERLOCK_DATA_DIR, 'daemon.lock'));",
+        "db.exec('PRAGMA locking_mode = EXCLUSIVE'); db.exec('BEGIN EXCLUSIVE'); db.exec('COMMIT');",
+        'setInterval(() => {}, 1000);',
+      ].join('\n');
+      out = [];
+      err = [];
+      const code = await runDaemon(['start'], {
+        ...io(),
+        launch: () => ({ command: process.execPath, args: ['-e', holding, '--'] }),
+        startTimeoutMs: 1_000,
+      });
+      const pid = Number(/pid (\d+)/u.exec(stderr())?.[1]);
+      try {
+        expect(code).toBe(69);
+        expect(stderr()).toContain('still starting');
+        expect(signalled).toStrictEqual([]);
+        expect(alive(pid)).toBe(true);
+      } finally {
+        if (pid > 0) process.kill(pid, 'SIGKILL');
+      }
+    });
+
     it('reports a daemon that does not exit after SIGTERM, without escalating', async () => {
       // Confirmed by the hold and the API, and deaf to SIGTERM.
       const deaf = spawn(
         process.execPath,
-        ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
-        { stdio: 'ignore' },
+        [
+          '-e',
+          "process.on('SIGTERM', () => {}); process.stdout.write('deaf\\n'); setInterval(() => {}, 1000)",
+        ],
+        { stdio: ['ignore', 'pipe', 'ignore'] },
       );
+      // Said once the handler is in: before it, SIGTERM would still kill it.
+      const deafened = new Promise<void>((resolve) => deaf.stdout.once('data', () => resolve()));
       children.push(deaf);
       mkdirSync(dataDir, { recursive: true, mode: 0o700 });
       holds.push(holdDataDir(dataDir, silentLogger));
@@ -442,8 +481,7 @@ describe('interlock daemon', () => {
         startedAt: new Date().toISOString(),
       });
       publish(port, deaf.pid!);
-      // Until node has installed the handler, SIGTERM would still kill it.
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await deafened;
 
       out = [];
       err = [];
@@ -633,9 +671,16 @@ describe('interlock daemon', () => {
       expect(out.join('')).not.toContain('grown');
       appendFileSync(logPath(dataDir), `${record('grown').slice(10)}\n`);
       await until('grown');
+      // The old file's last line lands just before the rotation, with no poll
+      // between them: it is read from the old file before the new one.
+      appendFileSync(logPath(dataDir), `${record('last before rotation')}\n`);
       renameSync(logPath(dataDir), `${logPath(dataDir)}.1`);
       write(record('after rotation'));
       await until('after rotation');
+      expect(out.join('')).toContain('last before rotation');
+      expect(out.join('').indexOf('last before rotation')).toBeLessThan(
+        out.join('').indexOf('after rotation'),
+      );
       follow.abort();
       expect(await done).toBe(0);
       expect(out.join('').split('grown').length - 1).toBe(1);
@@ -650,6 +695,7 @@ describe('interlock daemon', () => {
       node: '/usr/local/bin/node',
       entry: '/opt/interlock/daemon/main.js',
       dataDir,
+      path: process.env.PATH ?? '',
       run: () => Promise.resolve({ exitCode: 0, stderr: '' }),
       ...overrides,
     });
@@ -703,6 +749,7 @@ describe('interlock daemon', () => {
       expect(await runDaemon(['autostart', 'off'], installed())).toBe(0);
       expect(calls.map((call) => call.argv)).toStrictEqual([
         ['launchctl', 'bootout', `gui/501/${item.name}`],
+        ['launchctl', 'print', `gui/501/${item.name}`],
       ]);
       expect(existsSync(item.path)).toBe(false);
     });
@@ -717,12 +764,35 @@ describe('interlock daemon', () => {
       const odd = '/tmp/a "b" %h $HOME \\ & <c>';
       const unit = autostartItem(context({ dataDir: odd, entry: '/opt/$x/%i.js' })).content;
       expect(unit).toContain(
-        'Environment="INTERLOCK_DATA_DIR=/tmp/a \\"b\\" %%h $$HOME \\\\ & <c>"',
+        'Environment="INTERLOCK_DATA_DIR=/tmp/a \\"b\\" %%h $HOME \\\\ & <c>"',
       );
       expect(unit).toContain('"/opt/$$x/%%i.js"');
       expect(unit).toContain('Description=Interlock daemon for /tmp/a "b" %%h $HOME \\ & <c>');
       const plist = autostartItem(context({ platform: 'darwin', dataDir: odd })).content;
       expect(plist).toContain('<string>/tmp/a &quot;b&quot; %h $HOME \\ &amp; &lt;c&gt;</string>');
+    });
+
+    it('carries the PATH it was turned on with, absolute entries only, and logs what the daemon prints', () => {
+      const path = ['/opt/homebrew/bin', 'relative/bin', '/usr/bin'].join(':');
+      const unit = autostartItem(context({ path })).content;
+      expect(unit).toContain('Environment="PATH=/opt/homebrew/bin:/usr/bin"');
+      expect(unit).toContain(`StandardOutput=append:${join(dataDir, 'daemon.log')}`);
+      expect(unit).toContain(`StandardError=append:${join(dataDir, 'daemon.log')}`);
+      const plist = autostartItem(context({ platform: 'darwin', path })).content;
+      expect(plist).toContain('<key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/bin</string>');
+      expect(plist).toContain(
+        `<key>StandardErrorPath</key>\n  <string>${join(dataDir, 'daemon.log')}</string>`,
+      );
+      expect(() => autostartItem(context({ path: '/bin\n[Service]' }))).toThrow(/PATH/u);
+    });
+
+    it('names one item for a data dir however it is spelled', () => {
+      expect(autostartItem(context({ dataDir: `${dataDir}/` })).path).toBe(
+        autostartItem(context()).path,
+      );
+      expect(autostartItem(context({ dataDir: `${dataDir}/./` })).content).toContain(
+        `Environment="INTERLOCK_DATA_DIR=${dataDir}"`,
+      );
     });
 
     it('refuses a path it cannot write faithfully, and a platform it does not know', () => {
@@ -832,6 +902,14 @@ describe('interlock daemon', () => {
       expect(await daemon('stop', '--purge', '--yes')).toBe(0);
       expect(stdout()).toContain('Nothing to purge');
     }, 60_000);
+
+    it('purges a data dir no login item could name', async () => {
+      dataDir = join(base, 'data\u0007dir');
+      config({ repos: [], daemon: { port: 0 } });
+      writeFileSync(join(dataDir, 'daemon.lock'), '');
+      expect(await runDaemon(['stop', '--purge', '--yes'], installed())).toBe(0);
+      expect(existsSync(dataDir)).toBe(false);
+    });
 
     it('leaves a watched repository byte-identical', async () => {
       const repo = join(base, 'repo');

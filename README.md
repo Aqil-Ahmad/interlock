@@ -42,7 +42,7 @@ alias interlock="node $PWD/packages/cli/dist/main.js"
 Tell the daemon which repositories to watch, then run it in the background:
 
 ```bash
-mkdir -p ~/.interlock
+mkdir -p -m 700 ~/.interlock
 echo '{ "repos": ["/path/to/your/repo"] }' > ~/.interlock/config.json
 
 interlock daemon start           # detached; logs to ~/.interlock/daemon.log
@@ -60,8 +60,6 @@ interlock daemon stop --purge    # stop it, remove autostart, delete everything 
 ```
 
 `INTERLOCK_DATA_DIR` points every command and the daemon at another data directory.
-
-Still to come: `interlock init` to set up a repository and its agent hooks, and the dashboard.
 
 ## Repository layout
 

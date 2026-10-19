@@ -23,7 +23,7 @@ import {
 import type { Logger } from '@interlock/shared';
 import type { PurgeReport } from '@interlock/daemon';
 import { autostartInstalled, disableAutostart, enableAutostart } from '../autostart.js';
-import { launchDetached, runCommand } from '../processes.js';
+import { launchNode, runServiceManager } from '../processes.js';
 import type { AutostartContext, AutostartRunner } from '../autostart.js';
 import { safeJson, safeText } from '../render.js';
 import type { Command } from './command.js';
@@ -64,7 +64,7 @@ const USAGE = [
   '  stop --purge         Stop it and delete everything Interlock stored',
   '  status               Say whether it is running, and where',
   '  logs                 Print its log',
-  '  autostart on|off     Start it at login, or stop doing so',
+  '  autostart on|off     Start it now and at login, or stop it and undo that',
   '',
   'Run `interlock daemon <command> --help` for a command’s options.',
   '',
@@ -132,6 +132,9 @@ const HELP: Record<string, string> = {
     '',
     'Install a login item that starts the daemon for this data directory — a',
     'launchd agent on macOS, a systemd user unit on Linux — or remove it.',
+    '',
+    '`on` starts the daemon now as well as at login; `off` stops a daemon the',
+    'item started, as well as removing it.',
     '',
     EXIT_CODES,
   ].join('\n'),
@@ -201,7 +204,7 @@ const processIo: DaemonIo = {
     platform: process.platform,
     home: homedir(),
     uid: process.getuid?.() ?? 0,
-    run: runCommand,
+    run: runServiceManager,
   },
   home: homedir(),
   kill: (pid, signal) => process.kill(pid, signal),
@@ -291,11 +294,13 @@ async function health(port: number, token: string): Promise<Health | null> {
 async function probe(dataDir: string): Promise<Probe> {
   const { isDataDirHeld } = await import('@interlock/daemon');
   const held = isDataDirHeld(dataDir);
+  // Before the token is sent anywhere: with no daemon holding the directory,
+  // whatever answers on the port it last published is not this one.
+  if (!held) return { state: 'stopped', stale: existsSync(runtimePath(dataDir)) };
   const published = readPublished(dataDir);
   const token = readToken(dataDir);
   const answer = published !== null && token !== null ? await health(published.port, token) : null;
 
-  if (!held) return { state: 'stopped', stale: existsSync(runtimePath(dataDir)) };
   if (published === null) {
     return { state: 'unconfirmed', reason: 'it has published no port' };
   }
@@ -335,7 +340,8 @@ export async function runDaemon(
     io.out(`${USAGE}\n`);
     return sub === undefined ? EXIT_USAGE : EXIT_OK;
   }
-  const help = HELP[sub];
+  // Own keys only: `toString` is not a subcommand.
+  const help = Object.hasOwn(HELP, sub) ? HELP[sub] : undefined;
   if (help === undefined) {
     io.err(`Unknown daemon command: ${safeText(sub)}\n\n${USAGE}\n`);
     return EXIT_USAGE;
@@ -453,16 +459,18 @@ async function start(dataDir: string, io: DaemonIo): Promise<number> {
   daemon.ensureDataDir(dataDir, warningsTo(io));
 
   const path = logPath(dataDir);
-  const log = openSync(path, 'a', daemon.LOG_FILE_MODE);
+  const log = daemon.openLogFile(path);
   // Where this start's records begin, so a failure is read from them and not
   // from a previous run's.
   const offset = fstatSync(log).size;
   const { command, args } = io.launch();
-  let child: ReturnType<typeof launchDetached>;
+  // The daemon runs on the node running this: the one binary started here.
+  if (command !== process.execPath) throw new TypeError(`Not the running node: ${command}`);
+  let child: ReturnType<typeof launchNode>;
   try {
     // Its stderr too: what it writes before it has a logger — the error it
     // dies of at start — is the record this reads back.
-    child = launchDetached(command, [...args, '--log-to-file'], log, {
+    child = launchNode([...args, '--log-to-file'], log, {
       ...io.env,
       INTERLOCK_DATA_DIR: dataDir,
     });
@@ -495,6 +503,22 @@ async function start(dataDir: string, io: DaemonIo): Promise<number> {
       return EXIT_OK;
     }
     if (Date.now() > deadline) {
+      // Held, nothing published, and ours still alive: past its checks and
+      // into its first pass over the repositories, which publishes the
+      // runtime file only once done, and on a large setup outlasts any wait
+      // worth making here. Slow, not stuck — left to finish. A daemon that has
+      // published is another one, and is not claimed.
+      if (
+        child.pid !== undefined &&
+        outcome.exited === null &&
+        now.state === 'unconfirmed' &&
+        readPublished(dataDir) === null
+      ) {
+        io.err(
+          `The daemon (pid ${String(child.pid)}) is still starting.\n\nRun \`interlock daemon status\` to see when it is up, \`interlock daemon logs\` for what it is doing, or \`interlock daemon stop\` to stop it.\n`,
+        );
+        return EXIT_UNAVAILABLE;
+      }
       // Ours, by pid, from the spawn itself: the one process this may signal
       // without asking anyone.
       if (child.pid !== undefined && outcome.exited === null) io.kill(child.pid, 'SIGTERM');
@@ -737,72 +761,103 @@ async function logs(dataDir: string, io: DaemonIo, options: LogOptions): Promise
     return EXIT_UNAVAILABLE;
   }
 
-  let offset = 0;
-  let identity: number | null = null;
-  if (existsSync(path)) {
-    const previous = existsSync(rotatedLogPath(path))
-      ? readFileSync(rotatedLogPath(path), 'utf8')
-      : '';
-    const current = readFileSync(path, 'utf8');
-    identity = statSync(path).ino;
-    // A partial last line is left for `--follow` to finish.
-    const complete =
-      current.endsWith('\n') || current === ''
-        ? current
-        : current.slice(0, current.lastIndexOf('\n') + 1);
-    offset = Buffer.byteLength(complete);
-    const lines = `${previous}${complete}`.split('\n').filter((line) => line !== '');
-    for (const line of options.lines === 0 ? [] : lines.slice(-options.lines)) emit(line);
-  }
-  if (!options.follow) return EXIT_OK;
-
-  const signal = io.stopped();
-  let pending = '';
-  while (!signal.aborted) {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, FOLLOW_POLL_MS);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
-    let stats;
+  const open = (): number | null => {
     try {
-      stats = statSync(path);
+      return openSync(path, 'r');
     } catch {
-      continue;
+      return null;
     }
-    // Rotated: a new file under the name. Read it from the start.
-    if (stats.ino !== identity || stats.size < offset) {
-      identity = stats.ino;
+  };
+  // Followed by descriptor, not by name: a rotation renames the file under
+  // the name, and a read by name after it would take the new file at the old
+  // one's offset.
+  let handle = existsSync(path) ? open() : null;
+  let offset = 0;
+  let pending = '';
+  try {
+    if (handle !== null) {
+      const previous = existsSync(rotatedLogPath(path))
+        ? readFileSync(rotatedLogPath(path), 'utf8')
+        : '';
+      const current = readRange(handle, 0, fstatSync(handle).size).toString('utf8');
+      // A partial last line is left for `--follow` to finish.
+      const complete =
+        current.endsWith('\n') || current === ''
+          ? current
+          : current.slice(0, current.lastIndexOf('\n') + 1);
+      offset = Buffer.byteLength(complete);
+      const lines = `${previous}${complete}`.split('\n').filter((line) => line !== '');
+      for (const line of options.lines === 0 ? [] : lines.slice(-options.lines)) emit(line);
+    }
+    if (!options.follow) return EXIT_OK;
+
+    /** Everything written to the held file since the last read, as complete lines. */
+    const drain = (held: number): void => {
+      const size = fstatSync(held).size;
+      // Truncated in place: start again from what is there.
+      if (size < offset) {
+        offset = 0;
+        pending = '';
+      }
+      if (size === offset) return;
+      const chunk = readRange(held, offset, size);
+      offset += chunk.length;
+      pending += chunk.toString('utf8');
+      const end = pending.lastIndexOf('\n');
+      if (end === -1) return;
+      for (const line of pending.slice(0, end).split('\n')) emit(line);
+      pending = pending.slice(end + 1);
+    };
+
+    const signal = io.stopped();
+    while (!signal.aborted) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, FOLLOW_POLL_MS);
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      if (handle === null) {
+        handle = open();
+        offset = 0;
+        pending = '';
+        if (handle === null) continue;
+      }
+      drain(handle);
+      let named;
+      try {
+        named = statSync(path);
+      } catch {
+        // Between the rename and the new file: the next poll finds it.
+        continue;
+      }
+      const held = fstatSync(handle);
+      if (named.ino === held.ino && named.dev === held.dev) continue;
+      // Rotated. What was written to the old file before the switch is read
+      // to its end first, so no line is lost to the rename.
+      drain(handle);
+      if (pending !== '') emit(pending);
+      closeSync(handle);
+      handle = open();
       offset = 0;
       pending = '';
+      if (handle !== null) drain(handle);
     }
-    if (stats.size === offset) continue;
-    const chunk = readRange(path, offset, stats.size);
-    offset += chunk.length;
-    pending += chunk.toString('utf8');
-    const end = pending.lastIndexOf('\n');
-    if (end === -1) continue;
-    for (const line of pending.slice(0, end).split('\n')) emit(line);
-    pending = pending.slice(end + 1);
+    return EXIT_OK;
+  } finally {
+    if (handle !== null) closeSync(handle);
   }
-  return EXIT_OK;
 }
 
-function readRange(path: string, from: number, to: number): Buffer {
-  const handle = openSync(path, 'r');
-  try {
-    const buffer = Buffer.alloc(to - from);
-    const read = readSync(handle, buffer, 0, buffer.length, from);
-    return buffer.subarray(0, read);
-  } finally {
-    closeSync(handle);
-  }
+function readRange(handle: number, from: number, to: number): Buffer {
+  const buffer = Buffer.alloc(to - from);
+  const read = readSync(handle, buffer, 0, buffer.length, from);
+  return buffer.subarray(0, read);
 }
 
 function autostartContext(dataDir: string, io: DaemonIo): AutostartContext {
@@ -813,7 +868,7 @@ function autostartContext(dataDir: string, io: DaemonIo): AutostartContext {
       remedy: 'Run autostart from an installed build of Interlock.',
     });
   }
-  return { ...io.autostart, node: command, entry, dataDir };
+  return { ...io.autostart, node: command, entry, dataDir, path: io.env.PATH ?? '' };
 }
 
 async function autostart(dataDir: string, io: DaemonIo, rest: readonly string[]): Promise<number> {
@@ -851,14 +906,16 @@ async function purge(dataDir: string, io: DaemonIo, yes: boolean): Promise<numbe
   const repos = (): readonly string[] => loadConfig(dataDir).repos;
   const options = { repos, home: io.home, logger: warningsTo(io) };
   const found = await daemon.inspectPurge(dataDir, options);
-  const context = (() => {
+  // A data dir no login item can name — a control character in it — has none
+  // installed, and is still purged.
+  const [context, installed] = ((): [AutostartContext | null, boolean] => {
     try {
-      return autostartContext(dataDir, io);
+      const made = autostartContext(dataDir, io);
+      return [made, autostartInstalled(made)];
     } catch {
-      return null;
+      return [null, false];
     }
   })();
-  const installed = context !== null && autostartInstalled(context);
 
   if (!found.existed && !installed) {
     io.out(`Nothing to purge: ${safeText(dataDir)} does not exist.\n`);
@@ -894,7 +951,7 @@ async function purge(dataDir: string, io: DaemonIo, yes: boolean): Promise<numbe
       return EXIT_SOFTWARE;
     }
   }
-  if (installed) {
+  if (installed && context !== null) {
     const { warnings } = await disableAutostart(context);
     for (const warning of warnings) io.err(`warning: ${safeText(warning)}\n`);
     io.out('Autostart is off.\n');

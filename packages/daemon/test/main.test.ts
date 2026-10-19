@@ -132,13 +132,19 @@ describe('interlockd', () => {
     const done = finished(child);
     await until(() => publishedPid() !== null, 'the daemon to start');
     strays.add(publishedPid()!);
+    // The runtime file is published inside `start()`, and the started record
+    // is written after it returns: a signal between the two would stop it first.
+    const path = join(dataDir, 'daemon.log');
+    await until(
+      () => existsSync(path) && readFileSync(path, 'utf8').includes('"daemon started"'),
+      'the started record',
+    );
     child.kill('SIGTERM');
     const run = await done;
 
     expect(run.code).toBe(0);
     // Records only in the file; stderr keeps what node itself prints.
     expect(run.stderr).not.toContain('"daemon started"');
-    const path = join(dataDir, 'daemon.log');
     expect(statSync(path).mode & 0o777).toBe(0o600);
     const messages = readFileSync(path, 'utf8')
       .trim()
