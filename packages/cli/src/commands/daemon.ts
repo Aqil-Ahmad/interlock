@@ -23,6 +23,7 @@ import {
 import type { Logger } from '@interlock/shared';
 import type { PurgeReport } from '@interlock/daemon';
 import { autostartInstalled, disableAutostart, enableAutostart } from '../autostart.js';
+import type * as DaemonPackage from '@interlock/daemon';
 import { launchNode, runServiceManager } from '../processes.js';
 import type { AutostartContext, AutostartRunner } from '../autostart.js';
 import { safeJson, safeText } from '../render.js';
@@ -435,6 +436,24 @@ function parseLogs(rest: readonly string[]): LogOptions {
   return { lines, follow, json };
 }
 
+/**
+ * Create the data dir, owner-only, as the daemon would.
+ *
+ * The daemon refuses a data dir inside a watched repository before it writes
+ * anything, and what is written here — the log file, or the one a login item
+ * has its service manager open — would be the first thing there. So the same
+ * question is asked first, from the same config. A config that does not load is
+ * reported here, as the daemon would report it: there is no telling which
+ * repositories it would have named.
+ */
+async function prepareDataDir(dataDir: string, io: DaemonIo): Promise<typeof DaemonPackage> {
+  const config = loadConfig(dataDir);
+  const daemon = await import('@interlock/daemon');
+  await daemon.refuseDataDirInRepos(dataDir, config.repos);
+  daemon.ensureDataDir(dataDir, warningsTo(io));
+  return daemon;
+}
+
 async function start(dataDir: string, io: DaemonIo): Promise<number> {
   const before = await probe(dataDir);
   if (before.state === 'running') {
@@ -448,16 +467,9 @@ async function start(dataDir: string, io: DaemonIo): Promise<number> {
     return EXIT_UNAVAILABLE;
   }
 
-  // The daemon refuses a data dir inside a watched repository before it writes
-  // anything, and the log file this writes would be the first thing there. So
-  // the same question is asked first, from the same config. A config that does
-  // not load is reported here, as the daemon would report it: there is no
-  // telling which repositories it would have named.
-  const config = loadConfig(dataDir);
-  const daemon = await import('@interlock/daemon');
-  await daemon.refuseDataDirInRepos(dataDir, config.repos);
-  daemon.ensureDataDir(dataDir, warningsTo(io));
-
+  const daemon = await prepareDataDir(dataDir, io);
+  // What a crash may have left: there before the launch, so not this start's.
+  const leftover = readPublished(dataDir);
   const path = logPath(dataDir);
   const log = daemon.openLogFile(path);
   // Where this start's records begin, so a failure is read from them and not
@@ -503,16 +515,20 @@ async function start(dataDir: string, io: DaemonIo): Promise<number> {
       return EXIT_OK;
     }
     if (Date.now() > deadline) {
-      // Held, nothing published, and ours still alive: past its checks and
+      // Held, nothing published by this start, and ours still alive: past its checks and
       // into its first pass over the repositories, which publishes the
       // runtime file only once done, and on a large setup outlasts any wait
       // worth making here. Slow, not stuck — left to finish. A daemon that has
       // published is another one, and is not claimed.
+      const current = readPublished(dataDir);
+      const unpublished =
+        current === null ||
+        (leftover !== null && current.pid === leftover.pid && current.port === leftover.port);
       if (
         child.pid !== undefined &&
         outcome.exited === null &&
         now.state === 'unconfirmed' &&
-        readPublished(dataDir) === null
+        unpublished
       ) {
         io.err(
           `The daemon (pid ${String(child.pid)}) is still starting.\n\nRun \`interlock daemon status\` to see when it is up, \`interlock daemon logs\` for what it is doing, or \`interlock daemon stop\` to stop it.\n`,
@@ -878,6 +894,9 @@ async function autostart(dataDir: string, io: DaemonIo, rest: readonly string[])
   }
   const context = autostartContext(dataDir, io);
   if (toggle === 'on') {
+    // The service manager opens the log in the data dir before the daemon
+    // runs, and cannot create the directory itself.
+    await prepareDataDir(dataDir, io);
     const item = await enableAutostart(context);
     io.out(
       `Autostart is on: ${safeText(item.path)}\nThe daemon starts at login for ${safeText(dataDir)}.\n`,

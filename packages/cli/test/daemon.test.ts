@@ -460,6 +460,32 @@ describe('interlock daemon', () => {
       }
     });
 
+    it('leaves a slow daemon running over the runtime file a crashed one left', async () => {
+      // What a crash leaves: the file is removed only by a clean stop.
+      publish(1, bystander().pid!);
+      const holding = [
+        "const { DatabaseSync } = require('node:sqlite');",
+        "const db = new DatabaseSync(require('node:path').join(process.env.INTERLOCK_DATA_DIR, 'daemon.lock'));",
+        "db.exec('PRAGMA locking_mode = EXCLUSIVE'); db.exec('BEGIN EXCLUSIVE'); db.exec('COMMIT');",
+        'setInterval(() => {}, 1000);',
+      ].join('\n');
+      out = [];
+      err = [];
+      const code = await runDaemon(['start'], {
+        ...io(),
+        launch: () => ({ command: process.execPath, args: ['-e', holding, '--'] }),
+        startTimeoutMs: 1_000,
+      });
+      const pid = Number(/pid (\d+)/u.exec(stderr())?.[1]);
+      try {
+        expect(code).toBe(69);
+        expect(stderr()).toContain('still starting');
+        expect(signalled).toStrictEqual([]);
+      } finally {
+        if (pid > 0) process.kill(pid, 'SIGKILL');
+      }
+    });
+
     it('reports a daemon that does not exit after SIGTERM, without escalating', async () => {
       // Confirmed by the hold and the API, and deaf to SIGTERM.
       const deaf = spawn(
@@ -803,11 +829,23 @@ describe('interlock daemon', () => {
       expect(() => autostartItem(context({ platform: 'win32' }))).toThrow(/not supported/u);
     });
 
-    it('leaves nothing installed when the load fails', async () => {
+    it('leaves nothing installed or enabled when the load fails', async () => {
       failing = 'enable';
       expect(await runDaemon(['autostart', 'on'], installed())).toBe(70);
       expect(err.join('')).toContain('could not load');
-      expect(existsSync(autostartItem(context()).path)).toBe(false);
+      const item = autostartItem(context());
+      expect(existsSync(item.path)).toBe(false);
+      // `enable --now` may have enabled the unit before failing to start it.
+      expect(calls.map((call) => call.argv.join(' ')).slice(-2)).toStrictEqual([
+        `systemctl --user disable --now ${item.name}`,
+        'systemctl --user daemon-reload',
+      ]);
+    });
+
+    it('creates the data dir, owner-only, for the service manager to open the log in', async () => {
+      expect(existsSync(dataDir)).toBe(false);
+      expect(await runDaemon(['autostart', 'on'], installed())).toBe(0);
+      expect(statSync(dataDir).mode & 0o777).toBe(0o700);
     });
 
     it('replaces an item already installed, unloading it first', async () => {

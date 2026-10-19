@@ -265,7 +265,10 @@ export async function enableAutostart(context: AutostartContext): Promise<Autost
   for (const [file, ...args] of loadCommands(context, item)) {
     const result = await context.run(file, args);
     if (result.exitCode !== 0) {
-      rmSync(item.path, { force: true });
+      // Undone as `off` would: `enable --now` can enable the unit and then fail
+      // to start it, and an enablement left behind would load at the next
+      // login an item nothing here reports as installed.
+      await undo(context, item);
       throw new InterlockError('CONFIG_INVALID', `${file} could not load the login item`, {
         details: { args, exitCode: result.exitCode, stderr: result.stderr.trim() },
         remedy: `Run \`${[file, ...args].join(' ')}\` to see why, then turn autostart on again.`,
@@ -322,4 +325,11 @@ async function bootedOut(context: AutostartContext, item: AutostartItem): Promis
     if (Date.now() > deadline) return;
     await new Promise((done) => setTimeout(done, BOOTOUT_POLL_MS));
   }
+}
+
+/** Unload and forget an item `on` failed to load, whatever each step answers. */
+async function undo(context: AutostartContext, item: AutostartItem): Promise<void> {
+  for (const [file, ...args] of unloadCommands(context, item)) await context.run(file, args);
+  rmSync(item.path, { force: true });
+  for (const [file, ...args] of forgetCommands(context)) await context.run(file, args);
 }
