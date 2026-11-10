@@ -14,7 +14,7 @@ Interlock detects conflicts — textual and semantic — between parallel in-fli
 | `packages/core`       | git/shadow ops, speculative merge, analyzers, ranking. Pure logic, no processes |
 | `packages/daemon`     | watcher, event bus, scheduler, SQLite store, localhost API                      |
 | `packages/mcp-server` | agent-facing tool schemas; the prompt-injection boundary                        |
-| `packages/cli`        | user surface; a thin client over the daemon API                                 |
+| `packages/cli`        | user surface; a thin client over the daemon API, and what starts and purges it  |
 | `packages/dashboard`  | React UI. Outside the workspace and the build                                   |
 | `eval/`               | evaluation harness — do not edit                                                |
 | `docs/`               | public reference: architecture and threat model. True today, or not in here     |

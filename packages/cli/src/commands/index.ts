@@ -1,5 +1,6 @@
 import { notImplemented } from '@interlock/shared';
 import { checkCommand } from './check.js';
+import { daemonCommand } from './daemon.js';
 import { dismissCommand } from './dismiss.js';
 import { hookCommand } from './hook.js';
 import { statusCommand } from './status.js';
@@ -15,6 +16,8 @@ import type { Command } from './command.js';
 export type { Command } from './command.js';
 export { checkCommand, runCheck } from './check.js';
 export type { CheckIo } from './check.js';
+export { daemonCommand, formatLogLine, jsonLogLine, runDaemon } from './daemon.js';
+export type { DaemonIo } from './daemon.js';
 export { dismissCommand, runDismiss } from './dismiss.js';
 export type { DismissIo } from './dismiss.js';
 export { MAX_STDIN_BYTES, hookCommand, readBounded, runHook } from './hook.js';
@@ -31,6 +34,7 @@ export const COMMANDS: readonly Command[] = [
   hookCommand,
   checkCommand,
   dismissCommand,
+  daemonCommand,
   {
     name: 'watch',
     summary: 'Follow findings live in the terminal',
@@ -45,11 +49,6 @@ export const COMMANDS: readonly Command[] = [
     name: 'init',
     summary: 'Set up Interlock for a repository, including agent hooks',
     run: todo('init'),
-  },
-  {
-    name: 'daemon',
-    summary: 'Manage the background service: daemon start|stop|status|logs',
-    run: todo('daemon'),
   },
   {
     name: 'doctor',

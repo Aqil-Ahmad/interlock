@@ -95,7 +95,7 @@ describe('interlock status', () => {
       const code = await status('--data-dir', dataDir);
       expect(code).toBe(69);
       expect(stderr()).toContain('No daemon is running');
-      expect(stderr()).toContain('interlockd');
+      expect(stderr()).toContain('interlock daemon start');
       expect(stdout()).toBe('');
     });
 
@@ -110,7 +110,7 @@ describe('interlock status', () => {
       const code = await status('--data-dir', dataDir);
       expect(code).toBe(69);
       expect(stderr()).toContain('Nothing is listening');
-      expect(stderr()).toContain('interlockd');
+      expect(stderr()).toContain('interlock daemon start');
     });
 
     it('refuses a runtime file it cannot read a port out of', async () => {
