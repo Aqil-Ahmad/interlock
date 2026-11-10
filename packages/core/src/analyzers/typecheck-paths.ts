@@ -1,3 +1,5 @@
+import { createRequire } from 'node:module';
+
 /**
  * What the type-check registry needs of the service's module without loading
  * it: the service imports `typescript`, which only its worker should load, so
@@ -19,3 +21,12 @@ export const DEFAULT_PROJECT = 'tsconfig.json';
 export function siblingModule(base: string, name: string): URL {
   return new URL(`./${name}.${base.endsWith('.ts') ? 'ts' : 'js'}`, base);
 }
+
+/**
+ * The version of Interlock's own compiler, read from its manifest rather than
+ * the module, so that asking costs no compiler load. A report is only as good
+ * as the compiler that produced it, so anything cached on one is keyed on this.
+ */
+export const TYPESCRIPT_VERSION: string = (
+  createRequire(import.meta.url)('typescript/package.json') as { readonly version: string }
+).version;
