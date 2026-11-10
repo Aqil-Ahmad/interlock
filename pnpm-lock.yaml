@@ -41,13 +41,13 @@ importers:
 
   packages/cli:
     dependencies:
+      '@interlock/daemon':
+        specifier: workspace:*
+        version: link:../daemon
       '@interlock/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
-      '@interlock/daemon':
-        specifier: workspace:*
-        version: link:../daemon
       '@types/node':
         specifier: ^26.6.3
         version: 26.6.3

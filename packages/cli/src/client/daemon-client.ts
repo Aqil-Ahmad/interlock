@@ -22,8 +22,9 @@ import type {
  * Everything the command needs to know about where the daemon is lives in two
  * files under the data dir: the port it bound, which is knowable nowhere else
  * when the configured port is `0`, and the token it authenticates with. Both
- * paths come from `shared` — the CLI depends on `shared` and never on `daemon`,
- * and the two would otherwise have to agree by memory.
+ * paths come from `shared` — this client reads nothing from `daemon`, whose
+ * package only `interlock daemon` loads, and the two would otherwise have to
+ * agree by memory.
  *
  * Four failures are distinct here and only one of them is "not running". A
  * remedy that says "start the daemon" to someone whose daemon is running and
@@ -399,7 +400,7 @@ function readRuntime(dataDir: string): number {
     throw new InterlockError('DAEMON_UNREACHABLE', 'The daemon runtime file is not valid JSON', {
       cause: error,
       details: { path },
-      remedy: `Delete ${path} and start the daemon with \`interlockd\`.`,
+      remedy: `Delete ${path} and start the daemon with \`interlock daemon start\`.`,
     });
   }
 
@@ -407,7 +408,7 @@ function readRuntime(dataDir: string): number {
   if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new InterlockError('DAEMON_UNREACHABLE', 'The daemon runtime file names no valid port', {
       details: { path },
-      remedy: `Delete ${path} and start the daemon with \`interlockd\`.`,
+      remedy: `Delete ${path} and start the daemon with \`interlock daemon start\`.`,
     });
   }
   return port;
@@ -464,7 +465,8 @@ function notStarted(dataDir: string, cause: unknown): InterlockError {
   return new InterlockError('DAEMON_UNREACHABLE', 'No daemon is running for this data directory', {
     cause,
     details: { dataDir },
-    remedy: 'Start it with `interlockd`, or pass --data-dir if it is running elsewhere.',
+    remedy:
+      'Start it with `interlock daemon start`, or pass --data-dir if it is running elsewhere.',
   });
 }
 
@@ -473,7 +475,7 @@ function notRunning(dataDir: string, port: number, cause: unknown): InterlockErr
     cause,
     details: { dataDir, port },
     remedy:
-      'The daemon is not running, or it stopped without cleaning up. Start it with `interlockd`.',
+      'The daemon is not running, or it stopped without cleaning up. Start it with `interlock daemon start`.',
   });
 }
 
