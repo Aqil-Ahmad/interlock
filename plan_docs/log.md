@@ -4,6 +4,11 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-11-13 — the 24 cell held at 24.21.0
+
+- **Found — the regression is wider than 26.9.0.** nodejs/node#66791 reports the recursive watcher's `EACCES` on 24.22.0 and 26.12.0 as well; 24.21.0 and 26.8.2 survive. The floating 24 cell took 24.22.0, so `status.test.ts`'s unreadable-worktree test ended the run with an unhandled error on `dev` and on every branch cut from it. The 26 cells read `.node-version` (26.4.0) and were never exposed.
+- **Decided — hold the 24 cell at 24.21.0 rather than work around Node.** The fix upstream is nodejs/node#66792, open. A code workaround (one watch per directory) stays the rewrite this task already declined, and the test is right. The README names the affected lines; unpinning is in the task's Done when.
+
 ## 2026-10-16 — typecheck runner, reworked from the review of #97
 
 - **Reworked from review.** #97 was a parallel version of this task on an older base; the review kept nine of its parts for `dev`'s service (#91) and trimmed the rest. Ported onto #91's design, not rebased: the tree's listing, the outcome kinds, the deadline and its grace, the install identity, an empty worker environment and a configured heap, the walk past a workspace link, the bench script and its numbers, and the importer-cancellation test. Already on `dev` and kept as they were: plugin stripping and its `extends` test, the `tsc`-parity tests, the heap check after each check. Task rewritten in the same change, and ticked: every `Done when` passes, archestra's numbers included.

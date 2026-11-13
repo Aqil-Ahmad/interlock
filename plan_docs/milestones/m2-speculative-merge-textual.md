@@ -53,7 +53,8 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
   unreadable throws `EACCES` from inside Node's own callback, past every
   `'error'` listener, and the process dies. Measured across the line: 26.4.0,
   26.5.1, 26.6.0, 26.7.0 and 26.8.2 survive; 26.9.0 does not, and is the
-  newest 26.x. Not worked around — there are no users to protect, a workaround
+  newest 26.x. The regression (PR 65486) also reached 24.22.0, and 26.12.0
+  has it too; 24.21.0 does not. The fix is nodejs/node#66792, open. Not worked around — there are no users to protect, a workaround
   would be a permanent shape carried for a temporary bug, and the one thing
   that reliably prevented the crash was closing the watch, which is the very
   over-reaction the task above removes. Recorded in `README.md` instead.
@@ -67,7 +68,8 @@ Typecheck cost is the budget that decides whether this product runs on a laptop.
   load-bearing subsystem in the daemon and wants its own measurements.
 
   **Done when:** the regression is filed upstream and fixed, the `README.md`
-  paragraph is gone, and the required CI cells run a Node that has the fix.
+  paragraph is gone, the 24 cell in `ci.yml` floats again instead of being held
+  at 24.21.0, and the required CI cells run a Node that has the fix.
   **Constraints:** hard rule 5 — the test that trips this is correct and stays.
 
 - [x] **Shadow clone lifecycle**

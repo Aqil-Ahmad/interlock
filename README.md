@@ -102,10 +102,11 @@ repository's attributes read from a commit rather than a checkout — flags from
 git 2.40 and 2.41. macOS ships 2.39 at `/usr/bin/git`; install a newer one —
 Homebrew's, for instance — and put it first on `PATH`.
 
-On Linux, not Node 26.9.0. Its recursive directory watcher throws `EACCES` from
-inside Node's own event callback when a watched directory becomes unreadable —
-an unmounted volume, a permission change — and nothing outside Node can catch
-it, so the daemon stops. Node 26.8 and earlier are unaffected, as is macOS.
+On Linux, not Node 26.9.0 or later, nor 24.22.0 or later. Their recursive
+directory watcher throws `EACCES` from inside Node's own event callback when a
+watched directory becomes unreadable — an unmounted volume, a permission
+change — and nothing outside Node can catch it, so the daemon stops. Node 26.8
+and 24.21 and earlier are unaffected, as is macOS.
 
 ## License
 

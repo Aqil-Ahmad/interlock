@@ -51,8 +51,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 24 is the floor declared in `engines` and floats, since a floor is a
-        # claim about a line rather than a build. 26 is what development runs
+        # 24 is the floor declared in `engines`. It is held at 24.21.0, the last
+        # release whose recursive watcher survives a directory becoming
+        # unreadable; 24.22.0 on Linux does not (nodejs/node#66791), and a
+        # floating cell would fail every run on a bug that is Node's. Unpin it
+        # once that is fixed. 26 is what development runs
         # on and is read from `.node-version`, so a required check runs the
         # build a developer has rather than the newest one GitHub has.
         # macOS earns one cell rather than a full axis: it is where path
@@ -62,6 +65,8 @@ jobs:
         include:
           - os: ubuntu-latest
             node: '24'
+            # Named apart from `node` so the job keeps its name.
+            version: '24.21.0'
           - os: ubuntu-latest
             node: '26'
             pinned: true
@@ -85,7 +90,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: ${{ !matrix.pinned }}
         with:
-          node-version: ${{ matrix.node }}
+          node-version: ${{ matrix.version || matrix.node }}
           cache: pnpm
 
       - name: Install
