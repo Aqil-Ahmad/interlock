@@ -2,8 +2,6 @@
 
 **Early conflict detection and integration intelligence for parallel AI coding agents.**
 
-> Status: scaffold. Structure, contracts and docs are in place; implementations are landing.
-
 ## The problem
 
 Developers now run several AI coding agents at once, each in its own worktree or branch. Those parallel streams collide, and the collisions are discovered at merge time — after hours of agent work have already been spent. Around 28% of AI-agent PRs hit merge conflicts.
