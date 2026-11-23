@@ -4,6 +4,10 @@ Short entries: done, decided, blocked. Newest first.
 
 ---
 
+## 2026-11-23 — typecheck analyzer, blocked
+
+- **Blocked — the attribution engine is not in `dev`.** #114 needs `attribution.ts` from #94 (PR #98, still open); no analyzer, reconciliation or task rewrite is done until it lands.
+
 ## 2026-11-13 — the 24 cell held at 24.21.0
 
 - **Found — the regression is wider than 26.9.0.** nodejs/node#66791 reports the recursive watcher's `EACCES` on 24.22.0 and 26.12.0 as well; 24.21.0 and 26.8.2 survive. The floating 24 cell took 24.22.0, so `status.test.ts`'s unreadable-worktree test ended the run with an unhandled error on `dev` and on every branch cut from it. The 26 cells read `.node-version` (26.4.0) and were never exposed.
