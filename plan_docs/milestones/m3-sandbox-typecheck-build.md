@@ -420,9 +420,46 @@ _which branch caused which half_ of each one.
       **Done when:** a merge that typechecks but fails to build produces a Finding with the build output as evidence, redacted.
 
 - [ ] **Infra failure handling**
-      **Files:** `packages/core/src/analyzers/analyzer.ts`
-      **What:** Docker down, image missing, toolchain unknown, timeout, dependencies unavailable because the lockfile changed.
-      **Done when:** each produces `infra-failure` and is never shown to a user as a conflict. An analyzer that cannot run must not report clean.
+      **Files:** `packages/core/src/analyzers/analyzer.ts`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/scheduler/index.ts`, `packages/daemon/src/check.ts`, `packages/cli/src/commands/check.ts`, `packages/cli/src/commands/status.ts`, `packages/cli/src/render.ts`, `docs/architecture.md`, `plan_docs/log.md`
+      **What:** the pipeline enforcement of the rule that an analyzer that cannot run returns `infra-failure`, an infra failure is never shown as a conflict, and an analyzer that cannot run must never report clean. Handle Docker down (`SANDBOX_UNAVAILABLE`), missing container image, unsupported toolchain (`TOOLCHAIN_UNSUPPORTED`), timeout, and dependencies unavailable (clean merge with null slot for an analyzer needing one).
+
+  Today the rule is honoured where it was written (textual analyzer, typecheck registry outcomes, baseline differ unavailable), but the pipeline around analyzers does not enforce it. Make it a property of the pipeline, not a convention each analyzer has to remember.
+
+  **Done when:**
+  - _Named failures are `infra-failure`, with a remedy, and never a Finding:_
+    Docker down/unreachable (`SANDBOX_UNAVAILABLE`), sandbox image missing (`SANDBOX_UNAVAILABLE`), toolchain unknown (`TOOLCHAIN_UNSUPPORTED`), and dependencies unavailable (a clean merge whose `slot` is null because its dependency files differ from the installed tree, for an analyzer requiring a slot).
+    Each has a test driving it through `runPipeline`, asserting no Finding is written, no open Finding is resolved, and the run is recorded `failed` with component and redacted diagnostic.
+  - _A thrown infrastructure error is an infra failure:_
+    An analyzer that throws an `InterlockError` with `infra: true` from `analyze` is recorded as `infra-failure` for that analyzer, identical to one that returned it. A throw that is not infrastructure (a bug) still fails the run loudly and is never turned into `infra-failure` or `clean`.
+  - _A timeout never reads as clean:_
+    A `timeout` verdict is neither cached nor treated as having judged the content. The pair is not marked analysed in `analysedAt` for that content, ensuring it is retried rather than left looking finished, and nothing a user sees calls it clean.
+  - _What the user sees:_
+    `interlock check A B` and `interlock status` report a pair whose last run could not judge it as "could not check" with the reason and remedy — never as clean, never as a conflict.
+  - _Retries:_
+    An infra failure backs off and retries via `land`; when the failure clears (e.g. Docker becomes available), the retry produces a real verdict without any branch moving.
+  - _Slot contract enforced by pipeline:_
+    Analyzers declare whether they need a slot (`needsSlot`). A test analyzer returning `clean` with a null slot on a clean merge for a kind that needs one is intercepted by the pipeline as `infra-failure`, rather than trusted.
+  - _Finding preservation:_
+    An open Finding from an earlier run followed by an infra failure stays open, neither resolved nor duplicated.
+
+  **Edge cases and the tests they need:**
+  - Docker down simulated via injected runner or unreachable host, never stopping developer Docker.
+  - Container image missing reported as `SANDBOX_UNAVAILABLE`.
+  - Unknown toolchain reported as `TOOLCHAIN_UNSUPPORTED`.
+  - Clean merge with null slot when analyzer has `needsSlot: true`.
+  - Analyzer throwing `InterlockError` with `infra: true` vs unexpected error.
+  - Timeout outcome does not populate `analysedAt`, allowing re-run.
+  - Existing open findings preserved across failure and retry.
+  - Cleared failure produces real verdict on retry without branch movement.
+
+  **Failure modes:** an unrun check reporting clean (silent false negative); an infra failure recorded as a Finding (false positive); a hung container leaving the pipeline wedged; a timeout cached as a completed verdict.
+
+  **Constraints:**
+  - When unsure, say nothing — and nothing is not clean.
+  - Environmental failures are never Findings (CLAUDE.md).
+  - Models are wire formats: no unmigrated schema additions.
+  - Redaction: diagnostics carry paths and tool output, redacted before storage or display.
+  - Hard rule 5: no test weakened to make room.
 
 ## Deferred — measure before building
 
