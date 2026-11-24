@@ -520,7 +520,9 @@ describe.runIf(status.blocker === null)('sandbox runner: in Docker', () => {
       const error = await rejection(
         runner({ config: config({ memoryLimitMb: 96 }) }).run({
           tree: makeTree(),
-          argv: node('const a = []; for (;;) a.push(Buffer.alloc(1 << 20, 1));'),
+          argv: node(
+            'const a = []; for (;;) { try { a.push(Buffer.alloc(64 * 1024, 1)); } catch { a.push(Buffer.alloc(4096, 1)); } }',
+          ),
         }),
       );
       expect(error.code).toBe('SANDBOX_LIMIT');
