@@ -419,7 +419,7 @@ _which branch caused which half_ of each one.
       **What:** the same three steps for the project's build command.
       **Done when:** a merge that typechecks but fails to build produces a Finding with the build output as evidence, redacted.
 
-- [ ] **Infra failure handling**
+- [x] **Infra failure handling**
       **Files:** `packages/core/src/analyzers/analyzer.ts`, `packages/daemon/src/scheduler/run-pipeline.ts`, `packages/daemon/src/scheduler/index.ts`, `packages/daemon/src/check.ts`, `packages/cli/src/commands/check.ts`, `packages/cli/src/commands/status.ts`, `packages/cli/src/render.ts`, `docs/architecture.md`, `plan_docs/log.md`
       **What:** the pipeline enforcement of the rule that an analyzer that cannot run returns `infra-failure`, an infra failure is never shown as a conflict, and an analyzer that cannot run must never report clean. Handle Docker down (`SANDBOX_UNAVAILABLE`), missing container image, unsupported toolchain (`TOOLCHAIN_UNSUPPORTED`), timeout, and dependencies unavailable (clean merge with null slot for an analyzer needing one).
 

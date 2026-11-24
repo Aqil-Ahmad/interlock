@@ -1193,7 +1193,10 @@ describe('run pipeline', () => {
             ),
           ),
       });
-      const result = await run(new AbortController().signal, using([textualAnalyzer, imageMissing]));
+      const result = await run(
+        new AbortController().signal,
+        using([textualAnalyzer, imageMissing]),
+      );
 
       expect(result).toMatchObject({
         kind: 'infra-failure',

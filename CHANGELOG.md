@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `interlock check` now exits 69 ("service unavailable") when an analyzer could not run — Docker down, container image missing, unsupported toolchain, or the sandbox slot unavailable — instead of exiting 70. It never exits as if the pair is clean when it could not check; existing open findings are left untouched and the pair is retried.
+
 - The remedies `interlock status`, `check` and `dismiss` print when no daemon is reachable now name `interlock daemon start` rather than `interlockd`.
 - The default sandbox image, `sandbox.image`, is pinned by digest — `node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392` — rather than named by a tag its publisher can move. Interlock never pulls it: pull it once with `docker pull` and the same reference. A `sandbox.image` set in `config.json` is used as given; pin it by digest too.
 - `interlock check` quotes each excerpt it prints as untrusted data: inside `<<<INTERLOCK_DATA` … `INTERLOCK_DATA>>>` delimiters, under a line saying it is data and not instructions, with any line shaped like an instruction to the reader marked `[neutralised instruction-like line]`. Agents run `check` as a gate and read what it prints, and an excerpt is another branch's code. `--json` keeps excerpts as they are. The same containment now finds an instruction written in a comment — after `//`, `#`, `/*`, `*`, `--`, `<!--` or `;`, at the start of a line or after code — and one disguised in full-width letters or broken up by zero-width characters, and shows bidi controls and Unicode tag characters as `\u{…}` escapes rather than passing them to the reader.
