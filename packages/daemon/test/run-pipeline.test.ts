@@ -14,7 +14,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { CLEAN, createGitRunner, infraFailure, textualAnalyzer } from '@interlock/core';
 import type { Analyzer, AnalyzerContext, GitResult, GitRunner, UserRepo } from '@interlock/core';
-import { createLogger, makePairKey, silentLogger, ulid } from '@interlock/shared';
+import { createLogger, InterlockError, makePairKey, silentLogger, ulid } from '@interlock/shared';
 import type {
   BranchRef,
   BranchRefId,
@@ -1155,6 +1155,151 @@ describe('run pipeline', () => {
         component: 'analyzer:stub',
         message: 'the stub analyzer could not run',
       });
+    });
+
+    it('records Docker down as infra-failure without Findings or resolving existing ones', async () => {
+      const dockerDown = stub({
+        analyze: () =>
+          Promise.reject(
+            new InterlockError('SANDBOX_UNAVAILABLE', 'Docker daemon is not reachable', {
+              remedy: 'Start Docker.',
+              infra: true,
+            }),
+          ),
+      });
+      const result = await run(new AbortController().signal, using([textualAnalyzer, dockerDown]));
+
+      expect(result).toEqual({
+        kind: 'infra-failure',
+        component: 'analyzer:stub',
+        message: 'Docker daemon is not reachable',
+      });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
+      expect(await store.listOpenFindings((await repo()).id)).toEqual([]);
+    });
+
+    it('records a missing sandbox image as infra-failure', async () => {
+      const imageMissing = stub({
+        analyze: () =>
+          Promise.reject(
+            new InterlockError(
+              'SANDBOX_UNAVAILABLE',
+              'no such image: ghcr.io/interlock-ai/sandbox:pinned',
+              {
+                remedy: 'Pull the container image.',
+                infra: true,
+              },
+            ),
+          ),
+      });
+      const result = await run(new AbortController().signal, using([textualAnalyzer, imageMissing]));
+
+      expect(result).toMatchObject({
+        kind: 'infra-failure',
+        component: 'analyzer:stub',
+        message: expect.stringContaining('no such image') as unknown,
+      });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
+    });
+
+    it('records an unsupported toolchain as infra-failure', async () => {
+      const unsupported = stub({
+        analyze: () =>
+          Promise.reject(
+            new InterlockError('TOOLCHAIN_UNSUPPORTED', 'toolchain bun is not supported', {
+              remedy: 'Use node or pnpm.',
+              infra: true,
+            }),
+          ),
+      });
+      const result = await run(new AbortController().signal, using([textualAnalyzer, unsupported]));
+
+      expect(result).toMatchObject({
+        kind: 'infra-failure',
+        component: 'analyzer:stub',
+        message: 'toolchain bun is not supported',
+      });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
+    });
+
+    it('fails with infra-failure when an analyzer needs a slot but slot is null on clean merge', async () => {
+      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
+      writeFileSync(join(base, 'b', 'other.ts'), lines('changed'));
+      await observe();
+
+      const slotNeeding = stub({
+        needsSlot: true,
+        analyze: () => Promise.resolve(CLEAN),
+      });
+      const result = await run(new AbortController().signal, using([slotNeeding]));
+
+      expect(result).toMatchObject({
+        kind: 'infra-failure',
+        component: 'analyzer:stub',
+        message: expect.stringContaining('Dependencies unavailable') as unknown,
+      });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
+      expect(slotNeeding.calls).toHaveLength(0);
+    });
+
+    it('fails the run loudly on a bug and never converts it into infra-failure or clean', async () => {
+      const buggy = stub({
+        analyze: () => Promise.reject(new TypeError('programmer error')),
+      });
+      await expect(
+        run(new AbortController().signal, using([textualAnalyzer, buggy])),
+      ).rejects.toThrow('programmer error');
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
+    });
+
+    it('records a timeout as infra-failure, publishes timeout event and never treats it as clean', async () => {
+      const timedOut = stub({
+        analyze: () =>
+          Promise.resolve({
+            verdict: 'timeout',
+            findings: [],
+            diagnostic: 'timed out after 3000ms',
+          }),
+      });
+      const result = await run(new AbortController().signal, using([textualAnalyzer, timedOut]));
+
+      expect(result).toEqual({
+        kind: 'infra-failure',
+        component: 'analyzer:stub',
+        message: 'timed out after 3000ms',
+      });
+      const started = published('run.started').at(-1)!.payload as { runId: string };
+      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
+      const completedEvent = published('run.analyzer-completed').find(
+        (e) => (e.payload as { analyzer: string }).analyzer === 'typecheck',
+      );
+      expect(completedEvent?.payload).toMatchObject({ verdict: 'timeout' });
+    });
+
+    it('preserves an open Finding from an earlier run across an infra failure', async () => {
+      await run(new AbortController().signal, using([textualAnalyzer]));
+      const openBefore = await store.listOpenFindings((await repo()).id);
+      expect(openBefore).toHaveLength(1);
+
+      const failing = stub({
+        analyze: () => Promise.resolve(infraFailure('transient sandbox down')),
+      });
+      lastKey = null;
+      const secondResult = await run(
+        new AbortController().signal,
+        using([textualAnalyzer, failing]),
+      );
+      expect(secondResult).toMatchObject({ kind: 'infra-failure' });
+
+      const openAfter = await store.listOpenFindings((await repo()).id);
+      expect(openAfter).toHaveLength(1);
+      expect(openAfter[0]!.id).toBe(openBefore[0]!.id);
+      expect(openAfter[0]!.status).toBe('open');
     });
 
     it('records an analyzer that does not apply as clean, without running it', async () => {
