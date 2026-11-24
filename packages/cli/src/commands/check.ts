@@ -186,6 +186,7 @@ function exitFor(error: unknown): number {
   if (!isInterlockError(error)) return EXIT_SOFTWARE;
   switch (error.code) {
     case 'DAEMON_UNREACHABLE':
+    case 'ANALYZER_INFRA_FAILURE':
       return EXIT_UNAVAILABLE;
     case 'CONFIG_INVALID':
     case 'REPO_NOT_FOUND':

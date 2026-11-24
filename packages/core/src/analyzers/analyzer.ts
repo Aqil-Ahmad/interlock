@@ -40,6 +40,14 @@ export interface Analyzer {
   readonly version: number;
 
   /**
+   * Whether this analyzer requires the merged tree checked out on disk in a
+   * pool slot (`context.slot`). When true, the pipeline will never trust a
+   * `clean` outcome if `context.slot` is null on a clean merge, returning
+   * `infra-failure` instead.
+   */
+  readonly needsSlot?: boolean;
+
+  /**
    * Cheap pre-check: can this analyzer produce anything useful for this run?
    * Skips, for example, the typechecker when no source file changed.
    */

@@ -1,6 +1,7 @@
 import {
   ANALYZER_PIPELINE,
   CLEAN,
+  infraFailure,
   captureDirtyState,
   commitSnapshotInShadow,
   assertObjectId,
@@ -27,6 +28,7 @@ import {
   InterlockError,
   isInterlockError,
   makePairKey,
+  redact,
   silentLogger,
   ulid,
 } from '@interlock/shared';
@@ -703,9 +705,36 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
         const startedAt = Date.now();
         // An analyzer that does not apply has nothing to find in this merge —
         // a clean merge has no textual conflict — which is a verdict, not a gap.
-        const outcome: AnalyzerOutcome = analyzer.appliesTo(context)
-          ? await analyzer.analyze(context)
-          : CLEAN;
+        let outcome: AnalyzerOutcome;
+        try {
+          if (analyzer.needsSlot && merged.clean && context.slot === null) {
+            outcome = infraFailure(
+              'Dependencies unavailable: the merged tree needs a pool slot but dependencies differ from the installed tree',
+            );
+          } else if (analyzer.appliesTo(context)) {
+            outcome = await analyzer.analyze(context);
+            // An analyzer that needs a slot cannot judge a clean merge without one:
+            // a buggy or stub analyzer returning clean must never be trusted.
+            if (
+              analyzer.needsSlot &&
+              merged.clean &&
+              context.slot === null &&
+              outcome.verdict === 'clean'
+            ) {
+              outcome = infraFailure(
+                'Dependencies unavailable: the merged tree needs a pool slot but dependencies differ from the installed tree',
+              );
+            }
+          } else {
+            outcome = CLEAN;
+          }
+        } catch (error) {
+          if (isInterlockError(error) && error.infra) {
+            outcome = infraFailure(redact(error.message));
+          } else {
+            throw error;
+          }
+        }
         const durationMs = Date.now() - startedAt;
         const event = await bus.publish(
           {
@@ -719,12 +748,16 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
           },
           { causedBy: mergedEvent },
         );
-        if (outcome.verdict === 'infra-failure') {
+        if (outcome.verdict === 'infra-failure' || outcome.verdict === 'timeout') {
           await finish('failed', { mergeOutcome });
           return {
             kind: 'infra-failure',
             component: `analyzer:${analyzer.name}`,
-            message: outcome.diagnostic ?? `the ${analyzer.name} analyzer could not run`,
+            message:
+              outcome.diagnostic ??
+              (outcome.verdict === 'timeout'
+                ? `the ${analyzer.name} analyzer timed out`
+                : `the ${analyzer.name} analyzer could not run`),
           };
         }
         ran.push({ analyzer, outcome, durationMs, event });

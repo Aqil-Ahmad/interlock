@@ -14,6 +14,7 @@ export const textualAnalyzer: Analyzer = {
   kind: 'textual',
   name: 'textual',
   version: 1,
+  needsSlot: false,
 
   appliesTo: (context: AnalyzerContext) => !context.merged.clean,
 
