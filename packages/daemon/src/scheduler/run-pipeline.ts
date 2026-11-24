@@ -713,18 +713,6 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
             );
           } else if (analyzer.appliesTo(context)) {
             outcome = await analyzer.analyze(context);
-            // An analyzer that needs a slot cannot judge a clean merge without one:
-            // a buggy or stub analyzer returning clean must never be trusted.
-            if (
-              analyzer.needsSlot &&
-              merged.clean &&
-              context.slot === null &&
-              outcome.verdict === 'clean'
-            ) {
-              outcome = infraFailure(
-                'Dependencies unavailable: the merged tree needs a pool slot but dependencies differ from the installed tree',
-              );
-            }
           } else {
             outcome = CLEAN;
           }

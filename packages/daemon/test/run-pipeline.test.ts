@@ -1291,6 +1291,17 @@ describe('run pipeline', () => {
       expect(completedEvent?.payload).toMatchObject({ verdict: 'timeout' });
     });
 
+    it('names the analyzer that timed out when it has no diagnostic', async () => {
+      const timedOut = stub({
+        analyze: () => Promise.resolve({ verdict: 'timeout', findings: [] }),
+      });
+      expect(await run(new AbortController().signal, using([timedOut]))).toEqual({
+        kind: 'infra-failure',
+        component: 'analyzer:stub',
+        message: 'the stub analyzer timed out',
+      });
+    });
+
     it('preserves an open Finding from an earlier run across an infra failure', async () => {
       await run(new AbortController().signal, using([textualAnalyzer]));
       const openBefore = await store.listOpenFindings((await repo()).id);
