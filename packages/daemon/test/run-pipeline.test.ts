@@ -1229,8 +1229,11 @@ describe('run pipeline', () => {
     });
 
     it('fails with infra-failure when an analyzer needs a slot but slot is null on clean merge', async () => {
-      writeFileSync(join(base, 'a', 'total.ts'), body('1'));
-      writeFileSync(join(base, 'b', 'other.ts'), lines('changed'));
+      for (const side of ['a', 'b']) {
+        mkdirSync(join(base, side, 'lib'), { recursive: true });
+        writeFileSync(join(base, side, 'lib', `${side}.ts`), lines(side));
+        writeFileSync(join(base, side, 'total.ts'), body('items.length'));
+      }
       await observe();
 
       const slotNeeding = stub({
@@ -1247,6 +1250,10 @@ describe('run pipeline', () => {
       const started = published('run.started').at(-1)!.payload as { runId: string };
       expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
       expect(slotNeeding.calls).toHaveLength(0);
+
+      for (const side of ['a', 'b']) {
+        rmSync(join(base, side, 'lib'), { recursive: true, force: true });
+      }
     });
 
     it('fails the run loudly on a bug and never converts it into infra-failure or clean', async () => {
