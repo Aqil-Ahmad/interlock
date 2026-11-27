@@ -681,6 +681,44 @@ describe('scheduler', () => {
       expect(published('infra.failure')[0]!.causedBy).toBe(first!.id);
     });
 
+    it('says which pairs could not be judged and why, until a retry judges them', async () => {
+      make();
+      const [x, y, z] = [branch(), branch(), branch()];
+      plans.set(x, { candidates: [candidate(x, y, 'file'), candidate(x, z, 'file')], declined: 0 });
+      const token = `ghp_${'a'.repeat(36)}`;
+      answer = () => ({
+        kind: 'infra-failure',
+        component: 'analyzer:typecheck',
+        message: `SANDBOX_UNAVAILABLE: pull refused for ${token}`,
+      });
+      expect(scheduler.analysis(repoId)).toEqual({ failing: null });
+
+      await changed(x);
+      clock.advance(2_000);
+      await settle();
+
+      const failing = scheduler.analysis(repoId).failing;
+      expect(failing).toMatchObject({
+        pairs: 2,
+        failures: 1,
+        since: new Date(clock.now()).toISOString(),
+        retryAt: new Date(clock.now() + 5_000).toISOString(),
+        component: 'analyzer:typecheck',
+      });
+      // Printed by `interlock status`, so a credential in it never is.
+      expect(failing!.reason).not.toContain(token);
+      expect(failing!.reason).toContain('SANDBOX_UNAVAILABLE');
+      expect(scheduler.analysis(ulid<RepoId>())).toEqual({ failing: null });
+
+      // The environment comes back; no branch moves. The retry judges the pairs.
+      const before = scheduler.stats.analysed;
+      answer = (request) => analysed(request, 'judged', true);
+      clock.advance(5_000);
+      await settle();
+      expect(scheduler.stats.analysed).toBe(before + 2);
+      expect(scheduler.analysis(repoId)).toEqual({ failing: null });
+    });
+
     it('caps the backoff', async () => {
       make();
       const [x, y] = [branch(), branch()];

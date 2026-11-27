@@ -214,6 +214,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         checks: () => checks,
         dismissals: createDismissals({ store, bus, logger: options.logger }),
         collections: (repoId) => shadows.state(repoId),
+        analysis: (repoId) => scheduler?.analysis(repoId) ?? { failing: null },
         logger: options.logger,
       });
       const bound = await api.start();

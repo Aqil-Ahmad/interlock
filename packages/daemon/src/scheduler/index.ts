@@ -1,5 +1,5 @@
 import { DEFAULT_POOL_SIZE } from '@interlock/core';
-import { InterlockError, isInterlockError } from '@interlock/shared';
+import { InterlockError, isInterlockError, redact } from '@interlock/shared';
 import type {
   BranchRefId,
   EventId,
@@ -85,6 +85,29 @@ export type PairRunResult =
   /** An analyzer could not run. Never a Finding; backed off like any infrastructure. */
   | { readonly kind: 'infra-failure'; readonly component: string; readonly message: string };
 
+/** Whether a repository's pairs are being judged; `failing` is null when nothing is waiting out a failure. */
+export interface AnalysisState {
+  readonly failing: AnalysisFailure | null;
+}
+
+/**
+ * Pairs whose newest run could not judge them — an analyzer that could not
+ * run, a merge the environment stopped — each backing off before it is run
+ * again. None of them is clean and none is a conflict: nothing was decided.
+ */
+export interface AnalysisFailure {
+  readonly pairs: number;
+  /** The longest streak among them: failures in a row. */
+  readonly failures: number;
+  /** When the oldest of those streaks began. */
+  readonly since: string;
+  /** The soonest retry. */
+  readonly retryAt: string;
+  /** What failed most recently, and why, redacted. */
+  readonly component: string;
+  readonly reason: string;
+}
+
 /** What one run of a checked pair came to: a result, or the error it threw. */
 export type CheckOutcome =
   | { readonly kind: 'landed'; readonly result: PairRunResult }
@@ -152,6 +175,12 @@ export interface Scheduler {
    * person waiting is the reason it exists. Rejects once the scheduler stops.
    */
   check(candidate: PairCandidate): Promise<CheckOutcome>;
+  /**
+   * Whether a repository's pairs are being judged, read from the backoffs this
+   * scheduler holds: live state, so it is what is true now, and gone with the
+   * process, as the backoffs are.
+   */
+  analysis(repoId: RepoId): AnalysisState;
   /** Resolves once nothing is running and nothing queued can start yet. */
   idle(): Promise<void>;
   readonly queueDepth: number;
@@ -239,8 +268,13 @@ interface HotPair {
 }
 
 interface Backoff {
+  readonly repoId: RepoId;
   failures: number;
   until: number;
+  readonly since: number;
+  at: number;
+  component: string;
+  reason: string;
 }
 
 export function createScheduler(options: SchedulerOptions): Scheduler {
@@ -561,10 +595,23 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
   ): Promise<void> => {
     counts.failures += 1;
     const key = candidate.pair.key;
-    const state = backoff.get(key) ?? { failures: 0, until: 0 };
+    const now = clock.now();
+    const state = backoff.get(key) ?? {
+      repoId: candidate.pair.repoId,
+      failures: 0,
+      until: 0,
+      since: now,
+      at: now,
+      component,
+      reason: '',
+    };
     state.failures += 1;
-    state.until =
-      clock.now() + Math.min(BACKOFF_BASE_MS * 2 ** (state.failures - 1), BACKOFF_MAX_MS);
+    state.at = now;
+    state.component = component;
+    // Shown by `interlock status`: a failure's message can quote a remote URL
+    // and its credentials.
+    state.reason = redact(message);
+    state.until = now + Math.min(BACKOFF_BASE_MS * 2 ** (state.failures - 1), BACKOFF_MAX_MS);
     backoff.set(key, state);
     staleRetries.delete(key);
     // Once per streak: an environment that is down stays down across retries,
@@ -731,6 +778,22 @@ export function createScheduler(options: SchedulerOptions): Scheduler {
       if (!(await enqueue(candidate, 'manual', null, waiter))) throw stopping();
       pump();
       return outcome;
+    },
+
+    analysis(repoId: RepoId): AnalysisState {
+      const failing = [...backoff.values()].filter((state) => state.repoId === repoId);
+      if (failing.length === 0) return { failing: null };
+      const newest = failing.reduce((one, two) => (two.at > one.at ? two : one));
+      return {
+        failing: {
+          pairs: failing.length,
+          failures: Math.max(...failing.map((state) => state.failures)),
+          since: new Date(Math.min(...failing.map((state) => state.since))).toISOString(),
+          retryAt: new Date(Math.min(...failing.map((state) => state.until))).toISOString(),
+          component: newest.component,
+          reason: newest.reason,
+        },
+      };
     },
 
     idle,

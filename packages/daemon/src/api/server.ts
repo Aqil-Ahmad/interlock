@@ -9,6 +9,7 @@ import { parseCheckRequest } from '../check.js';
 import type { Checks } from '../check.js';
 import { parseDismissRequest, parseFindingId } from '../dismiss.js';
 import type { Dismissals } from '../dismiss.js';
+import type { AnalysisState } from '../scheduler/index.js';
 import type { CollectionState } from '../shadows.js';
 import type { Store } from '../store/index.js';
 import { bearerToken, ensureToken, tokenMatches } from './token.js';
@@ -57,6 +58,12 @@ export interface ApiOptions {
    * in memory, read synchronously, so the answer needs no lock.
    */
   readonly collections: (repoId: RepoId) => CollectionState;
+  /**
+   * Whether a repository's pairs are being judged: the scheduler's backoffs,
+   * read synchronously. Nothing has failed before the scheduler starts, which
+   * is after the listener.
+   */
+  readonly analysis: (repoId: RepoId) => AnalysisState;
   readonly logger: Logger;
 }
 
@@ -264,7 +271,12 @@ export function createApiServer(options: ApiOptions): ApiServer {
 
     if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'repos') {
       const [, , id, tail] = segments;
-      if (tail === 'branches' || tail === 'sessions' || tail === 'collection') {
+      if (
+        tail === 'branches' ||
+        tail === 'sessions' ||
+        tail === 'collection' ||
+        tail === 'analysis'
+      ) {
         // Checked rather than assumed: `listBranchRefs` answers an empty list
         // for a repository that does not exist, which reads as "no branches"
         // instead of "no such repository".
@@ -279,6 +291,10 @@ export function createApiServer(options: ApiOptions): ApiServer {
           send(response, 200, { branches: await store.listBranchRefs(id as RepoId) });
         } else if (tail === 'collection') {
           send(response, 200, { collection: options.collections(id as RepoId) });
+        } else if (tail === 'analysis') {
+          send(response, 200, {
+            analysis: options.analysis(id as RepoId),
+          });
         } else {
           send(response, 200, { sessions: await sessions.listLive(id as RepoId) });
         }

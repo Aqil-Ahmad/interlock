@@ -36,6 +36,7 @@ import { EventBus } from '../src/bus/index.js';
 import { createSessionRegistry } from '../src/hooks/index.js';
 import type { SessionRegistry } from '../src/hooks/index.js';
 import { createShadowCollector, createShadowRegistry } from '../src/shadows.js';
+import type { AnalysisState } from '../src/scheduler/index.js';
 import type { CollectionState, ShadowRegistry } from '../src/shadows.js';
 import { openStore } from '../src/store/index.js';
 import type { Store } from '../src/store/index.js';
@@ -54,6 +55,7 @@ const ROUTES = [
   '/api/repos',
   '/api/repos/x/branches',
   '/api/repos/x/collection',
+  '/api/repos/x/analysis',
   '/api/repos/x/check',
   '/api/budget',
   '/api/findings/x/dismiss',
@@ -76,6 +78,8 @@ describe('localhost API', () => {
   let dismiss: Dismissals['dismiss'];
   /** What the collection route reads: a registry of its own unless a test stands one in. */
   let collections: (repoId: RepoId) => CollectionState;
+  /** What the analysis route reads: nothing failing unless a test stands a state in. */
+  let analysis: (repoId: RepoId) => AnalysisState;
 
   /**
    * Driven through `node:http` rather than `fetch`, because `Host` is a
@@ -165,6 +169,7 @@ describe('localhost API', () => {
     dismiss = (id, request) => real.dismiss(id, request);
     const registry = createShadowRegistry({ runner: createGitRunner(), dataDir });
     collections = (repoId) => registry.state(repoId);
+    analysis = () => ({ failing: null });
     checks = {
       run: (repoId, request, signal) => {
         asked.push({ repoId, request, signal });
@@ -186,6 +191,7 @@ describe('localhost API', () => {
       checks: () => checks,
       dismissals: { dismiss: (id, request) => dismiss(id, request) },
       collections: (repoId) => collections(repoId),
+      analysis: (repoId) => analysis(repoId),
       logger,
     });
     bound = await api.start();
@@ -646,6 +652,45 @@ describe('localhost API', () => {
       });
       expect(response.status).toBe(405);
       expect(response.headers.allow).toBe('GET');
+    });
+
+    describe('the analysis route', () => {
+      it('answers a repository with nothing failing as nothing failing', async () => {
+        const repoId = await seed('/tmp/example');
+        const response = await call(`/api/repos/${repoId}/analysis`, { token: bound.token });
+        expect(response.status).toBe(200);
+        expect(response.body).toStrictEqual({ analysis: { failing: null } });
+      });
+
+      it('serves what the scheduler holds for the repository in the path', async () => {
+        const repoId = await seed('/tmp/example');
+        const state: AnalysisState = {
+          failing: {
+            pairs: 2,
+            failures: 3,
+            since: '2026-11-27T10:00:00.000Z',
+            retryAt: '2026-11-27T10:05:00.000Z',
+            component: 'analyzer:typecheck',
+            reason: 'SANDBOX_UNAVAILABLE: Docker is not running (Start Docker.)',
+          },
+        };
+        const asked: RepoId[] = [];
+        analysis = (id) => {
+          asked.push(id);
+          return state;
+        };
+        const response = await call(`/api/repos/${repoId}/analysis`, { token: bound.token });
+        expect(response.body).toStrictEqual({ analysis: state });
+        expect(asked).toEqual([repoId]);
+      });
+
+      it('says a repository is missing rather than answering that nothing failed', async () => {
+        const response = await call(`/api/repos/${ulid<RepoId>()}/analysis`, {
+          token: bound.token,
+        });
+        expect(response.status).toBe(404);
+        expect(response.body).toMatchObject({ error: { code: 'REPO_NOT_FOUND' } });
+      });
     });
 
     describe('against a real collection', () => {

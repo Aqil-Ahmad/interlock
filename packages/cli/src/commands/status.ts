@@ -28,8 +28,8 @@ const USAGE = [
   'Usage: interlock status [options]',
   '',
   'Show in-flight branches, their dirty state and touched files, each',
-  "repository's shadow collection, and how many Findings were dismissed as",
-  'wrong over the last 24 hours and 7 days.',
+  "repository's shadow collection, the pairs it could not check and why, and",
+  'how many Findings were dismissed as wrong over the last 24 hours and 7 days.',
   '',
   'Options:',
   '  --json              Emit the same facts as JSON',
@@ -145,21 +145,37 @@ export async function runStatus(
     // budget is: a daemon from before the route answers 404 for every
     // repository, and the branch report does not depend on it.
     let collectionError: unknown = null;
+    let analysisError: unknown = null;
     const views: RepoView[] = await Promise.all(
       repos.map(async (repo) => {
-        const [branches, sessions, collection] = await Promise.all([
+        const [branches, sessions, collection, analysis] = await Promise.all([
           client.branches(repo.id),
           client.sessions(repo.id),
           client.collection(repo.id).catch((error: unknown) => {
             collectionError ??= error;
             return undefined;
           }),
+          client.analysis(repo.id).catch((error: unknown) => {
+            analysisError ??= error;
+            return undefined;
+          }),
         ]);
-        return { repo, branches, sessions, ...(collection === undefined ? {} : { collection }) };
+        return {
+          repo,
+          branches,
+          sessions,
+          ...(collection === undefined ? {} : { collection }),
+          ...(analysis === undefined ? {} : { analysis }),
+        };
       }),
     );
     if (collectionError !== null) {
       io.err(`Shadow collection state is unavailable: ${describeError(collectionError)}\n`);
+    }
+    // Said rather than dropped: left out silently, pairs that could not be
+    // checked would read as pairs that were.
+    if (analysisError !== null) {
+      io.err(`Which pairs could not be checked is unavailable: ${describeError(analysisError)}\n`);
     }
     io.out(
       options.json

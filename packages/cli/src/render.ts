@@ -7,7 +7,13 @@ import type {
   Repo,
   SpanEvidence,
 } from '@interlock/shared';
-import type { BudgetReport, BudgetWindow, CheckReport, CollectionState } from './client/index.js';
+import type {
+  AnalysisState,
+  BudgetReport,
+  BudgetWindow,
+  CheckReport,
+  CollectionState,
+} from './client/index.js';
 
 /**
  * Turning what the daemon reports into something a terminal can show.
@@ -131,6 +137,8 @@ export interface RepoView {
   readonly sessions: readonly AgentSession[];
   /** The shadow collection's live state; left out when the daemon could not say. */
   readonly collection?: CollectionState;
+  /** Whether the repository's pairs are being judged; left out when the daemon could not say. */
+  readonly analysis?: AnalysisState;
 }
 
 /** A duration as a person reads it: `450 ms`, `1.2 s`, `42 s`, `3 min 5 s`. */
@@ -140,6 +148,23 @@ export function durationText(ms: number): string {
   const seconds = Math.floor(ms / 1_000);
   if (seconds < 60) return `${String(seconds)} s`;
   return `${String(Math.floor(seconds / 60))} min ${String(seconds % 60)} s`;
+}
+
+/**
+ * Pairs the daemon could not judge, said as that and nothing else: a pair left
+ * out of the report would read as clean, and one shown beside the conflicts
+ * as one of them, when nothing was decided either way.
+ */
+function analysisLines(analysis: AnalysisState): string[] {
+  if (analysis.failing === null) return [];
+  const { pairs, failures, since, retryAt, component, reason } = analysis.failing;
+  const many = pairs === 1 ? 'pair' : 'pairs';
+  return [
+    // The reason is the daemon's account of a tool's error, which can quote a
+    // path the repository named.
+    `  warning: could not check ${String(pairs)} ${many} since ${utcMinute(since)} (${String(failures)} attempt${failures === 1 ? '' : 's'} in a row), next attempt ${utcMinute(retryAt)}: ${safeText(component)}: ${safeText(reason)}`,
+    `  not clean and not a conflict: nothing was decided about ${pairs === 1 ? 'it' : 'them'}`,
+  ];
 }
 
 /**
@@ -219,6 +244,7 @@ export function renderStatus(views: readonly RepoView[], options: RenderOptions 
   for (const [index, view] of views.entries()) {
     if (index > 0) lines.push('');
     lines.push(`${safeText(view.repo.rootPath)}  (default ${safeText(view.repo.defaultBranch)})`);
+    if (view.analysis !== undefined) lines.push(...analysisLines(view.analysis));
     if (view.collection !== undefined) lines.push(...collectionLines(view.collection, now));
     lines.push('');
 
@@ -285,6 +311,8 @@ export function renderJson(views: readonly RepoView[], budget?: BudgetReport): s
           defaultBranch: view.repo.defaultBranch,
           // Null when the daemon could not say, which is not "never collected".
           collection: view.collection ?? null,
+          // Null when the daemon could not say, which is not "nothing failing".
+          analysis: view.analysis ?? null,
           branches: view.branches.map((branch) => ({
             name: branch.name,
             ref: branch.ref,

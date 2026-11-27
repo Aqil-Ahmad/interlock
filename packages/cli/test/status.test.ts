@@ -539,6 +539,103 @@ describe('interlock status', () => {
       expect(JSON.parse(stdout())).toEqual({ repos: [] });
     });
 
+    describe('pairs it could not check', () => {
+      const repos = ['one', 'two'].map((id) => ({
+        id,
+        rootPath: `/work/${id}`,
+        defaultBranch: 'main',
+        shadowPath: `/s/${id}`,
+        config: {},
+        discoveredAt: 'now',
+        lastSeenAt: 'now',
+      }));
+      const empty = (id: string): Record<string, { status: number; body: unknown }> => ({
+        [`/api/repos/${id}/branches`]: { status: 200, body: { branches: [] } },
+        [`/api/repos/${id}/sessions`]: { status: 200, body: { sessions: [] } },
+      });
+      const base = {
+        '/api/health': { status: 200, body: { protocolVersion: 1 } },
+        '/api/repos': { status: 200, body: { repos } },
+        '/api/budget': BUDGET,
+        ...empty('one'),
+        ...empty('two'),
+      };
+
+      it('says which could not be checked and why, as neither clean nor a conflict', async () => {
+        const failing = {
+          failing: {
+            pairs: 2,
+            failures: 3,
+            since: '2026-11-27T10:00:00.000Z',
+            retryAt: '2026-11-27T10:05:00.000Z',
+            component: 'analyzer:typecheck',
+            // What a tool says can quote a path the repository named.
+            reason: 'SANDBOX_UNAVAILABLE: Docker is not running (Start Docker.)\u001b[2J',
+          },
+        };
+        await serve({
+          ...base,
+          '/api/repos/one/analysis': { status: 200, body: { analysis: { failing: null } } },
+          '/api/repos/two/analysis': { status: 200, body: { analysis: failing } },
+        });
+
+        expect(await status('--data-dir', dataDir)).toBe(0);
+        const [one, two] = stdout().split('/work/two');
+        expect(one).not.toContain('could not check');
+        expect(two).toContain(
+          'warning: could not check 2 pairs since 2026-11-27 10:00 UTC (3 attempts in a row), next attempt 2026-11-27 10:05 UTC: analyzer:typecheck: SANDBOX_UNAVAILABLE: Docker is not running (Start Docker.)',
+        );
+        expect(two).toContain('not clean and not a conflict: nothing was decided about them');
+        expect(stdout()).not.toContain('\u001b');
+
+        expect(await status('--data-dir', dataDir, '--json')).toBe(0);
+        const parsed = JSON.parse(stdout()) as { repos: { analysis: unknown }[] };
+        expect(parsed.repos.map((repo) => repo.analysis)).toStrictEqual([
+          { failing: null },
+          failing,
+        ]);
+      });
+
+      it('says once that it cannot tell, rather than leave the pairs looking checked', async () => {
+        await serve(base);
+
+        expect(await status('--data-dir', dataDir)).toBe(0);
+        expect(stdout()).toContain('/work/one');
+        expect(stdout()).not.toContain('could not check');
+        expect(stderr().match(/Which pairs could not be checked is unavailable/gu)).toHaveLength(1);
+
+        expect(await status('--data-dir', dataDir, '--json')).toBe(0);
+        const parsed = JSON.parse(stdout()) as { repos: { analysis: unknown }[] };
+        expect(parsed.repos.map((repo) => repo.analysis)).toStrictEqual([null, null]);
+      });
+
+      it.each([
+        ['a pair count of none', { pairs: 0 }],
+        ['no attempt', { failures: 0 }],
+        ['an instant that is not one', { retryAt: 'soon' }],
+        ['a reason that is not text', { reason: 7 }],
+      ])('refuses %s rather than print it', async (_name, change) => {
+        const failing = {
+          pairs: 1,
+          failures: 1,
+          since: '2026-11-27T10:00:00.000Z',
+          retryAt: '2026-11-27T10:05:00.000Z',
+          component: 'analyzer:typecheck',
+          reason: 'down',
+          ...change,
+        };
+        await serve({
+          ...base,
+          '/api/repos/one/analysis': { status: 200, body: { analysis: { failing } } },
+          '/api/repos/two/analysis': { status: 200, body: { analysis: { failing: null } } },
+        });
+
+        expect(await status('--data-dir', dataDir)).toBe(0);
+        expect(stderr()).toContain('malformed analysis state');
+        expect(stdout()).not.toContain('could not check');
+      });
+    });
+
     describe('its shadow collections', () => {
       const repos = ['one', 'two'].map((id) => ({
         id,

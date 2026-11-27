@@ -53,6 +53,8 @@ export interface DaemonClient {
   budget(): Promise<BudgetReport>;
   /** Where one repository's shadow collection is, what the last cost, and whether it is failing. */
   collection(repoId: Repo['id']): Promise<CollectionState>;
+  /** Whether one repository's pairs are being judged, or are waiting out a failure to run. */
+  analysis(repoId: Repo['id']): Promise<AnalysisState>;
 }
 
 /**
@@ -91,6 +93,28 @@ export interface CollectionFailure {
   readonly failures: number;
   /** When the next attempt is. */
   readonly retryAt: string;
+  readonly reason: string;
+}
+
+/**
+ * What `GET /api/repos/:id/analysis` answers: the scheduler's backoffs, live
+ * state the daemon holds in memory, so a daemon that restarted has nothing
+ * failing until a run fails again.
+ */
+export interface AnalysisState {
+  readonly failing: AnalysisFailure | null;
+}
+
+/** Pairs whose newest run could not judge them, each backing off before it runs again. */
+export interface AnalysisFailure {
+  readonly pairs: number;
+  /** The longest streak among them: failures in a row. */
+  readonly failures: number;
+  readonly since: string;
+  /** The soonest retry. */
+  readonly retryAt: string;
+  /** What failed most recently, and why: the daemon's words, already redacted. */
+  readonly component: string;
   readonly reason: string;
 }
 
@@ -293,6 +317,11 @@ export async function connectDaemon(dataDir: string): Promise<DaemonClient> {
       const encoded = encodeURIComponent(repoId);
       const path = `/api/repos/${encoded}/collection`;
       return parseCollection((await request<{ collection?: unknown }>(path)).collection, path);
+    },
+    async analysis(repoId: Repo['id']): Promise<AnalysisState> {
+      const encoded = encodeURIComponent(repoId);
+      const path = `/api/repos/${encoded}/analysis`;
+      return parseAnalysis((await request<{ analysis?: unknown }>(path)).analysis, path);
     },
   };
 }
@@ -513,4 +542,50 @@ async function failure(response: Response, path: string): Promise<InterlockError
     details: { path, status: response.status },
     ...(remedy === undefined ? {} : { remedy }),
   });
+}
+
+/**
+ * The analysis record, checked field by field, for the reason the collection
+ * is: its counts are printed and its instants parsed.
+ *
+ * @throws InterlockError `API_REQUEST_INVALID` naming the field that is wrong.
+ */
+export function parseAnalysis(value: unknown, path: string): AnalysisState {
+  const invalid = (field: string): InterlockError =>
+    new InterlockError('API_REQUEST_INVALID', 'The daemon sent a malformed analysis state', {
+      details: { path, field },
+      remedy: 'Restart the daemon from the same build as this command.',
+    });
+  const isRecord = (candidate: unknown): candidate is Record<string, unknown> =>
+    typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate);
+  // A failure is at least one pair and at least one attempt, or it is not one.
+  const atLeastOne = (candidate: unknown, field: string): number => {
+    if (typeof candidate !== 'number' || !Number.isInteger(candidate) || candidate < 1) {
+      throw invalid(field);
+    }
+    return candidate;
+  };
+  const instant = (candidate: unknown, field: string): string => {
+    if (typeof candidate !== 'string' || !ISO_INSTANT.test(candidate)) throw invalid(field);
+    return candidate;
+  };
+  const text = (candidate: unknown, field: string): string => {
+    if (typeof candidate !== 'string') throw invalid(field);
+    return candidate;
+  };
+
+  if (!isRecord(value)) throw invalid('analysis');
+  if (value.failing === null) return { failing: null };
+  if (!isRecord(value.failing)) throw invalid('failing');
+  const fields = value.failing;
+  return {
+    failing: {
+      pairs: atLeastOne(fields.pairs, 'failing.pairs'),
+      failures: atLeastOne(fields.failures, 'failing.failures'),
+      since: instant(fields.since, 'failing.since'),
+      retryAt: instant(fields.retryAt, 'failing.retryAt'),
+      component: text(fields.component, 'failing.component'),
+      reason: text(fields.reason, 'failing.reason'),
+    },
+  };
 }
