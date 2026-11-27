@@ -520,8 +520,12 @@ describe.runIf(status.blocker === null)('sandbox runner: in Docker', () => {
       const error = await rejection(
         runner({ config: config({ memoryLimitMb: 96 }) }).run({
           tree: makeTree(),
+          // An allocation the process is refused throws a `RangeError`, and an
+          // uncaught one exits 1 before the limit kills it: a run that ends, not
+          // one refused. Every allocation is caught, so the only way out is the
+          // limit.
           argv: node(
-            'const a = []; for (;;) { try { a.push(Buffer.alloc(64 * 1024, 1)); } catch { a.push(Buffer.alloc(4096, 1)); } }',
+            'const a = []; for (;;) { try { a.push(Buffer.alloc(64 * 1024, 1)); } catch { try { a.push(Buffer.alloc(4096, 1)); } catch {} } }',
           ),
         }),
       );
