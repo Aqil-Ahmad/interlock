@@ -2,6 +2,7 @@ import {
   ANALYZER_PIPELINE,
   CLEAN,
   infraFailure,
+  infraFailureFrom,
   captureDirtyState,
   commitSnapshotInShadow,
   assertObjectId,
@@ -164,6 +165,33 @@ interface Side extends Identified {
 
 interface Skip {
   readonly skip: 'unreadable' | 'unborn';
+}
+
+/**
+ * What one analyzer says about a run, with the pipeline's rules applied, so
+ * that no analyzer has to remember them.
+ *
+ * One that does not apply has nothing to find in this merge — a clean merge
+ * has no textual conflict — which is a verdict, not a gap; asked before the
+ * slot, so an analyzer that would not run anyway does not fail the run for a
+ * slot it never needed. One that needs a slot and has none on a clean merge
+ * cannot run, whatever it would answer. A thrown infrastructure error is the
+ * environment, and is answered as one returned; anything else thrown is a bug
+ * and stays loud.
+ */
+async function judge(analyzer: Analyzer, context: AnalyzerContext): Promise<AnalyzerOutcome> {
+  try {
+    if (!analyzer.appliesTo(context)) return CLEAN;
+    if (analyzer.needsSlot && context.merged.clean && context.slot === null) {
+      return infraFailure(
+        `${analyzer.name} needs the merged tree on disk, and the run has no pool slot for the pair (a pair whose dependency files differ from the installed tree gets none: install, then check again)`,
+      );
+    }
+    return await analyzer.analyze(context);
+  } catch (error) {
+    if (isInterlockError(error) && error.infra) return infraFailureFrom(error);
+    throw error;
+  }
 }
 
 export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
@@ -703,26 +731,7 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
           return { kind: 'superseded' };
         }
         const startedAt = Date.now();
-        // An analyzer that does not apply has nothing to find in this merge —
-        // a clean merge has no textual conflict — which is a verdict, not a gap.
-        let outcome: AnalyzerOutcome;
-        try {
-          if (analyzer.needsSlot && merged.clean && context.slot === null) {
-            outcome = infraFailure(
-              'Dependencies unavailable: the merged tree needs a pool slot but dependencies differ from the installed tree',
-            );
-          } else if (analyzer.appliesTo(context)) {
-            outcome = await analyzer.analyze(context);
-          } else {
-            outcome = CLEAN;
-          }
-        } catch (error) {
-          if (isInterlockError(error) && error.infra) {
-            outcome = infraFailure(redact(error.message));
-          } else {
-            throw error;
-          }
-        }
+        const outcome = await judge(analyzer, context);
         const durationMs = Date.now() - startedAt;
         const event = await bus.publish(
           {
@@ -736,16 +745,21 @@ export function createRunPipeline(options: RunPipelineOptions): RunPipeline {
           },
           { causedBy: mergedEvent },
         );
+        // A timeout judged nothing, as an infra failure judged nothing: either
+        // left in `ran` would complete the run, and a completed run marks its
+        // content analysed, so the pair would not be looked at again until a
+        // branch moved — an unrun check standing in for a clean one.
         if (outcome.verdict === 'infra-failure' || outcome.verdict === 'timeout') {
           await finish('failed', { mergeOutcome });
           return {
             kind: 'infra-failure',
             component: `analyzer:${analyzer.name}`,
-            message:
+            message: redact(
               outcome.diagnostic ??
-              (outcome.verdict === 'timeout'
-                ? `the ${analyzer.name} analyzer timed out`
-                : `the ${analyzer.name} analyzer could not run`),
+                (outcome.verdict === 'timeout'
+                  ? `the ${analyzer.name} analyzer timed out`
+                  : `the ${analyzer.name} analyzer could not run`),
+            ),
           };
         }
         ran.push({ analyzer, outcome, durationMs, event });

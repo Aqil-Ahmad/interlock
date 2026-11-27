@@ -996,6 +996,7 @@ describe('run pipeline', () => {
         kind: 'typecheck',
         name: 'stub',
         version: 1,
+        needsSlot: false,
         appliesTo: () => true,
         analyze: (context) => {
           calls.push(context);
@@ -1169,10 +1170,12 @@ describe('run pipeline', () => {
       });
       const result = await run(new AbortController().signal, using([textualAnalyzer, dockerDown]));
 
+      // The code a script matches on and the remedy a person acts on both
+      // reach the result.
       expect(result).toEqual({
         kind: 'infra-failure',
         component: 'analyzer:stub',
-        message: 'Docker daemon is not reachable',
+        message: 'SANDBOX_UNAVAILABLE: Docker daemon is not reachable (Start Docker.)',
       });
       const started = published('run.started').at(-1)!.payload as { runId: string };
       expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
@@ -1222,38 +1225,85 @@ describe('run pipeline', () => {
       expect(result).toMatchObject({
         kind: 'infra-failure',
         component: 'analyzer:stub',
-        message: 'toolchain bun is not supported',
+        message: 'TOOLCHAIN_UNSUPPORTED: toolchain bun is not supported (Use node or pnpm.)',
       });
       const started = published('run.started').at(-1)!.payload as { runId: string };
       expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
     });
 
-    it('fails with infra-failure when an analyzer needs a slot but slot is null on clean merge', async () => {
+    /** Run `inside` with the two sides editing different files, so the pair merges clean. */
+    const merging = async (inside: () => Promise<void>): Promise<void> => {
       for (const side of ['a', 'b']) {
         mkdirSync(join(base, side, 'lib'), { recursive: true });
         writeFileSync(join(base, side, 'lib', `${side}.ts`), lines(side));
         writeFileSync(join(base, side, 'total.ts'), body('items.length'));
       }
-      await observe();
-
-      const slotNeeding = stub({
-        needsSlot: true,
-        analyze: () => Promise.resolve(CLEAN),
-      });
-      const result = await run(new AbortController().signal, using([slotNeeding]));
-
-      expect(result).toMatchObject({
-        kind: 'infra-failure',
-        component: 'analyzer:stub',
-        message: expect.stringContaining('Dependencies unavailable') as unknown,
-      });
-      const started = published('run.started').at(-1)!.payload as { runId: string };
-      expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
-      expect(slotNeeding.calls).toHaveLength(0);
-
-      for (const side of ['a', 'b']) {
-        rmSync(join(base, side, 'lib'), { recursive: true, force: true });
+      try {
+        await observe();
+        await inside();
+      } finally {
+        for (const side of ['a', 'b'])
+          rmSync(join(base, side, 'lib'), { recursive: true, force: true });
       }
+    };
+
+    it('fails with infra-failure when an analyzer needs a slot but slot is null on clean merge', async () => {
+      await merging(async () => {
+        const slotNeeding = stub({
+          needsSlot: true,
+          analyze: () => Promise.resolve(CLEAN),
+        });
+        const result = await run(new AbortController().signal, using([slotNeeding]));
+
+        expect(result).toMatchObject({
+          kind: 'infra-failure',
+          component: 'analyzer:stub',
+          message: expect.stringContaining('no pool slot') as unknown,
+        });
+        const started = published('run.started').at(-1)!.payload as { runId: string };
+        expect(endOf(started.runId)).toMatchObject({ status: 'failed' });
+        // Never asked: whatever it would have said, it said it about nothing.
+        expect(slotNeeding.calls).toHaveLength(0);
+      });
+    });
+
+    it('does not fail a run for a slot an analyzer that does not apply never needed', async () => {
+      await merging(async () => {
+        const idle = stub({ needsSlot: true, appliesTo: () => false });
+        const result = await run(new AbortController().signal, using([textualAnalyzer, idle]));
+
+        expect(result).toMatchObject({ kind: 'analysed', clean: true });
+        expect(idle.calls).toHaveLength(0);
+        const verdicts = published('run.analyzer-completed').map(
+          (event) => (event.payload as { verdict: string }).verdict,
+        );
+        expect(verdicts).toEqual(['clean', 'clean']);
+      });
+    });
+
+    it('redacts a secret in what an infra failure says, thrown or returned', async () => {
+      const token = `ghp_${'a'.repeat(36)}`;
+      const thrown = stub({
+        analyze: () =>
+          Promise.reject(
+            new InterlockError('SANDBOX_UNAVAILABLE', `pull failed for ${token}`, {
+              remedy: `Log in again; the token ${token} was refused.`,
+              infra: true,
+            }),
+          ),
+      });
+      const first = await run(new AbortController().signal, using([textualAnalyzer, thrown]));
+      expect(first).toMatchObject({ kind: 'infra-failure' });
+      expect(JSON.stringify(first)).not.toContain(token);
+      expect(JSON.stringify(first)).toContain('[redacted]');
+
+      lastKey = null;
+      const returned = stub({
+        analyze: () => Promise.resolve(infraFailure(`pull failed for ${token}`)),
+      });
+      const second = await run(new AbortController().signal, using([textualAnalyzer, returned]));
+      expect(second).toMatchObject({ kind: 'infra-failure' });
+      expect(JSON.stringify(second)).not.toContain(token);
     });
 
     it('fails the run loudly on a bug and never converts it into infra-failure or clean', async () => {

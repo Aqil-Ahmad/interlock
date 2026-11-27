@@ -1,6 +1,6 @@
 import { isInterlockError } from '@interlock/shared';
 import { classifyTextualConflicts, MAX_FINDINGS_PER_RUN } from '../merge/conflict-classifier.js';
-import { CLEAN, infraFailure } from './analyzer.js';
+import { CLEAN, infraFailureFrom } from './analyzer.js';
 import type { Analyzer, AnalyzerContext, AnalyzerOutcome } from './analyzer.js';
 
 /**
@@ -37,11 +37,10 @@ export const textualAnalyzer: Analyzer = {
       // A git that failed, timed out or could not start is the environment,
       // and the pair is not "clean" for it. Anything else — a command the
       // runner refused, which only Interlock's own code builds — is a bug, and
-      // filing it as infrastructure would hide it. The code and message carry
-      // no paths; details, which do, stay out.
+      // filing it as infrastructure would hide it.
       if (!isInterlockError(error) || !error.infra) throw error;
       log.warn('textual classification could not read the merge', { code: error.code });
-      return infraFailure(`${error.code}: ${error.message}`);
+      return infraFailureFrom(error);
     }
 
     const { findings, dropped } = classified;
