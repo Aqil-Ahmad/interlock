@@ -253,11 +253,19 @@ function answerFor(outcome: CheckOutcome, a: BranchRef, b: BranchRef): void {
     case 'superseded':
       return;
     case 'infra-failure':
-      throw new InterlockError('ANALYZER_INFRA_FAILURE', 'The check could not run', {
-        details: { component: result.component, message: result.message },
-        remedy: 'This is the environment, not the pair. See the daemon log, and check again.',
-        infra: true,
-      });
+      // In the message, not only the details: the API carries a message and a
+      // remedy across, and the reason — start Docker, pull the image — is what
+      // the person waiting on the check needs. Already redacted by the pipeline.
+      throw new InterlockError(
+        'ANALYZER_INFRA_FAILURE',
+        `The check could not run: ${result.component}: ${result.message}`,
+        {
+          details: { component: result.component, message: result.message },
+          remedy:
+            'This is the environment, not the pair: nothing was decided about it, clean or not. Fix what the message names, and check again.',
+          infra: true,
+        },
+      );
     case 'skipped':
       switch (result.reason) {
         case 'unrelated':

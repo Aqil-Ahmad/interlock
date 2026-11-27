@@ -1,12 +1,14 @@
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import type { FSWatcher } from 'node:fs';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDaemon } from '@interlock/daemon';
 import type { Daemon } from '@interlock/daemon';
-import { createLogger, resolveConfig } from '@interlock/shared';
+import { createLogger, resolveConfig, runtimePath, tokenPath } from '@interlock/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runCheck } from '../src/commands/check.js';
 import type { CheckIo } from '../src/commands/check.js';
@@ -275,6 +277,71 @@ describe('interlock check', () => {
       // `patch` and `trunk` exist only in the inner repository.
       expect(await check('patch')).toBe(0);
       expect(stdout()).toContain('patch and trunk merge cleanly');
+    });
+  });
+
+  describe('when the daemon cannot judge the pair', () => {
+    let stand: Server | null = null;
+
+    afterEach(async () => {
+      const listener = stand;
+      stand = null;
+      if (listener !== null) await new Promise<void>((resolve) => listener.close(() => resolve()));
+    });
+
+    /**
+     * A listener standing in for a daemon whose analyzer could not run: a real
+     * one needs Docker down, or an image missing, to say this, and what is
+     * under test is what the command does with the answer.
+     */
+    it('exits 69 with what could not run and why, never 0 and never 1', async () => {
+      const repo = {
+        id: 'r',
+        rootPath: root,
+        defaultBranch: 'main',
+        shadowPath: '/s',
+        config: {},
+        discoveredAt: 'now',
+        lastSeenAt: 'now',
+      };
+      const routes: Record<string, { status: number; body: unknown }> = {
+        '/api/health': { status: 200, body: { protocolVersion: 1 } },
+        '/api/repos': { status: 200, body: { repos: [repo] } },
+        '/api/repos/r/branches': { status: 200, body: { branches: [] } },
+        '/api/repos/r/check': {
+          status: 503,
+          body: {
+            error: {
+              code: 'ANALYZER_INFRA_FAILURE',
+              message:
+                'The check could not run: analyzer:typecheck: SANDBOX_UNAVAILABLE: Docker is not running (Start Docker.)',
+              remedy: 'This is the environment, not the pair: nothing was decided about it.',
+            },
+          },
+        },
+      };
+      stand = createServer((request, response) => {
+        request.resume();
+        const answer = routes[(request.url ?? '/').split('?')[0] ?? '/'] ?? {
+          status: 404,
+          body: {},
+        };
+        response.writeHead(answer.status, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(answer.body));
+      });
+      const listener = stand;
+      await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', resolve));
+      const address = listener.address();
+      if (address === null || typeof address === 'string') throw new Error('no address');
+      mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+      writeFileSync(runtimePath(dataDir), JSON.stringify({ port: address.port }), { mode: 0o600 });
+      writeFileSync(tokenPath(dataDir), 'stand-in\n', { mode: 0o600 });
+
+      expect(await check('one', 'two')).toBe(69);
+      expect(stderr()).toContain('ANALYZER_INFRA_FAILURE');
+      expect(stderr()).toContain('Docker is not running (Start Docker.)');
+      expect(stderr()).toContain('nothing was decided');
+      expect(stdout()).toBe('');
     });
   });
 

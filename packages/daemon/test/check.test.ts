@@ -214,6 +214,25 @@ describe('a check', () => {
     await expect(ask(checks)).rejects.toMatchObject({ code, infra });
   });
 
+  it('says what could not run and why, in the message the API carries across', async () => {
+    const { checks } = harness([
+      {
+        kind: 'landed',
+        result: {
+          kind: 'infra-failure',
+          component: 'analyzer:typecheck',
+          message: 'SANDBOX_UNAVAILABLE: Docker is not running (Start Docker.)',
+        },
+      },
+    ]);
+    await expect(ask(checks)).rejects.toMatchObject({
+      code: 'ANALYZER_INFRA_FAILURE',
+      message:
+        'The check could not run: analyzer:typecheck: SANDBOX_UNAVAILABLE: Docker is not running (Start Docker.)',
+      remedy: expect.stringContaining('nothing was decided') as unknown,
+    });
+  });
+
   it('passes on what a run threw', async () => {
     const { checks } = harness([{ kind: 'failed', error: new Error('a bug') }]);
     await expect(ask(checks)).rejects.toThrow('a bug');
